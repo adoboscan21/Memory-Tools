@@ -4,8 +4,9 @@ import (
 	"context"
 	"log"
 	"memory-tools/internal/api"
-	"memory-tools/internal/persistence" // Updated to use binary persistence
-	"memory-tools/internal/store"
+	"memory-tools/internal/config"
+	"memory-tools/internal/persistence"
+	"memory-tools/internal/store" // Store package with new TTL features
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,24 +14,12 @@ import (
 	"time"
 )
 
-// Config holds application-wide configuration.
-type Config struct {
-	Port            string
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
-	ShutdownTimeout time.Duration
-	// New configurations for snapshot functionality.
-	SnapshotInterval time.Duration // How often to take snapshots (e.g., 5 * time.Minute)
-	EnableSnapshots  bool          // Whether scheduled snapshots are enabled.
-}
-
 func main() {
 	// Configure logging format to include date, time, and file/line number.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	// Application Configuration.
-	cfg := Config{
+	cfg := config.Config{
 		Port:            ":8080",
 		ReadTimeout:     5 * time.Second,   // Max time to read the request body.
 		WriteTimeout:    10 * time.Second,  // Max time to write the response.
@@ -39,6 +28,8 @@ func main() {
 		// Snapshot configuration:
 		SnapshotInterval: 5 * time.Minute, // Take a snapshot every 5 minutes.
 		EnableSnapshots:  true,            // Enable scheduled snapshots by default.
+		// TTL Cleaner configuration:
+		TtlCleanInterval: 1 * time.Minute, // Run TTL cleaner every 1 minute.
 	}
 
 	// 1. Initialize the in-memory data store.
@@ -51,7 +42,7 @@ func main() {
 	}
 
 	// 3. Create an instance of the API handlers, injecting the store dependency.
-	apiHandlers := api.NewHandlers(inMemStore)
+	apiHandlers := api.NewHandlers(inMemStore) // Handlers need to be updated to pass TTL
 
 	// 4. Create a new ServeMux for routing HTTP requests.
 	mux := http.NewServeMux()
@@ -74,7 +65,26 @@ func main() {
 	snapshotManager := persistence.NewSnapshotManager(inMemStore, cfg.SnapshotInterval, cfg.EnableSnapshots)
 	go snapshotManager.Start()
 
-	// 8. Start the HTTP server in a goroutine to not block the main thread.
+	// 8. Start the TTL cleaner goroutine.
+	// This goroutine will periodically remove expired items from the in-memory store.
+	ttlCleanStopChan := make(chan struct{}) // Channel to signal the TTL cleaner to stop.
+	go func() {
+		ticker := time.NewTicker(cfg.TtlCleanInterval)
+		defer ticker.Stop()
+		log.Printf("Starting TTL cleaner with interval of %s", cfg.TtlCleanInterval)
+
+		for {
+			select {
+			case <-ticker.C:
+				inMemStore.CleanExpiredItems()
+			case <-ttlCleanStopChan:
+				log.Println("TTL cleaner received stop signal. Stopping.")
+				return
+			}
+		}
+	}()
+
+	// 9. Start the HTTP server in a goroutine to not block the main thread.
 	go func() {
 		log.Printf("Server listening on http://localhost%s", cfg.Port)
 		// ListenAndServe returns an error, typically http.ErrServerClosed during graceful shutdown.
@@ -84,7 +94,7 @@ func main() {
 		}
 	}()
 
-	// 9. Set up graceful shutdown mechanism.
+	// 10. Set up graceful shutdown mechanism.
 	// Create a channel to listen for OS signals.
 	sigChan := make(chan os.Signal, 1)
 	// Notify this channel for interrupt (Ctrl+C) and termination signals.
@@ -94,29 +104,28 @@ func main() {
 
 	log.Println("Termination signal received. Attempting graceful shutdown...")
 
-	// 10. Stop the snapshot manager first.
-	// This ensures no new snapshots are initiated while the server is shutting down.
+	// 11. Stop the snapshot manager first.
 	snapshotManager.Stop()
+
+	// 12. Stop the TTL cleaner goroutine.
+	close(ttlCleanStopChan)
 
 	// Create a context with a timeout for the server shutdown.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	// Ensure the context cancellation function is called to release resources.
 	defer cancelShutdown()
 
-	// Shut down the HTTP server gracefully. This attempts to close active connections.
+	// Shut down the HTTP server gracefully.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
-		// If shutdown fails, log the error and indicate a forced exit.
 		log.Println("Forcing server shutdown due to error.")
 	} else {
 		log.Println("HTTP server gracefully stopped.")
 	}
 
-	// 11. Save final data to disk before application exit.
-	// This ensures the latest state is persisted, even if no scheduled snapshot occurred recently.
+	// 13. Save final data to disk before application exit.
 	log.Println("Saving final data before application exit...")
 	if err := persistence.SaveData(inMemStore); err != nil {
-		// Log the error but don't fatal, as the server is already down and exiting anyway.
 		log.Printf("Error saving final data during shutdown: %v", err)
 	} else {
 		log.Println("Final data saved. Application exiting.")

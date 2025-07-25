@@ -1,20 +1,21 @@
-// api/handlers.go
 package api
 
 import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"memory-tools/internal/store"
+	"memory-tools/internal/store" // Updated store package interface
 	"net/http"
 	"time"
 )
 
 // SetRequest is the structure for the request body of POST /set.
-// 'Value' is now json.RawMessage to capture any valid JSON structure directly as bytes.
+// 'Value' is json.RawMessage to capture any valid JSON structure directly as bytes.
+// 'TTLSeconds' is an optional field to specify the time-to-live for the item in seconds.
 type SetRequest struct {
-	Key   string          `json:"key"`
-	Value json.RawMessage `json:"value"` // json.RawMessage captures raw JSON bytes without unmarshalling
+	Key        string          `json:"key"`
+	Value      json.RawMessage `json:"value"`
+	TTLSeconds int64           `json:"ttl_seconds,omitempty"` // New optional field for TTL
 }
 
 // Handlers struct groups our API handlers and the DataStore.
@@ -28,7 +29,7 @@ func NewHandlers(s store.DataStore) *Handlers {
 	return &Handlers{Store: s}
 }
 
-// SetHandler handles POST requests to save key-value pairs with JSON values.
+// SetHandler handles POST requests to save key-value pairs with JSON values and optional TTL.
 func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 	// Use context for request-scoped values, cancellation, and deadlines.
 	ctx := r.Context()
@@ -48,13 +49,11 @@ func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Wrap the request body with http.MaxBytesReader to prevent large payloads.
-	// Increased limit to 1MB to accommodate larger JSON documents. Adjust as needed.
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // Limit to 1MB
 
 	var req SetRequest
 	decoder := json.NewDecoder(r.Body)
-	// Disallow unknown fields in the JSON request body for stricter parsing.
-	decoder.DisallowUnknownFields()
+	decoder.DisallowUnknownFields() // Disallow unknown fields for stricter parsing.
 
 	// Decode the request body into the SetRequest struct.
 	if err := decoder.Decode(&req); err != nil {
@@ -70,22 +69,27 @@ func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate that the value (raw JSON) is not empty.
-	// An empty JSON object like {} or empty array [] is allowed, but not a completely empty string.
 	if len(req.Value) == 0 {
 		log.Print("Bad request: value cannot be empty (e.g., use {} or [])")
 		http.Error(w, "Value cannot be empty", http.StatusBadRequest)
 		return
 	}
-	// Optional: Validate that the json.RawMessage itself is a valid JSON document.
-	// This catches cases where the 'value' field might contain plain text instead of JSON.
+	// Validate that the json.RawMessage itself is a valid JSON document.
 	if !json.Valid(req.Value) {
 		log.Printf("Bad request: 'value' field is not a valid JSON document: %s", string(req.Value))
 		http.Error(w, "'value' field must be a valid JSON document", http.StatusBadRequest)
 		return
 	}
 
-	// Pass the raw JSON bytes (json.RawMessage is an alias for []byte) to the store.
-	h.Store.Set(req.Key, req.Value)
+	// Convert TTLSeconds (from request) to time.Duration.
+	// If 0 or negative, it means no TTL (item won't expire).
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if ttl < 0 { // Ensure TTL is not negative, treat as no expiration
+		ttl = 0
+	}
+
+	// Pass the raw JSON bytes and the calculated TTL to the store.
+	h.Store.Set(req.Key, req.Value, ttl)
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "Data saved: Key='%s'", req.Key) // No longer show the full value in success log.
@@ -119,11 +123,13 @@ func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the value from the store; it will be raw JSON bytes.
+	// Retrieve the value from the store. This will be raw JSON bytes.
+	// The store's Get method now handles expiration checks.
 	valueBytes, ok := h.Store.Get(key)
 	if !ok {
-		log.Printf("Not found: Key='%s' not found", key)
-		http.Error(w, fmt.Sprintf("Key '%s' not found", key), http.StatusNotFound)
+		// Updated log and error message to reflect that items can be not found OR expired.
+		log.Printf("Not found: Key='%s' not found or expired", key)
+		http.Error(w, fmt.Sprintf("Key '%s' not found or expired", key), http.StatusNotFound)
 		return
 	}
 
@@ -131,8 +137,8 @@ func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
 	// We use json.RawMessage to ensure the 'valueBytes' are inserted directly as JSON
 	// without being re-escaped as a string.
 	responseMap := map[string]json.RawMessage{
-		"key":   json.RawMessage(fmt.Sprintf(`"%s"`, key)), // Embed key as a JSON string
-		"value": json.RawMessage(valueBytes),               // Embed the raw JSON value
+		"key":   json.RawMessage(fmt.Sprintf(`"%s"`, key)), // Embed key as a JSON string.
+		"value": json.RawMessage(valueBytes),               // Embed the raw JSON value.
 	}
 
 	w.Header().Set("Content-Type", "application/json")

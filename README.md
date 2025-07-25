@@ -1,14 +1,16 @@
-This project implements a basic REST API for storing and retrieving key-value pairs, where **values can be full JSON objects**. Data is kept in memory for fast access and is automatically persisted to a local binary file (`data.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
+This project implements a basic REST API for storing and retrieving key-value pairs, where **values can be full JSON objects**. Data is kept in memory for fast access, supports individual item expiration (TTL), and is automatically persisted to a local binary file (`database.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
 
 ---
 
 ## Features
 
-- **In-Memory Document Storage:** Data is stored in a `map[string][]byte` for rapid access, allowing values to be arbitrary JSON documents.
+- **In-Memory Document Storage:** Data is stored in a `map[string]struct { Value []byte; CreatedAt time.Time; TTL time.Duration }` for rapid access, allowing values to be arbitrary JSON documents.
     
-- **Binary Data Persistence (.mtdb):** Data is automatically saved to `data.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state.
+- **Time-To-Live (TTL):** Individual key-value pairs can be set with an expiration time. Expired items are automatically removed from memory, optimizing resource usage.
     
-- **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals (e.g., every 5 minutes).
+- **Binary Data Persistence (.mtdb):** Data is automatically saved to `database.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state (non-expired items only).
+    
+- **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals (e.g., every 5 minutes). Only non-expired items are included in snapshots.
     
 - **Atomic Writes:** Snapshots are saved to a temporary file first, then atomically renamed, ensuring data integrity even if the system crashes during a save operation.
     
@@ -18,7 +20,7 @@ This project implements a basic REST API for storing and retrieving key-value pa
     
 - **Go Modules:** Modular project structure for better organization and maintainability.
     
-- **Graceful Shutdown:** The application shuts down cleanly, saving the latest data, stopping scheduled snapshots, and closing HTTP connections safely.
+- **Graceful Shutdown:** The application shuts down cleanly, saving the latest non-expired data, stopping scheduled snapshots and the TTL cleaner, and closing HTTP connections safely.
     
 - **Framework-less:** Built purely with Go's standard library for full control and low overhead.
     
@@ -29,10 +31,10 @@ This project implements a basic REST API for storing and retrieving key-value pa
 
 ```
 my-rest-api/
-├── main.go                       # Main entry point, server, and snapshot configuration.
+├── main.go                       # Main entry point, server, snapshot, and TTL cleaner configuration.
 ├── api/                          # HTTP endpoint handlers.
 │   └── handlers.go
-├── store/                        # In-memory data storage logic.
+├── store/                        # In-memory data storage logic, including TTL management.
 │   └── inmem.go
 ├── persistence/                  # Logic for persisting data to disk (binary file storage) and snapshot management.
 │   └── binary_storage.go
@@ -54,7 +56,7 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     go run .
     ```
     
-    You'll see messages in the console indicating the server is listening on port 8080 and that scheduled snapshots are enabled (if configured).
+    You'll see messages in the console indicating the server is listening on port 8080, that scheduled snapshots are enabled, and the TTL cleaner is starting (if configured).
     
 
 ---
@@ -71,7 +73,7 @@ The API exposes two main endpoints for key-value interaction.
 
 ### 1. `POST /set`
 
-Saves a key-value pair to the data store. If the key already exists, its value will be updated. The `value` field is expected to be a valid JSON document.
+Saves a key-value pair to the data store. If the key already exists, its value and TTL will be updated. The `value` field is expected to be a valid JSON document.
 
 - **HTTP Method:** `POST`
     
@@ -83,31 +85,43 @@ Saves a key-value pair to the data store. If the key already exists, its value w
 |Name|Type|Description|Required|Example|
 |---|---|---|---|---|
 |`key`|`string`|The unique key for the data.|Yes|`"user_profile"`|
-|`value`|`JSON Object/Array` (represented as `json.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}, "hobbies": ["reading", "coding"]}` or `["item1", "item2"]` or `{}` (empty object)|
+|`value`|`JSON Object/Array` (represented as `json.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}}`|
+|`ttl_seconds`|`integer`|**(Optional)** Time-To-Live for the item in seconds. If `0` or omitted, the item never expires.|No|`600` (for 10 minutes), `3600` (for 1 hour), `5` (for 5 seconds, for testing expiration)|
 
 Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
+
+**Example 1: Setting a key with a 10-minute TTL**
 
 
 ```bash
 curl -X POST \
      -H "Content-Type: application/json" \
      -d '{
-           "key": "user_settings_123",
+           "key": "user_session:abc123",
            "value": {
-             "theme": "dark",
-             "notifications": {
-               "email": true,
-               "sms": false
-             },
-             "preferences": [
-               "marketing",
-               "analytics",
-               {"feature_flags": ["new_ui", "beta_tester"]}
-             ],
-             "last_login": "2025-07-24T22:30:00Z"
-           }
+             "user_id": 101,
+             "last_activity": "2025-07-25T09:30:00Z",
+             "status": "active"
+           },
+           "ttl_seconds": 600
+         }' \
+     http://localhost:8080/set
+```
+
+**Example 2: Setting a key that never expires (omitting `ttl_seconds`)**
+
+
+```bash
+curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{
+           "key": "product_categories",
+           "value": [
+             {"id": 1, "name": "Electronics"},
+             {"id": 2, "name": "Books"}
+           ]
          }' \
      http://localhost:8080/set
 ```
@@ -118,7 +132,7 @@ curl -X POST \
     
     - **Description:** The key-value pair was successfully saved or updated.
         
-    - **Response Body:** Plain text, e.g.: `Data saved: Key='user_settings_123'`
+    - **Response Body:** Plain text, e.g.: `Data saved: Key='user_session:abc123'`
         
 - **`400 Bad Request`**
     
@@ -135,7 +149,7 @@ curl -X POST \
 
 ### 2. `GET /get`
 
-Retrieves the value associated with a specific key. The returned value will be the stored JSON document.
+Retrieves the value associated with a specific key. The returned value will be the stored JSON document. If the item has expired, it will be treated as not found.
 
 - **HTTP Method:** `GET`
     
@@ -144,14 +158,14 @@ Retrieves the value associated with a specific key. The returned value will be t
 
 |Name|Type|Description|Required|Example|
 |---|---|---|---|---|
-|`key`|`string`|The key of the data to retrieve.|Yes|`user_settings_123`|
+|`key`|`string`|The key of the data to retrieve.|Yes|`user_session:abc123`|
 
 Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
 
 ```bash
-curl "http://localhost:8080/get?key=user_settings_123"
+curl "http://localhost:8080/get?key=user_session:abc123"
 ```
 
 #### **Responses:**
@@ -163,22 +177,14 @@ curl "http://localhost:8080/get?key=user_settings_123"
     - **Content-Type:** `application/json`
         
     - **Response Body (JSON):**
-                
+        
         ```json
         {
-            "key": "user_settings_123",
+            "key": "user_session:abc123",
             "value": {
-              "theme": "dark",
-              "notifications": {
-                "email": true,
-                "sms": false
-              },
-              "preferences": [
-                "marketing",
-                "analytics",
-                {"feature_flags": ["new_ui", "beta_tester"]}
-              ],
-              "last_login": "2025-07-24T22:30:00Z"
+              "user_id": 101,
+              "last_activity": "2025-07-25T09:30:00Z",
+              "status": "active"
             }
         }
         ```
@@ -191,9 +197,9 @@ curl "http://localhost:8080/get?key=user_settings_123"
         
 - **`404 Not Found`**
     
-    - **Description:** The requested key was not found in the data store.
+    - **Description:** The requested key was not found in the data store **or it has expired**.
         
-    - **Example:** `Key 'non_existent_key' not found`
+    - **Example:** `Key 'temp_cache_item' not found or expired`
         
 - **`405 Method Not Allowed`**
     
@@ -204,15 +210,15 @@ curl "http://localhost:8080/get?key=user_settings_123"
 
 ### Data Persistence and Snapshots
 
-When the application starts, it attempts to load existing data from `data.mtdb`. If the file doesn't exist, it starts with an empty store.
+When the application starts, it attempts to load existing data from `database.mtdb`. If the file doesn't exist, it starts with an empty store. Only non-expired items are included in the loaded data.
 
-During runtime, the application will periodically save the current in-memory data to the `data.mtdb` file. This process is managed by a **Snapshot Manager** and occurs at a configurable interval (e.g., every 5 minutes by default). This ensures that even if the application crashes unexpectedly, your data loss is limited to the period since the last snapshot.
+During runtime, the application will periodically save the current in-memory data to the `database.mtdb` file. This process is managed by a **Snapshot Manager** and occurs at a configurable interval (e.g., every 5 minutes by default). This ensures that even if the application crashes unexpectedly, your data loss is limited to the period since the last snapshot. **Only non-expired items are saved during snapshots.**
 
-Additionally, when the application receives a termination signal (e.g., `Ctrl+C` in the terminal or a `SIGTERM` signal in a server/container environment), the Snapshot Manager is stopped, and a **final snapshot** of the current in-memory data is taken and saved to `data.mtdb` before the application exits. This guarantees the freshest possible data state upon shutdown.
+Additionally, a **TTL Cleaner** runs in the background at a configurable interval (e.g., every 1 minute by default). This cleaner physically removes expired items from the in-memory store, freeing up memory.
 
-You can configure the snapshot behavior in `main.go`:
+When the application receives a termination signal (e.g., `Ctrl+C` in the terminal or a `SIGTERM` signal in a server/container environment), both the Snapshot Manager and the TTL Cleaner are stopped, and a **final snapshot** of the current non-expired in-memory data is taken and saved to `database.mtdb` before the application exits. This guarantees the freshest possible data state upon shutdown.
 
-Go
+You can configure the snapshot and TTL cleaner behavior in `main.go`:
 
 ```go
 // ... in main.go
@@ -220,6 +226,7 @@ cfg := Config{
     // ... other configurations
     SnapshotInterval: 5 * time.Minute, // Set the interval for automatic snapshots.
     EnableSnapshots:  true,            // Set to false to disable scheduled snapshots.
+    TtlCleanInterval: 1 * time.Minute, // Set the interval for the TTL cleaner to run.
 }
 // ...
 ```

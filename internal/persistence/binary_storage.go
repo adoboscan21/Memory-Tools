@@ -1,4 +1,3 @@
-// persistence/binary_storage.go
 package persistence
 
 import (
@@ -6,28 +5,30 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"memory-tools/internal/store" // DataStore interface now expects []byte for values
+	"memory-tools/internal/store" // DataStore interface now expects []byte for values, and GetAll filters expired
 	"os"
 	"time"
 )
 
-const dataFile = "database.mtdb"
-const snapshotTempFile = "database.mtdb.tmp"
+const dataFile = "database.mtdb"             // Name of the file for persistent binary data.
+const snapshotTempFile = "database.mtdb.tmp" // Temporary file used during safe data saving.
 
-// SaveData saves all data from the DataStore to a binary file.
-// It now handles values as []byte (raw JSON).
+// SaveData saves all non-expired data from the DataStore to a binary file.
+// It uses a temporary file and an atomic rename to ensure data integrity.
+// The data retrieved via s.GetAll() is already filtered for expired items.
 func SaveData(s store.DataStore) error {
-	data := s.GetAll() // data is now map[string][]byte
+	data := s.GetAll() // Data is now map[string][]byte, containing only non-expired items.
 
+	// Create a temporary file for writing.
 	file, err := os.Create(snapshotTempFile)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary snapshot file '%s': %w", snapshotTempFile, err)
 	}
-	defer file.Close()
+	defer file.Close() // Ensure the temporary file is closed.
 
 	// Write the total number of key-value entries.
 	if err := binary.Write(file, binary.LittleEndian, uint32(len(data))); err != nil {
-		os.Remove(snapshotTempFile)
+		os.Remove(snapshotTempFile) // Clean up if initial write fails.
 		return fmt.Errorf("failed to write data count to temporary file: %w", err)
 	}
 
@@ -43,13 +44,13 @@ func SaveData(s store.DataStore) error {
 			return fmt.Errorf("failed to write key '%s': %w", key, err)
 		}
 
-		// Write value length (which is now the length of the JSON in bytes).
+		// Write value length (which is the length of the JSON in bytes).
 		if err := binary.Write(file, binary.LittleEndian, uint32(len(value))); err != nil {
 			os.Remove(snapshotTempFile)
 			return fmt.Errorf("failed to write value length for '%s': %w", key, err)
 		}
-		// Write the value bytes (raw JSON).
-		if _, err := file.Write(value); err != nil { // Use file.Write for []byte
+		// Write the value bytes (raw JSON). Use file.Write for []byte.
+		if _, err := file.Write(value); err != nil {
 			os.Remove(snapshotTempFile)
 			return fmt.Errorf("failed to write value for '%s': %w", key, err)
 		}
@@ -60,11 +61,11 @@ func SaveData(s store.DataStore) error {
 		os.Remove(snapshotTempFile)
 		return fmt.Errorf("failed to sync temporary snapshot file to disk: %w", err)
 	}
-	file.Close()
+	file.Close() // Close explicitly before renaming, especially important on Windows.
 
 	// Atomically rename the temporary file to the final data file.
 	if err := os.Rename(snapshotTempFile, dataFile); err != nil {
-		os.Remove(snapshotTempFile)
+		os.Remove(snapshotTempFile) // Try to clean up temporary file if rename fails.
 		return fmt.Errorf("failed to rename temporary snapshot file to '%s': %w", dataFile, err)
 	}
 
@@ -73,24 +74,27 @@ func SaveData(s store.DataStore) error {
 }
 
 // LoadData loads data from a binary file and populates the InMemStore.
-// It now reads values as []byte (raw JSON).
+// Loaded items will not have a TTL by default upon loading, as TTL metadata is not
+// currently stored in the binary file for simplicity. They will effectively be non-expiring.
 func LoadData(s *store.InMemStore) error {
 	file, err := os.Open(dataFile)
 	if err != nil {
+		// If the file does not exist, it's not a critical error; start with an empty store.
 		if os.IsNotExist(err) {
 			log.Printf("Data file '%s' not found, initializing with empty data.", dataFile)
 			return nil
 		}
 		return fmt.Errorf("failed to open data file '%s': %w", dataFile, err)
 	}
-	defer file.Close()
+	defer file.Close() // Ensure the file is closed after reading.
 
 	var numEntries uint32
+	// Read the total number of entries from the beginning of the file.
 	if err := binary.Read(file, binary.LittleEndian, &numEntries); err != nil {
 		return fmt.Errorf("failed to read number of entries from '%s': %w", dataFile, err)
 	}
 
-	loadedData := make(map[string][]byte, numEntries) // map[string][]byte for loaded values
+	loadedData := make(map[string][]byte, numEntries) // map[string][]byte for loaded values.
 	for i := 0; i < int(numEntries); i++ {
 		// Read key length and key bytes.
 		var keyLen uint32
@@ -101,7 +105,7 @@ func LoadData(s *store.InMemStore) error {
 		if _, err := io.ReadFull(file, keyBytes); err != nil {
 			return fmt.Errorf("failed to read key for entry %d: %w", i, err)
 		}
-		key := string(keyBytes)
+		key := string(keyBytes) // Convert byte slice to string.
 
 		// Read value length and value bytes (raw JSON).
 		var valLen uint32
@@ -112,17 +116,20 @@ func LoadData(s *store.InMemStore) error {
 		if _, err := io.ReadFull(file, valBytes); err != nil {
 			return fmt.Errorf("failed to read value for key '%s': %w", key, err)
 		}
-		value := valBytes // Value is already []byte
+		value := valBytes // Value is already []byte.
 
 		loadedData[key] = value
 	}
 
+	// Load the deserialized data into the in-memory store instance.
+	// The store's LoadData method will convert these raw values into Item structs
+	// with default TTL (no expiration).
 	s.LoadData(loadedData)
 	log.Printf("Data successfully loaded from %s. Total keys: %d", dataFile, len(loadedData))
 	return nil
 }
 
-// SnapshotManager manages the scheduling and execution of data snapshots. (No changes needed)
+// SnapshotManager manages the scheduling and execution of data snapshots. (No direct changes needed here)
 type SnapshotManager struct {
 	Store            store.DataStore
 	Interval         time.Duration
@@ -130,6 +137,7 @@ type SnapshotManager struct {
 	SnapshotsEnabled bool
 }
 
+// NewSnapshotManager creates and returns a new instance of SnapshotManager.
 func NewSnapshotManager(s store.DataStore, interval time.Duration, enabled bool) *SnapshotManager {
 	return &SnapshotManager{
 		Store:            s,
@@ -139,6 +147,8 @@ func NewSnapshotManager(s store.DataStore, interval time.Duration, enabled bool)
 	}
 }
 
+// Start begins the scheduled snapshot process.
+// It runs in a separate goroutine and takes snapshots at the configured interval.
 func (sm *SnapshotManager) Start() {
 	if !sm.SnapshotsEnabled || sm.Interval <= 0 {
 		log.Println("Snapshots are disabled or interval is invalid. Skipping scheduled snapshots.")
@@ -147,24 +157,25 @@ func (sm *SnapshotManager) Start() {
 
 	log.Printf("Scheduled snapshots enabled every %s.", sm.Interval)
 	ticker := time.NewTicker(sm.Interval)
-	defer ticker.Stop()
+	defer ticker.Stop() // Ensure the ticker is stopped when the goroutine exits.
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker.C: // When the ticker fires, perform a snapshot.
 			log.Println("Performing scheduled snapshot...")
 			if err := SaveData(sm.Store); err != nil {
 				log.Printf("Error performing scheduled snapshot: %v", err)
 			}
-		case <-sm.Quit:
+		case <-sm.Quit: // When the quit channel receives a signal, stop the manager.
 			log.Println("Snapshot manager received quit signal. Stopping.")
 			return
 		}
 	}
 }
 
+// Stop signals the SnapshotManager to cease scheduled snapshot operations.
 func (sm *SnapshotManager) Stop() {
 	if sm.SnapshotsEnabled {
-		close(sm.Quit)
+		close(sm.Quit) // Close the channel to signal the Start goroutine to exit.
 	}
 }

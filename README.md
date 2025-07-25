@@ -1,11 +1,10 @@
-
-This project implements a basic REST API for storing and retrieving key-value pairs. Data is kept in memory for fast access and is automatically persisted to a local binary file (`data.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
+This project implements a basic REST API for storing and retrieving key-value pairs, where **values can be full JSON objects**. Data is kept in memory for fast access and is automatically persisted to a local binary file (`data.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
 
 ---
 
 ## Features
 
-- **In-Memory Storage:** Data stored in a `map[string]string` for rapid retrieval.
+- **In-Memory Document Storage:** Data is stored in a `map[string][]byte` for rapid access, allowing values to be arbitrary JSON documents.
     
 - **Binary Data Persistence (.mtdb):** Data is automatically saved to `data.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state.
     
@@ -53,7 +52,7 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     
     Bash
     
-    ```
+    ```bash
     go run .
     ```
     
@@ -74,7 +73,7 @@ The API exposes two main endpoints for key-value interaction.
 
 ### 1. `POST /set`
 
-Saves a key-value pair to the data store. If the key already exists, its value will be updated.
+Saves a key-value pair to the data store. If the key already exists, its value will be updated. The `value` field is expected to be a valid JSON document.
 
 - **HTTP Method:** `POST`
     
@@ -85,8 +84,8 @@ Saves a key-value pair to the data store. If the key already exists, its value w
 
 |Name|Type|Description|Required|Example|
 |---|---|---|---|---|
-|`key`|`string`|The unique key for the data.|Yes|`"username"`|
-|`value`|`string`|The value associated with the key.|Yes|`"JohnDoe"`|
+|`key`|`string`|The unique key for the data.|Yes|`"user_profile"`|
+|`value`|`JSON Object/Array` (represented as `json.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}, "hobbies": ["reading", "coding"]}` or `["item1", "item2"]` or `{}` (empty object)|
 
 Exportar a Hojas de cálculo
 
@@ -94,10 +93,25 @@ Exportar a Hojas de cálculo
 
 Bash
 
-```
+```json
 curl -X POST \
      -H "Content-Type: application/json" \
-     -d '{"key": "product_id_123", "value": "Laptop_Pro_Max"}' \
+     -d '{
+           "key": "user_settings_123",
+           "value": {
+             "theme": "dark",
+             "notifications": {
+               "email": true,
+               "sms": false
+             },
+             "preferences": [
+               "marketing",
+               "analytics",
+               {"feature_flags": ["new_ui", "beta_tester"]}
+             ],
+             "last_login": "2025-07-24T22:30:00Z"
+           }
+         }' \
      http://localhost:8080/set
 ```
 
@@ -107,13 +121,13 @@ curl -X POST \
     
     - **Description:** The key-value pair was successfully saved or updated.
         
-    - **Response Body:** Plain text, e.g.: `Data saved: Key='product_id_123', Value='Laptop_Pro_Max'`
+    - **Response Body:** Plain text, e.g.: `Data saved: Key='user_settings_123'`
         
 - **`400 Bad Request`**
     
-    - **Description:** Invalid JSON request body, or `key` or `value` are empty, or unknown fields are present.
+    - **Description:** Invalid JSON request body, `key` is empty, `value` is empty (not `{}` or `[]`), or `value` is not a valid JSON document (e.g., plain text).
         
-    - **Example:** `Invalid JSON request body or unknown fields` or `Key and value cannot be empty`
+    - **Example:** `Invalid JSON request body or unknown fields`, `Key cannot be empty`, `Value cannot be empty (e.g., use {} or [])`, or `'value' field must be a valid JSON document`.
         
 - **`405 Method Not Allowed`**
     
@@ -124,7 +138,7 @@ curl -X POST \
 
 ### 2. `GET /get`
 
-Retrieves the value associated with a specific key.
+Retrieves the value associated with a specific key. The returned value will be the stored JSON document.
 
 - **HTTP Method:** `GET`
     
@@ -133,7 +147,7 @@ Retrieves the value associated with a specific key.
 
 |Name|Type|Description|Required|Example|
 |---|---|---|---|---|
-|`key`|`string`|The key of the data to retrieve.|Yes|`username`|
+|`key`|`string`|The key of the data to retrieve.|Yes|`user_settings_123`|
 
 Exportar a Hojas de cálculo
 
@@ -142,23 +156,37 @@ Exportar a Hojas de cálculo
 Bash
 
 ```bash
-curl "http://localhost:8080/get?key=product_id_123"
+curl "http://localhost:8080/get?key=user_settings_123"
 ```
 
 #### **Responses:**
 
 - **`200 OK`**
     
-    - **Description:** The key was found, and its value is returned.
+    - **Description:** The key was found, and its JSON value is returned.
         
     - **Content-Type:** `application/json`
         
     - **Response Body (JSON):**
         
+        JSON
+        
         ```json
         {
-            "key": "product_id_123",
-            "value": "Laptop_Pro_Max"
+            "key": "user_settings_123",
+            "value": {
+              "theme": "dark",
+              "notifications": {
+                "email": true,
+                "sms": false
+              },
+              "preferences": [
+                "marketing",
+                "analytics",
+                {"feature_flags": ["new_ui", "beta_tester"]}
+              ],
+              "last_login": "2025-07-24T22:30:00Z"
+            }
         }
         ```
         

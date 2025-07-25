@@ -59,6 +59,12 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     You'll see messages in the console indicating the server is listening on port 8080, that scheduled snapshots are enabled, and the TTL cleaner is starting (if configured).
     
 
+
+## How compile
+    ```bash
+    go build .
+    ```
+
 ---
 
 ## API Documentation

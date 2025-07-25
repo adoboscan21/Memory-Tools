@@ -32,7 +32,7 @@ This project implements a basic REST API for storing and retrieving key-value pa
 ## Project Structure
 
 ```
-my-rest-api/
+memory-tools/
 ├── main.go                       # Main entry point and application orchestration.
 ├── api/                          # HTTP endpoint handlers.
 │   └── handlers.go
@@ -99,17 +99,17 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     go build .
     ```
     
-    This will create an executable binary (e.g., `my-rest-api` on Linux/macOS, `my-rest-api.exe` on Windows) in your project root. You can then run it directly:
+    This will create an executable binary (e.g., `memory-tools` on Linux/macOS, `memory-tools.exe` on Windows) in your project root. You can then run it directly:
         
     ```bash
-    ./my-rest-api # or my-rest-api.exe on Windows
+    ./memory-tools # or memory-tools.exe on Windows
     ```
     
     You can also pass the config flag to the compiled binary:
     
     
     ```bash
-    ./my-rest-api --config=my_custom_config.json
+    ./memory-tools --config=my_custom_config.json
     ```
     
 

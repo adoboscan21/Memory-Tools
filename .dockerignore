@@ -1,0 +1,8 @@
+.dockerignore
+.gitignore
+tmp
+database.mtdb
+LICENSE
+README.md
+docker-compose.yml
+Dockerfile

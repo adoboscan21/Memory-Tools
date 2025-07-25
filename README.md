@@ -116,12 +116,22 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     ./memory-tools # or memory-tools.exe on Windows
     ```
     
+    
     You can also pass the config flag to the compiled binary:
     
     ```bash
     ./memory-tools --config=./path/to/your_custom_config.json
     ```
     
+## How to Deploy on Docker
+
+1. **Clone the repository** (as described in "How to Run").
+    
+2. Navigate to the **project root** in your terminal:
+    
+    ```bash
+    docker compose up -d --build
+    ```
 
 ---
 

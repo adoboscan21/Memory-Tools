@@ -1,0 +1,8 @@
+services:
+  app: # Define a service named 'app' for your Go application
+    build:
+      context: . # Look for the Dockerfile in the current directory
+      dockerfile: Dockerfile # Specify the name of your Dockerfile
+    ports:
+      - "8080:8080" # Map host port 8080 to container port 8080
+    restart: always # Always restart the container if it stops

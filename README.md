@@ -1,13 +1,17 @@
-## **Simple Key-Value API with Persistence in Go-Lang**
 
-This project implements a basic REST API for storing and retrieving key-value pairs. Data is kept in memory for fast access and is automatically persisted to a local file (`data.json`) to ensure it's not lost when the application restarts.
+This project implements a basic REST API for storing and retrieving key-value pairs. Data is kept in memory for fast access and is automatically persisted to a local binary file (`data.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
 
 ---
+
 ## Features
 
-- **In-Memory Storage:** Data stored in a `map[string]string` for quick retrieval.
+- **In-Memory Storage:** Data stored in a `map[string]string` for rapid retrieval.
     
-- **Data Persistence:** Data is automatically saved to `data.json` upon graceful application shutdown and loaded on startup.
+- **Binary Data Persistence (.mtdb):** Data is automatically saved to `data.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state.
+    
+- **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals (e.g., every 5 minutes).
+    
+- **Atomic Writes:** Snapshots are saved to a temporary file first, then atomically renamed, ensuring data integrity even if the system crashes during a save operation.
     
 - **REST API:** Two endpoints for `SET` (save) and `GET` (retrieve) operations.
     
@@ -15,7 +19,7 @@ This project implements a basic REST API for storing and retrieving key-value pa
     
 - **Go Modules:** Modular project structure for better organization and maintainability.
     
-- **Graceful Shutdown:** The application shuts down cleanly, saving data and closing connections safely.
+- **Graceful Shutdown:** The application shuts down cleanly, saving the latest data, stopping scheduled snapshots, and closing HTTP connections safely.
     
 - **Framework-less:** Built purely with Go's standard library for full control and low overhead.
     
@@ -26,13 +30,13 @@ This project implements a basic REST API for storing and retrieving key-value pa
 
 ```
 my-rest-api/
-├── main.go                       # Main entry point and server configuration.
+├── main.go                       # Main entry point, server, and snapshot configuration.
 ├── api/                          # HTTP endpoint handlers.
 │   └── handlers.go
 ├── store/                        # In-memory data storage logic.
 │   └── inmem.go
-├── persistence/                  # Logic for persisting data to disk (file storage).
-│   └── file_storage.go
+├── persistence/                  # Logic for persisting data to disk (binary file storage) and snapshot management.
+│   └── binary_storage.go
 └── go.mod                        # Go module file.
 └── go.sum                        # Dependency checksums.
 ```
@@ -41,17 +45,19 @@ my-rest-api/
 
 ## How to Run
 
-Make sure you have [Go installed (version go1.24.4  or higher)](https://go.dev/doc/install).
+Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/install).
 
 1. **Clone the repository** (or create the files and folders manually as described in the structure).
     
 2. Navigate to the **project root** in your terminal:
-        
-    ```bash
+    
+    Bash
+    
+    ```
     go run .
     ```
     
-    You'll see a message in the console indicating the server is listening on port 8080.
+    You'll see messages in the console indicating the server is listening on port 8080 and that scheduled snapshots are enabled (if configured).
     
 
 ---
@@ -82,9 +88,13 @@ Saves a key-value pair to the data store. If the key already exists, its value w
 |`key`|`string`|The unique key for the data.|Yes|`"username"`|
 |`value`|`string`|The value associated with the key.|Yes|`"JohnDoe"`|
 
+Exportar a Hojas de cálculo
+
 #### **Example Request (using `curl`):**
 
-```bash
+Bash
+
+```
 curl -X POST \
      -H "Content-Type: application/json" \
      -d '{"key": "product_id_123", "value": "Laptop_Pro_Max"}' \
@@ -101,7 +111,7 @@ curl -X POST \
         
 - **`400 Bad Request`**
     
-    - **Description:** Invalid JSON request body, or `key` or `value` are empty.
+    - **Description:** Invalid JSON request body, or `key` or `value` are empty, or unknown fields are present.
         
     - **Example:** `Invalid JSON request body or unknown fields` or `Key and value cannot be empty`
         
@@ -121,13 +131,15 @@ Retrieves the value associated with a specific key.
 
 #### **URL Query Parameters:**
 
-| Name  | Type     | Description                      | Required | Example    |
-| ----- | -------- | -------------------------------- | -------- | ---------- |
-| `key` | `string` | The key of the data to retrieve. | Yes      | `username` |
+|Name|Type|Description|Required|Example|
+|---|---|---|---|---|
+|`key`|`string`|The key of the data to retrieve.|Yes|`username`|
 
 Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
+
+Bash
 
 ```bash
 curl "http://localhost:8080/get?key=product_id_123"
@@ -142,7 +154,6 @@ curl "http://localhost:8080/get?key=product_id_123"
     - **Content-Type:** `application/json`
         
     - **Response Body (JSON):**
-        
         
         ```json
         {
@@ -170,9 +181,27 @@ curl "http://localhost:8080/get?key=product_id_123"
 
 ---
 
-### Data Persistence
+### Data Persistence and Snapshots
 
-When the application receives a termination signal (e.g., `Ctrl+C` in the terminal or a `SIGTERM` signal in a server/container environment), the current in-memory data is automatically saved to the `data.json` file in the project root. Upon restarting the application, this data is automatically loaded, restoring the store's previous state.
+When the application starts, it attempts to load existing data from `data.mtdb`. If the file doesn't exist, it starts with an empty store.
+
+During runtime, the application will periodically save the current in-memory data to the `data.mtdb` file. This process is managed by a **Snapshot Manager** and occurs at a configurable interval (e.g., every 5 minutes by default). This ensures that even if the application crashes unexpectedly, your data loss is limited to the period since the last snapshot.
+
+Additionally, when the application receives a termination signal (e.g., `Ctrl+C` in the terminal or a `SIGTERM` signal in a server/container environment), the Snapshot Manager is stopped, and a **final snapshot** of the current in-memory data is taken and saved to `data.mtdb` before the application exits. This guarantees the freshest possible data state upon shutdown.
+
+You can configure the snapshot behavior in `main.go`:
+
+Go
+
+```go
+// ... in main.go
+cfg := Config{
+    // ... other configurations
+    SnapshotInterval: 5 * time.Minute, // Set the interval for automatic snapshots.
+    EnableSnapshots:  true,            // Set to false to disable scheduled snapshots.
+}
+// ...
+```
 
 ---
 
@@ -180,4 +209,4 @@ When the application receives a termination signal (e.g., `Ctrl+C` in the termin
 
 - **Go (Golang):** The primary programming language.
     
-- **Go Standard Library:** `net/http`, `sync`, `encoding/json`, `os`, `log`, `context`.
+- **Go Standard Library:** `net/http`, `sync`, `encoding/json`, `encoding/binary`, `os`, `os/signal`, `syscall`, `log`, `context`, `time`, `maps`, `io`.

@@ -5,25 +5,15 @@ This project implements a basic REST API for storing and retrieving key-value pa
 ## Features
 
 - **In-Memory Document Storage:** Data is stored in a `map[string]struct { Value []byte; CreatedAt time.Time; TTL time.Duration }` for rapid access, allowing values to be arbitrary JSON documents.
-    
 - **Time-To-Live (TTL):** Individual key-value pairs can be set with an expiration time. Expired items are automatically removed from memory, optimizing resource usage.
-    
 - **Binary Data Persistence (.mtdb):** Data is automatically saved to `database.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state (non-expired items only).
-    
 - **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals (e.g., every 5 minutes). Only non-expired items are included in snapshots.
-    
 - **Atomic Writes:** Snapshots are saved to a temporary file first, then atomically renamed, ensuring data integrity even if the system crashes during a save operation.
-    
 - **REST API:** Two endpoints for `SET` (save) and `GET` (retrieve) operations.
-    
 - **Concurrency Handling:** Uses `sync.RWMutex` to ensure safe data access from multiple concurrent requests.
-    
 - **Go Modules:** Modular project structure for better organization and maintainability.
-    
 - **Graceful Shutdown:** The application shuts down cleanly, saving the latest non-expired data, stopping scheduled snapshots and the TTL cleaner, and closing HTTP connections safely.
-    
 - **Framework-less:** Built purely with Go's standard library for full control and low overhead.
-    
 
 ---
 
@@ -49,21 +39,24 @@ my-rest-api/
 Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/install).
 
 1. **Clone the repository** (or create the files and folders manually as described in the structure).
-    
 2. Navigate to the **project root** in your terminal:
-        
-    ```bash
-    go run .
-    ```
-    
-    You'll see messages in the console indicating the server is listening on port 8080, that scheduled snapshots are enabled, and the TTL cleaner is starting (if configured).
-    
 
+```bash
+go run .
+```
+
+You'll see messages in the console indicating the server is listening on port 8080, that scheduled snapshots are enabled, and the TTL cleaner is starting (if configured).
 
 ## How compile
-    ```bash
-    go build .
-    ```
+
+Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/install).
+
+1. **Clone the repository** (or create the files and folders manually as described in the structure).
+2. Navigate to the **project root** in your terminal:
+
+```bash
+go build .
+```
 
 ---
 
@@ -82,24 +75,21 @@ The API exposes two main endpoints for key-value interaction.
 Saves a key-value pair to the data store. If the key already exists, its value and TTL will be updated. The `value` field is expected to be a valid JSON document.
 
 - **HTTP Method:** `POST`
-    
 - **Content-Type:** `application/json`
-    
 
 #### **Request Body Parameters (JSON):**
 
-|Name|Type|Description|Required|Example|
-|---|---|---|---|---|
-|`key`|`string`|The unique key for the data.|Yes|`"user_profile"`|
-|`value`|`JSON Object/Array` (represented as `json.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}}`|
-|`ttl_seconds`|`integer`|**(Optional)** Time-To-Live for the item in seconds. If `0` or omitted, the item never expires.|No|`600` (for 10 minutes), `3600` (for 1 hour), `5` (for 5 seconds, for testing expiration)|
+| Name          | Type                                                   | Description                                                                                     | Required | Example                                                                                  |
+| ------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `key`         | `string`                                               | The unique key for the data.                                                                    | Yes      | `"user_profile"`                                                                         |
+| `value`       | `JSON Object/Array` (represented as `json.RawMessage`) | The value associated with the key, expected to be a valid JSON object or array.                 | Yes      | `{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}}`                        |
+| `ttl_seconds` | `integer`                                              | **(Optional)** Time-To-Live for the item in seconds. If `0` or omitted, the item never expires. | No       | `600` (for 10 minutes), `3600` (for 1 hour), `5` (for 5 seconds, for testing expiration) |
 
 Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
 
 **Example 1: Setting a key with a 10-minute TTL**
-
 
 ```bash
 curl -X POST \
@@ -118,7 +108,6 @@ curl -X POST \
 
 **Example 2: Setting a key that never expires (omitting `ttl_seconds`)**
 
-
 ```bash
 curl -X POST \
      -H "Content-Type: application/json" \
@@ -135,21 +124,13 @@ curl -X POST \
 #### **Responses:**
 
 - **`200 OK`**
-    
-    - **Description:** The key-value pair was successfully saved or updated.
-        
-    - **Response Body:** Plain text, e.g.: `Data saved: Key='user_session:abc123'`
-        
+  - **Description:** The key-value pair was successfully saved or updated.
+  - **Response Body:** Plain text, e.g.: `Data saved: Key='user_session:abc123'`
 - **`400 Bad Request`**
-    
-    - **Description:** Invalid JSON request body, `key` is empty, `value` is empty (not `{}` or `[]`), or `value` is not a valid JSON document (e.g., plain text).
-        
-    - **Example:** `Invalid JSON request body or unknown fields`, `Key cannot be empty`, `Value cannot be empty (e.g., use {} or [])`, or `'value' field must be a valid JSON document`.
-        
+  - **Description:** Invalid JSON request body, `key` is empty, `value` is empty (not `{}` or `[]`), or `value` is not a valid JSON document (e.g., plain text).
+  - **Example:** `Invalid JSON request body or unknown fields`, `Key cannot be empty`, `Value cannot be empty (e.g., use {} or [])`, or `'value' field must be a valid JSON document`.
 - **`405 Method Not Allowed`**
-    
-    - **Description:** An HTTP method other than `POST` was attempted.
-        
+  - **Description:** An HTTP method other than `POST` was attempted.
 
 ---
 
@@ -158,13 +139,12 @@ curl -X POST \
 Retrieves the value associated with a specific key. The returned value will be the stored JSON document. If the item has expired, it will be treated as not found.
 
 - **HTTP Method:** `GET`
-    
 
 #### **URL Query Parameters:**
 
-|Name|Type|Description|Required|Example|
-|---|---|---|---|---|
-|`key`|`string`|The key of the data to retrieve.|Yes|`user_session:abc123`|
+| Name  | Type     | Description                      | Required | Example               |
+| ----- | -------- | -------------------------------- | -------- | --------------------- |
+| `key` | `string` | The key of the data to retrieve. | Yes      | `user_session:abc123` |
 
 Exportar a Hojas de cálculo
 
@@ -177,40 +157,27 @@ curl "http://localhost:8080/get?key=user_session:abc123"
 #### **Responses:**
 
 - **`200 OK`**
-    
-    - **Description:** The key was found, and its JSON value is returned.
-        
-    - **Content-Type:** `application/json`
-        
-    - **Response Body (JSON):**
-        
-        ```json
-        {
-            "key": "user_session:abc123",
-            "value": {
-              "user_id": 101,
-              "last_activity": "2025-07-25T09:30:00Z",
-              "status": "active"
-            }
-        }
-        ```
-        
+  - **Description:** The key was found, and its JSON value is returned.
+  - **Content-Type:** `application/json`
+  - **Response Body (JSON):**
+    ```json
+    {
+      "key": "user_session:abc123",
+      "value": {
+        "user_id": 101,
+        "last_activity": "2025-07-25T09:30:00Z",
+        "status": "active"
+      }
+    }
+    ```
 - **`400 Bad Request`**
-    
-    - **Description:** The `key` parameter is missing from the URL.
-        
-    - **Example:** `'key' query parameter is required`
-        
+  - **Description:** The `key` parameter is missing from the URL.
+  - **Example:** `'key' query parameter is required`
 - **`404 Not Found`**
-    
-    - **Description:** The requested key was not found in the data store **or it has expired**.
-        
-    - **Example:** `Key 'temp_cache_item' not found or expired`
-        
+  - **Description:** The requested key was not found in the data store **or it has expired**.
+  - **Example:** `Key 'temp_cache_item' not found or expired`
 - **`405 Method Not Allowed`**
-    
-    - **Description:** An HTTP method other than `GET` was attempted.
-        
+  - **Description:** An HTTP method other than `GET` was attempted.
 
 ---
 
@@ -242,5 +209,4 @@ cfg := Config{
 ### Technologies Used
 
 - **Go (Golang):** The primary programming language.
-    
 - **Go Standard Library:** `net/http`, `sync`, `encoding/json`, `encoding/binary`, `os`, `os/signal`, `syscall`, `log`, `context`, `time`, `maps`, `io`.

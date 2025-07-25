@@ -59,7 +59,7 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
 1. **Clone the repository:**
     
     ```bash
-    git clone https://github.com/your-username/memory-tools.git # Replace with your actual repo URL
+    git clone https://github.com/adoboscan21/Memory-Tools.git # Replace with your actual repo URL
     cd memory-tools
     ```
     

@@ -1,27 +1,31 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"time"
+
+	jsoniter "github.com/json-iterator/go"
 )
 
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
 // Config holds application-wide configuration.
+// json:"tag" is used for JSON unmarshalling.
 type Config struct {
-	Port             string
-	ReadTimeout      time.Duration
-	WriteTimeout     time.Duration
-	IdleTimeout      time.Duration
-	ShutdownTimeout  time.Duration
-	SnapshotInterval time.Duration
-	EnableSnapshots  bool
-	TtlCleanInterval time.Duration
+	Port             string        `json:"port"`
+	ReadTimeout      time.Duration `json:"read_timeout"`
+	WriteTimeout     time.Duration `json:"write_timeout"`
+	IdleTimeout      time.Duration `json:"idle_timeout"`
+	ShutdownTimeout  time.Duration `json:"shutdown_timeout"`
+	SnapshotInterval time.Duration `json:"snapshot_interval"`  // How often to take snapshots
+	EnableSnapshots  bool          `json:"enable_snapshots"`   // Whether scheduled snapshots are enabled.
+	TtlCleanInterval time.Duration `json:"ttl_clean_interval"` // How often the TTL cleaner runs
 }
 
 // configJSON is an intermediate struct used for JSON unmarshalling.
-// All time.Duration fields are represented as strings here.
+// All time.Duration fields are represented as strings here, to allow parsing "5s", "10m" etc.
 type configJSON struct {
 	Port             string `json:"port"`
 	ReadTimeout      string `json:"read_timeout"`
@@ -34,6 +38,7 @@ type configJSON struct {
 }
 
 // NewDefaultConfig creates and returns a Config struct with sensible default values.
+// These defaults will be used if a config file is not found or if a specific field is missing.
 func NewDefaultConfig() Config {
 	return Config{
 		Port:             ":8080",
@@ -77,9 +82,11 @@ func LoadConfig(filePath string) (Config, error) {
 	if jsonCfg.Port != "" {
 		cfg.Port = jsonCfg.Port
 	}
-	if jsonCfg.EnableSnapshots { // This will correctly capture true/false from JSON; if false in JSON, it stays false.
-		cfg.EnableSnapshots = jsonCfg.EnableSnapshots
-	}
+	// Direct assignment for bools is safe because zero value for bool is false.
+	cfg.EnableSnapshots = jsonCfg.EnableSnapshots // Direct assignment is fine. If JSON sets it, it wins. If omitted, it's false, overriding default.
+	// If the default for EnableSnapshots *must* be true unless explicitly set to false in JSON,
+	// then jsonCfg.EnableSnapshots should be a *bool, and checked for nil.
+	// Sticking to current simple bool for now.
 
 	var parseErr error
 

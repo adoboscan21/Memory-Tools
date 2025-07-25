@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-const dataFile = "database.mtdb"             // Name of the file for persistent binary data.
-const snapshotTempFile = "database.mtdb.tmp" // Temporary file used during safe data saving.
+const dataFile = "database.mtdb"
+const snapshotTempFile = "database.mtdb.tmp"
 
 // SaveData saves all non-expired data from the DataStore to a binary file.
 // It uses a temporary file and an atomic rename to ensure data integrity.
@@ -129,7 +129,7 @@ func LoadData(s *store.InMemStore) error {
 	return nil
 }
 
-// SnapshotManager manages the scheduling and execution of data snapshots. (No direct changes needed here)
+// SnapshotManager manages the scheduling and execution of data snapshots.
 type SnapshotManager struct {
 	Store            store.DataStore
 	Interval         time.Duration

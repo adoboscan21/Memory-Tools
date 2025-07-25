@@ -1,21 +1,26 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"memory-tools/internal/store" // Updated store package interface
 	"net/http"
 	"time"
+
+	stdjson "encoding/json"       // Import standard json as 'stdjson' to access RawMessage
+	"memory-tools/internal/store" // Updated store package interface
+
+	jsoniter "github.com/json-iterator/go" // Import jsoniter
 )
 
+// Configure jsoniter to be compatible with the standard library's behavior.
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
 // SetRequest is the structure for the request body of POST /set.
-// 'Value' is json.RawMessage to capture any valid JSON structure directly as bytes.
-// 'TTLSeconds' is an optional field to specify the time-to-live for the item in seconds.
+// 'Value' now uses stdjson.RawMessage from the standard library's json package.
 type SetRequest struct {
-	Key        string          `json:"key"`
-	Value      json.RawMessage `json:"value"`
-	TTLSeconds int64           `json:"ttl_seconds,omitempty"` // New optional field for TTL
+	Key        string             `json:"key"`
+	Value      stdjson.RawMessage `json:"value"`                 // Use stdjson.RawMessage
+	TTLSeconds int64              `json:"ttl_seconds,omitempty"` // New optional field for TTL
 }
 
 // Handlers struct groups our API handlers and the DataStore.
@@ -52,8 +57,10 @@ func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // Limit to 1MB
 
 	var req SetRequest
+	// Use jsoniter's NewDecoder
 	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields() // Disallow unknown fields for stricter parsing.
+	// jsoniter also supports DisallowUnknownFields
+	decoder.DisallowUnknownFields()
 
 	// Decode the request body into the SetRequest struct.
 	if err := decoder.Decode(&req); err != nil {
@@ -74,7 +81,7 @@ func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Value cannot be empty", http.StatusBadRequest)
 		return
 	}
-	// Validate that the json.RawMessage itself is a valid JSON document.
+	// Use jsoniter's Valid method
 	if !json.Valid(req.Value) {
 		log.Printf("Bad request: 'value' field is not a valid JSON document: %s", string(req.Value))
 		http.Error(w, "'value' field must be a valid JSON document", http.StatusBadRequest)
@@ -82,7 +89,6 @@ func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert TTLSeconds (from request) to time.Duration.
-	// If 0 or negative, it means no TTL (item won't expire).
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 	if ttl < 0 { // Ensure TTL is not negative, treat as no expiration
 		ttl = 0
@@ -116,7 +122,6 @@ func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Extract the 'key' query parameter from the URL.
 	key := r.URL.Query().Get("key")
-	// Validate that the 'key' parameter is provided.
 	if key == "" {
 		log.Print("Bad request: 'key' query parameter is required")
 		http.Error(w, "'key' query parameter is required", http.StatusBadRequest)
@@ -124,25 +129,23 @@ func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve the value from the store. This will be raw JSON bytes.
-	// The store's Get method now handles expiration checks.
 	valueBytes, ok := h.Store.Get(key)
 	if !ok {
-		// Updated log and error message to reflect that items can be not found OR expired.
 		log.Printf("Not found: Key='%s' not found or expired", key)
 		http.Error(w, fmt.Sprintf("Key '%s' not found or expired", key), http.StatusNotFound)
 		return
 	}
 
 	// Construct the JSON response. The 'value' field will embed the raw JSON bytes.
-	// We use json.RawMessage to ensure the 'valueBytes' are inserted directly as JSON
+	// We use stdjson.RawMessage to ensure the 'valueBytes' are inserted directly as JSON
 	// without being re-escaped as a string.
-	responseMap := map[string]json.RawMessage{
-		"key":   json.RawMessage(fmt.Sprintf(`"%s"`, key)), // Embed key as a JSON string.
-		"value": json.RawMessage(valueBytes),               // Embed the raw JSON value.
+	responseMap := map[string]stdjson.RawMessage{
+		"key":   stdjson.RawMessage(fmt.Sprintf(`"%s"`, key)), // Embed key as a JSON string.
+		"value": stdjson.RawMessage(valueBytes),               // Embed the raw JSON value.
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	// Encode the response map to JSON and write it to the response writer.
+	// Use jsoniter's NewEncoder
 	if err := json.NewEncoder(w).Encode(responseMap); err != nil {
 		log.Printf("Error encoding JSON response for GET request: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -153,9 +156,8 @@ func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
 // LogRequest is a middleware for logging incoming HTTP requests. (No changes needed here)
 func LogRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()  // Record the start time of the request.
-		next.ServeHTTP(w, r) // Serve the actual request.
-		// Log request details including method, path, and duration.
+		start := time.Now()
+		next.ServeHTTP(w, r)
 		log.Printf("Request: Method='%s', Path='%s', Duration='%s'", r.Method, r.URL.Path, time.Since(start))
 	})
 }

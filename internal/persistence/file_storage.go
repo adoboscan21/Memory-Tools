@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-const dataFile = "data.mtdb"
-const snapshotTempFile = "data.mtdb.tmp"
+const dataFile = "database.mtdb"
+const snapshotTempFile = "database.mtdb.tmp"
 
 // SaveData saves all data from the DataStore to a binary file.
 // It now handles values as []byte (raw JSON).

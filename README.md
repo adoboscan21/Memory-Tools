@@ -49,9 +49,7 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
 1. **Clone the repository** (or create the files and folders manually as described in the structure).
     
 2. Navigate to the **project root** in your terminal:
-    
-    Bash
-    
+        
     ```bash
     go run .
     ```
@@ -91,9 +89,8 @@ Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
 
-Bash
 
-```json
+```bash
 curl -X POST \
      -H "Content-Type: application/json" \
      -d '{
@@ -153,8 +150,6 @@ Exportar a Hojas de cálculo
 
 #### **Example Request (using `curl`):**
 
-Bash
-
 ```bash
 curl "http://localhost:8080/get?key=user_settings_123"
 ```
@@ -168,9 +163,7 @@ curl "http://localhost:8080/get?key=user_settings_123"
     - **Content-Type:** `application/json`
         
     - **Response Body (JSON):**
-        
-        JSON
-        
+                
         ```json
         {
             "key": "user_settings_123",

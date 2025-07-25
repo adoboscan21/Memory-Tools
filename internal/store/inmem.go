@@ -54,7 +54,7 @@ func NewInMemStore() *InMemStore {
 		shards: make([]*Shard, defaultNumShards), // Initialize the slice of shards.
 	}
 	// Initialize each shard with its own map.
-	for i := 0; i < defaultNumShards; i++ {
+	for i := range defaultNumShards {
 		s.shards[i] = &Shard{
 			data: make(map[string]Item),
 		}

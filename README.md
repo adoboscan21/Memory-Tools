@@ -1,30 +1,34 @@
-## **Simple Key-Value Document API with Persistent Snapshots and Time-To-Live (TTL) in Go-Lang**
+# Memory Tools: A High-Performance Key-Value Document API with Persistent Snapshots and TTL in Go
 
-This project implements a basic REST API for storing and retrieving key-value pairs, where **values can be full JSON objects**. Data is kept in memory for fast access, supports individual item expiration (TTL), and is automatically persisted to a local binary file (`database.mtdb`) using configurable snapshots, ensuring no data loss upon application restarts.
+This project implements a basic REST API for storing and retrieving key-value pairs, where **values can be full JSON objects**. Designed for speed and efficiency, it keeps data in memory, supports individual item expiration (Time-To-Live), and automatically persists its state to a local binary file using configurable snapshots, ensuring data durability across application restarts.
 
 ---
 
 ## Features
 
-- **In-Memory Document Storage:** Data is stored in a `map[string]struct { Value []byte; CreatedAt time.Time; TTL time.Duration }` for rapid access, allowing values to be arbitrary JSON documents.
+- **High-Performance In-Memory Document Storage:** Data is stored in a **sharded map** (`[]*store.Shard` where each `Shard` contains a `map[string]store.Item` and its own `sync.RWMutex`) for rapid, concurrent access. This architecture significantly reduces mutex contention, especially for write-heavy workloads, allowing values to be arbitrary JSON documents.
     
-- **Time-To-Live (TTL):** Individual key-value pairs can be set with an expiration time. Expired items are automatically removed from memory, optimizing resource usage.
+- **Time-To-Live (TTL):** Individual key-value pairs can be set with an expiration time. A dedicated background cleaner automatically removes expired items from memory, efficiently managing resource usage.
     
-- **Binary Data Persistence (`.mtdb`):** Data is automatically saved to `database.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state (non-expired items only).
+- **Optimized Binary Data Persistence (`database.mtdb`):** Data is automatically saved to `database.mtdb` in a highly efficient binary format. This file is loaded on startup, restoring the previous state (only non-expired items are persisted and loaded).
     
-- **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals (e.g., every 5 minutes). Only non-expired items are included in snapshots.
+- **Configurable Snapshots:** The application can be configured to take periodic snapshots of the in-memory data at specified intervals. Only non-expired items are included in these snapshots, ensuring clean data persistence.
     
-- **Atomic Writes:** Snapshots are saved to a temporary file first, then atomically renamed, ensuring data integrity even if the system crashes during a save operation.
+- **Atomic Writes:** Snapshots are saved to a temporary file first, then atomically renamed, guaranteeing data integrity even if the system crashes during a save operation.
     
-- **REST API:** Two endpoints for `SET` (save) and `GET` (retrieve) operations.
+- **High-Performance JSON Handling:** Leverages the `json-iterator/go` library for faster JSON serialization and deserialization, minimizing CPU overhead and GC pressure per request.
     
-- **Concurrency Handling:** Uses `sync.RWMutex` to ensure safe data access from multiple concurrent requests.
+- **REST API:** Provides simple HTTP endpoints for `SET` (save) and `GET` (retrieve) operations.
     
-- **Go Modules:** Modular project structure for better organization and maintainability.
+- **Advanced Concurrency Handling:** Utilizes `sync.RWMutex` per shard to ensure safe and highly concurrent data access from multiple requests, optimizing for parallel read/write operations.
     
-- **Graceful Shutdown:** The application shuts down cleanly, saving the latest non-expired data, stopping scheduled snapshots and the TTL cleaner, and closing HTTP connections safely.
+- **Modular Go Design:** Structured with Go modules, promoting clear separation of concerns, maintainability, and testability.
     
-- **Framework-less:** Built purely with Go's standard library for full control and low overhead.
+- **Graceful Shutdown:** The application shuts down cleanly, ensuring the latest non-expired data is saved, scheduled snapshots and the TTL cleaner are stopped, and HTTP connections are closed safely.
+    
+- **Framework-less Core:** Built primarily with Go's standard library, offering full control and low overhead, with a minimal, high-performance external dependency for JSON processing.
+    
+- **Configurable via JSON:** Application settings (ports, timeouts, snapshot/TTL intervals) are loaded from an external JSON file, allowing flexible deployment without recompilation.
     
 
 ---
@@ -34,15 +38,15 @@ This project implements a basic REST API for storing and retrieving key-value pa
 ```
 memory-tools/
 ├── main.go                       # Main entry point and application orchestration.
-├── api/                          # HTTP endpoint handlers.
+├── api/                          # HTTP endpoint handlers, using json-iterator.
 │   └── handlers.go
-├── store/                        # In-memory data storage logic, including TTL management.
+├── store/                        # Sharded in-memory data storage logic, including TTL management.
 │   └── inmem.go
 ├── persistence/                  # Logic for persisting data to disk (binary file storage) and snapshot management.
 │   └── binary_storage.go
-├── config/                       # Application configuration definition and loading.
-│   └── config.go                 # Defines Config struct and functions to load from JSON.
-└── go.mod                        # Go module file.
+├── config/                       # Application configuration definition and loading from JSON.
+│   └── config.go
+├── go.mod                        # Go module file.
 └── go.sum                        # Dependency checksums.
 ```
 
@@ -52,12 +56,33 @@ memory-tools/
 
 Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/install).
 
-1. **Clone the repository** (or create the files and folders manually as described in the structure).
+1. **Clone the repository:**
     
-2. **Create a `config.json` file** in the project root with your desired settings (see example below).
+    ```bash
+    git clone https://github.com/your-username/memory-tools.git # Replace with your actual repo URL
+    cd memory-tools
+    ```
     
-3. Navigate to the **project root** in your terminal:
-      
+2. **Create a `config.json` file** in the project root with your desired settings. This file specifies how your application behaves (e.g., ports, timeouts, intervals). If omitted or not found, default values will be used.
+    
+    ### Example `config.json`
+
+    
+    ```json
+    {
+      "port": ":8080",
+      "read_timeout": "5s",
+      "write_timeout": "10s",
+      "idle_timeout": "120s",
+      "shutdown_timeout": "10s",
+      "snapshot_interval": "5m",
+      "enable_snapshots": true,
+      "ttl_clean_interval": "1m"
+    }
+    ```
+    
+3. **Run the application:**
+    
     ```bash
     go run .
     ```
@@ -67,23 +92,9 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     You can also specify a custom config file path:
     
     ```bash
-    go run . --config=my_custom_config.json
+    go run . --config=./path/to/your_custom_config.json
     ```
     
-### Example `config.json`
-
-```json
-{
-  "port": ":8080",
-  "read_timeout": "5s",
-  "write_timeout": "10s",
-  "idle_timeout": "120s",
-  "shutdown_timeout": "10s",
-  "snapshot_interval": "5m",
-  "enable_snapshots": true,
-  "ttl_clean_interval": "1m"
-}
-```
 
 ---
 
@@ -91,7 +102,7 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
 
 Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/install).
 
-1. **Clone the repository** (or create the files and folders manually as described in the structure).
+1. **Clone the repository** (as described in "How to Run").
     
 2. Navigate to the **project root** in your terminal:
     
@@ -100,16 +111,15 @@ Make sure you have [Go installed (version go1.21 or higher)](https://go.dev/doc/
     ```
     
     This will create an executable binary (e.g., `memory-tools` on Linux/macOS, `memory-tools.exe` on Windows) in your project root. You can then run it directly:
-        
+    
     ```bash
     ./memory-tools # or memory-tools.exe on Windows
     ```
     
     You can also pass the config flag to the compiled binary:
     
-    
     ```bash
-    ./memory-tools --config=my_custom_config.json
+    ./memory-tools --config=./path/to/your_custom_config.json
     ```
     
 
@@ -139,8 +149,9 @@ Saves a key-value pair to the data store. If the key already exists, its value a
 |Name|Type|Description|Required|Example|
 |---|---|---|---|---|
 |`key`|`string`|The unique key for the data.|Yes|`"user_profile"`|
-|`value`|`JSON Object/Array` (represented as `json.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}}`|
+|`value`|`JSON Object/Array` (represented as `stdjson.RawMessage`)|The value associated with the key, expected to be a valid JSON object or array.|Yes|`{"name": "Alice", "age": 30, "details": {"city": "Wonderland"}}`|
 |`ttl_seconds`|`integer`|**(Optional)** Time-To-Live for the item in seconds. If `0` or omitted, the item never expires.|No|`600` (for 10 minutes), `3600` (for 1 hour), `5` (for 5 seconds, for testing expiration)|
+
 #### **Example Request (using `curl`):**
 
 **Example 1: Setting a key with a 10-minute TTL**
@@ -209,6 +220,8 @@ Retrieves the value associated with a specific key. The returned value will be t
 |---|---|---|---|---|
 |`key`|`string`|The key of the data to retrieve.|Yes|`user_session:abc123`|
 
+Exportar a Hojas de cálculo
+
 #### **Example Request (using `curl`):**
 
 ```bash
@@ -259,17 +272,20 @@ curl "http://localhost:8080/get?key=user_session:abc123"
 
 When the application starts, it attempts to load existing data from `database.mtdb`. If the file doesn't exist, it starts with an empty store. Only non-expired items are included in the loaded data.
 
-During runtime, the application will periodically save the current in-memory data to the `database.mtdb` file. This process is managed by a **Snapshot Manager** and occurs at a configurable interval (e.g., every 5 minutes by default). This ensures that even if the application crashes unexpectedly, your data loss is limited to the period since the last snapshot. **Only non-expired items are saved during snapshots.**
+During runtime, the application will periodically save the current in-memory data to the `database.mtdb` file. This process is managed by a **Snapshot Manager** and occurs at a configurable interval. This ensures that even if the application crashes unexpectedly, your data loss is limited to the period since the last snapshot. **Only non-expired items are saved during snapshots.**
 
-Additionally, a **TTL Cleaner** runs in the background at a configurable interval (e.g., every 1 minute by default). This cleaner physically removes expired items from the in-memory store, freeing up memory.
+Additionally, a **TTL Cleaner** runs in the background at a configurable interval. This cleaner physically removes expired items from the in-memory store, freeing up memory.
 
 When the application receives a termination signal (e.g., `Ctrl+C` in the terminal or a `SIGTERM` signal in a server/container environment), both the Snapshot Manager and the TTL Cleaner are stopped, and a **final snapshot** of the current non-expired in-memory data is taken and saved to `database.mtdb` before the application exits. This guarantees the freshest possible data state upon shutdown.
 
 You can configure the snapshot and TTL cleaner behavior using the `config.json` file.
 
 ---
+
 ### Technologies Used
 
 - **Go (Golang):** The primary programming language.
     
-- **Go Standard Library:** `net/http`, `sync`, `encoding/json`, `encoding/binary`, `os`, `os/signal`, `syscall`, `log`, `context`, `time`, `maps`, `io`, `flag`.
+- **Go Standard Library:** `net/http`, `sync`, `encoding/json` (aliased as `stdjson` for `RawMessage`), `encoding/binary`, `os`, `os/signal`, `syscall`, `log`, `context`, `time`, `maps`, `io`, `flag`, `hash/fnv`.
+    
+- **External Library:** `github.com/json-iterator/go` (for high-performance JSON processing).

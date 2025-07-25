@@ -47,7 +47,10 @@ memory-tools/
 ├── config/                       # Application configuration definition and loading from JSON.
 │   └── config.go
 ├── go.mod                        # Go module file.
-└── go.sum                        # Dependency checksums.
+├── go.sum                        # Dependency checksums.
+├── .dockerignore                 # Docker ignore file
+├── Dockerfile                    # Docker build file
+└── docker-compose.yml            # Docker compose file.
 ```
 
 ---

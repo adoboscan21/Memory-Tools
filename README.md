@@ -220,8 +220,6 @@ Retrieves the value associated with a specific key. The returned value will be t
 |---|---|---|---|---|
 |`key`|`string`|The key of the data to retrieve.|Yes|`user_session:abc123`|
 
-Exportar a Hojas de cálculo
-
 #### **Example Request (using `curl`):**
 
 ```bash

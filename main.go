@@ -1,12 +1,14 @@
+// main.go (Sin cambios necesarios)
 package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"memory-tools/internal/api"
 	"memory-tools/internal/config"
 	"memory-tools/internal/persistence"
-	"memory-tools/internal/store" // Store package with new TTL features
+	"memory-tools/internal/store"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,34 +17,29 @@ import (
 )
 
 func main() {
-	// Configure logging format to include date, time, and file/line number.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	// Application Configuration.
-	cfg := config.Config{
-		Port:            ":8080",
-		ReadTimeout:     5 * time.Second,   // Max time to read the request body.
-		WriteTimeout:    10 * time.Second,  // Max time to write the response.
-		IdleTimeout:     120 * time.Second, // Max time a connection can remain idle.
-		ShutdownTimeout: 10 * time.Second,  // Max time for graceful shutdown.
-		// Snapshot configuration:
-		SnapshotInterval: 5 * time.Minute, // Take a snapshot every 5 minutes.
-		EnableSnapshots:  true,            // Enable scheduled snapshots by default.
-		// TTL Cleaner configuration:
-		TtlCleanInterval: 1 * time.Minute, // Run TTL cleaner every 1 minute.
+	// Define a command-line flag for the config file path.
+	// Default to "config.json" now.
+	configPath := flag.String("config", "config.json", "Path to the JSON configuration file")
+	flag.Parse()
+
+	// Load application configuration from the specified file.
+	cfg, err := config.LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Fatal error loading configuration: %v", err)
 	}
 
 	// 1. Initialize the in-memory data store.
 	inMemStore := store.NewInMemStore()
 
 	// 2. Load persistent data from the binary file on application start.
-	// If loading fails, it's a fatal error as the application cannot run without its data.
 	if err := persistence.LoadData(inMemStore); err != nil {
 		log.Fatalf("Fatal error loading persistent data: %v", err)
 	}
 
 	// 3. Create an instance of the API handlers, injecting the store dependency.
-	apiHandlers := api.NewHandlers(inMemStore) // Handlers need to be updated to pass TTL
+	apiHandlers := api.NewHandlers(inMemStore)
 
 	// 4. Create a new ServeMux for routing HTTP requests.
 	mux := http.NewServeMux()
@@ -54,20 +51,18 @@ func main() {
 	// 6. Configure the HTTP server with timeouts and the router.
 	server := &http.Server{
 		Addr:         cfg.Port,
-		Handler:      mux, // Our configured ServeMux.
+		Handler:      mux,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
 	// 7. Initialize and start the snapshot manager in a separate goroutine.
-	// This goroutine will periodically save the data to the .mtdb file.
 	snapshotManager := persistence.NewSnapshotManager(inMemStore, cfg.SnapshotInterval, cfg.EnableSnapshots)
 	go snapshotManager.Start()
 
 	// 8. Start the TTL cleaner goroutine.
-	// This goroutine will periodically remove expired items from the in-memory store.
-	ttlCleanStopChan := make(chan struct{}) // Channel to signal the TTL cleaner to stop.
+	ttlCleanStopChan := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
 		defer ticker.Stop()
@@ -87,19 +82,14 @@ func main() {
 	// 9. Start the HTTP server in a goroutine to not block the main thread.
 	go func() {
 		log.Printf("Server listening on http://localhost%s", cfg.Port)
-		// ListenAndServe returns an error, typically http.ErrServerClosed during graceful shutdown.
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// Use Fatalf for unrecoverable errors during server startup.
 			log.Fatalf("Could not start server: %v", err)
 		}
 	}()
 
 	// 10. Set up graceful shutdown mechanism.
-	// Create a channel to listen for OS signals.
 	sigChan := make(chan os.Signal, 1)
-	// Notify this channel for interrupt (Ctrl+C) and termination signals.
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	// Block the main goroutine until a termination signal is received.
 	<-sigChan
 
 	log.Println("Termination signal received. Attempting graceful shutdown...")
@@ -112,7 +102,6 @@ func main() {
 
 	// Create a context with a timeout for the server shutdown.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	// Ensure the context cancellation function is called to release resources.
 	defer cancelShutdown()
 
 	// Shut down the HTTP server gracefully.

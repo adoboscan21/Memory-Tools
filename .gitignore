@@ -26,6 +26,7 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+config.json
 
 # env file
 .env

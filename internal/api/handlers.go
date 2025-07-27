@@ -15,6 +15,31 @@ import (
 // Configure jsoniter to be compatible with the standard library's behavior.
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
+// APIResponse defines the base structure for all JSON responses.
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message,omitempty"` // Message is optional for success, but good for errors.
+	Data    interface{} `json:"data,omitempty"`    // Generic data field for successful responses.
+}
+
+// sendJSONResponse is a helper function to send any JSON response.
+func sendJSONResponse(w http.ResponseWriter, success bool, message string, data interface{}, statusCode int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(statusCode)
+
+	resp := APIResponse{
+		Success: success,
+		Message: message,
+		Data:    data,
+	}
+
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
+		// Fallback to text error if JSON encoding fails for some reason
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
 // SetRequest is the structure for the request body of POST /set.
 // 'Value' now uses stdjson.RawMessage from the standard library's json package.
 type SetRequest struct {
@@ -36,124 +61,96 @@ func NewHandlers(s store.DataStore) *Handlers {
 
 // SetHandler handles POST requests to save key-value pairs with JSON values and optional TTL.
 func (h *Handlers) SetHandler(w http.ResponseWriter, r *http.Request) {
-	// Use context for request-scoped values, cancellation, and deadlines.
 	ctx := r.Context()
 	select {
 	case <-ctx.Done():
 		log.Printf("Request /set cancelled or timed out: %v", ctx.Err())
-		http.Error(w, "Request cancelled or timed out", http.StatusServiceUnavailable)
+		sendJSONResponse(w, false, "Request cancelled or timed out", nil, http.StatusServiceUnavailable)
 		return
 	default:
-		// Continue with handler logic if context is not done.
+		// Continue with handler logic
 	}
 
-	// Ensure the request method is POST.
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		sendJSONResponse(w, false, "Method not allowed", nil, http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Wrap the request body with http.MaxBytesReader to prevent large payloads.
-	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // Limit to 1MB
-
+	r.Body = http.MaxBytesReader(w, r.Body, 50*1024*1024) // Limit body to 50 MB
 	var req SetRequest
-	// Use jsoniter's NewDecoder
 	decoder := json.NewDecoder(r.Body)
-	// jsoniter also supports DisallowUnknownFields
 	decoder.DisallowUnknownFields()
 
-	// Decode the request body into the SetRequest struct.
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("Bad request: invalid JSON body or unknown fields: %v", err)
-		http.Error(w, "Invalid JSON request body or unknown fields", http.StatusBadRequest)
+		sendJSONResponse(w, false, "Invalid JSON request body or unknown fields", nil, http.StatusBadRequest)
 		return
 	}
 
-	// Validate that the key is not empty.
 	if req.Key == "" {
 		log.Print("Bad request: key cannot be empty")
-		http.Error(w, "Key cannot be empty", http.StatusBadRequest)
+		sendJSONResponse(w, false, "Key cannot be empty", nil, http.StatusBadRequest)
 		return
 	}
-	// Validate that the value (raw JSON) is not empty.
 	if len(req.Value) == 0 {
 		log.Print("Bad request: value cannot be empty (e.g., use {} or [])")
-		http.Error(w, "Value cannot be empty", http.StatusBadRequest)
+		sendJSONResponse(w, false, "Value cannot be empty (e.g., use {} or [])", nil, http.StatusBadRequest)
 		return
 	}
-	// Use jsoniter's Valid method
 	if !json.Valid(req.Value) {
 		log.Printf("Bad request: 'value' field is not a valid JSON document: %s", string(req.Value))
-		http.Error(w, "'value' field must be a valid JSON document", http.StatusBadRequest)
+		sendJSONResponse(w, false, "'value' field must be a valid JSON document", nil, http.StatusBadRequest)
 		return
 	}
 
-	// Convert TTLSeconds (from request) to time.Duration.
-	ttl := time.Duration(req.TTLSeconds) * time.Second
-	if ttl < 0 { // Ensure TTL is not negative, treat as no expiration
-		ttl = 0
-	}
+	ttl := max(time.Duration(req.TTLSeconds)*time.Second, 0)
 
-	// Pass the raw JSON bytes and the calculated TTL to the store.
 	h.Store.Set(req.Key, req.Value, ttl)
-	w.WriteHeader(http.StatusOK)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "Data saved: Key='%s'", req.Key) // No longer show the full value in success log.
+	// Success response for SetHandler
+	sendJSONResponse(w, true, fmt.Sprintf("Data saved for Key='%s'", req.Key), nil, http.StatusOK)
 }
 
 // GetHandler handles GET requests to retrieve a value by key.
 func (h *Handlers) GetHandler(w http.ResponseWriter, r *http.Request) {
-	// Check request context for cancellation or timeout.
 	ctx := r.Context()
 	select {
 	case <-ctx.Done():
 		log.Printf("Request /get cancelled or timed out: %v", ctx.Err())
-		http.Error(w, "Request cancelled or timed out", http.StatusServiceUnavailable)
+		sendJSONResponse(w, false, "Request cancelled or timed out", nil, http.StatusServiceUnavailable)
 		return
 	default:
-		// Continue with handler logic.
+		// Continue with handler logic
 	}
 
-	// Ensure the request method is GET.
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		sendJSONResponse(w, false, "Method not allowed", nil, http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Extract the 'key' query parameter from the URL.
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		log.Print("Bad request: 'key' query parameter is required")
-		http.Error(w, "'key' query parameter is required", http.StatusBadRequest)
+		sendJSONResponse(w, false, "'key' query parameter is required", nil, http.StatusBadRequest)
 		return
 	}
 
-	// Retrieve the value from the store. This will be raw JSON bytes.
 	valueBytes, ok := h.Store.Get(key)
 	if !ok {
 		log.Printf("Not found: Key='%s' not found or expired", key)
-		http.Error(w, fmt.Sprintf("Key '%s' not found or expired", key), http.StatusNotFound)
+		sendJSONResponse(w, false, fmt.Sprintf("Key '%s' not found or expired", key), nil, http.StatusNotFound)
 		return
 	}
 
-	// Construct the JSON response. The 'value' field will embed the raw JSON bytes.
-	// We use stdjson.RawMessage to ensure the 'valueBytes' are inserted directly as JSON
-	// without being re-escaped as a string.
-	responseMap := map[string]stdjson.RawMessage{
-		"key":   stdjson.RawMessage(fmt.Sprintf(`"%s"`, key)), // Embed key as a JSON string.
-		"value": stdjson.RawMessage(valueBytes),               // Embed the raw JSON value.
+	// For successful GET, we want to include the retrieved data.
+	// We'll create an anonymous struct or map for the data field.
+	responseData := map[string]stdjson.RawMessage{
+		"key":   stdjson.RawMessage(fmt.Sprintf(`"%s"`, key)),
+		"value": stdjson.RawMessage(valueBytes),
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	// Use jsoniter's NewEncoder
-	if err := json.NewEncoder(w).Encode(responseMap); err != nil {
-		log.Printf("Error encoding JSON response for GET request: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+	sendJSONResponse(w, true, "Data retrieved successfully", responseData, http.StatusOK)
 }
 
-// LogRequest is a middleware for logging incoming HTTP requests. (No changes needed here)
+// LogRequest is a middleware for logging incoming HTTP requests.
 func LogRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

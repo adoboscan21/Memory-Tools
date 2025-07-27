@@ -27,6 +27,7 @@ profile.cov
 go.work
 go.work.sum
 config.json
+memory-tools
 
 # env file
 .env

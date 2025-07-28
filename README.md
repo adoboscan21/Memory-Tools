@@ -59,4 +59,6 @@ You can use the interactive CLI client inside the running server container to co
 docker exec -it memory-tools-server memory-tools-client localhost:8080
 ```
 
+For a full list of commands and detailed examples, see [`docs/client.md`](https://github.com/adoboscan21/Memory-Tools/blob/main/docs/client.md).
+
 Once connected, type `help` for available commands.

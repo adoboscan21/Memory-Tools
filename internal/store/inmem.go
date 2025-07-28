@@ -8,17 +8,17 @@ import (
 	"time"
 )
 
-// Item represents an individual key-value entry stored in the in-memory database.
+// Item represents an individual key-value entry.
 type Item struct {
-	Value     []byte        // The actual value, stored as raw JSON bytes.
-	CreatedAt time.Time     // Timestamp when item was created or updated.
-	TTL       time.Duration // Time-to-live for this item. 0 means no expiration.
+	Value     []byte
+	CreatedAt time.Time
+	TTL       time.Duration // 0 means no expiration.
 }
 
 // Shard represents a segment of the in-memory store.
 type Shard struct {
-	data map[string]Item // Map for this shard.
-	mu   sync.RWMutex    // Mutex to protect concurrent access.
+	data map[string]Item
+	mu   sync.RWMutex // Mutex to protect concurrent access.
 }
 
 // DataStore is the interface that defines basic key-value store operations.
@@ -26,19 +26,18 @@ type DataStore interface {
 	Set(key string, value []byte, ttl time.Duration)
 	Get(key string) ([]byte, bool)
 	Delete(key string)
-	GetAll() map[string][]byte // Get all non-expired data
+	GetAll() map[string][]byte // Get all non-expired data.
 	LoadData(data map[string][]byte)
-	CleanExpiredItems() bool // Returns true if any items were cleaned
-	Size() int               // Returns the current number of items
+	CleanExpiredItems() bool // Returns true if any items were cleaned.
+	Size() int               // Returns the current number of items.
 }
 
 // InMemStore implements DataStore for in-memory storage, with sharding.
 type InMemStore struct {
-	shards    []*Shard // Array of pointers to Shard structs.
-	numShards int      // Number of shards.
+	shards    []*Shard
+	numShards int
 }
 
-// Default number of shards.
 const defaultNumShards = 16
 
 // NewInMemStore creates a new InMemStore with default sharding.
@@ -210,8 +209,6 @@ func (s *InMemStore) Size() int {
 	return total
 }
 
-// --- New Collection Management Layer ---
-
 // CollectionPersister defines the interface for persistence operations specific to collections.
 type CollectionPersister interface {
 	SaveCollectionData(collectionName string, s DataStore) error
@@ -220,16 +217,16 @@ type CollectionPersister interface {
 
 // CollectionManager manages multiple named InMemStore instances, each representing a collection.
 type CollectionManager struct {
-	collections map[string]DataStore // Map of collection names to their DataStore instances
-	mu          sync.RWMutex         // Mutex to protect the 'collections' map
-	persister   CollectionPersister  // Interface for persistence operations
+	collections map[string]DataStore // Map of collection names to their DataStore instances.
+	mu          sync.RWMutex         // Mutex to protect the 'collections' map.
+	persister   CollectionPersister  // Interface for persistence operations.
 }
 
 // NewCollectionManager creates a new instance of CollectionManager.
 func NewCollectionManager(persister CollectionPersister) *CollectionManager {
 	return &CollectionManager{
 		collections: make(map[string]DataStore),
-		persister:   persister, // Inject the persister
+		persister:   persister, // Inject the persister.
 	}
 }
 
@@ -255,7 +252,7 @@ func (cm *CollectionManager) GetCollection(name string) DataStore {
 	}
 
 	// Create new collection.
-	newCol := NewInMemStore() // Each collection gets its own sharded in-memory store
+	newCol := NewInMemStore() // Each collection gets its own sharded in-memory store.
 	cm.collections[name] = newCol
 	log.Printf("Collection '%s' created and added to CollectionManager.", name)
 	return newCol
@@ -295,17 +292,17 @@ func (cm *CollectionManager) CollectionExists(name string) bool {
 
 // LoadAllCollectionData loads data into the respective InMemStore instances within the manager.
 func (cm *CollectionManager) LoadAllCollectionData(allCollectionsData map[string]map[string][]byte) {
-	cm.mu.Lock() // Acquire write lock for the entire duration of loading collections
+	cm.mu.Lock() // Acquire write lock for the entire duration of loading collections.
 	defer cm.mu.Unlock()
 
 	// Clear existing in-memory collection instances before loading.
-	cm.collections = make(map[string]DataStore) // Re-initialize to clear
+	cm.collections = make(map[string]DataStore) // Re-initialize to clear.
 
 	for colName, data := range allCollectionsData {
 		// Directly create and load the new InMemStore for this collection.
-		newCol := NewInMemStore()        // Create a new InMemStore for this collection
-		newCol.LoadData(data)            // Load data into this specific InMemStore
-		cm.collections[colName] = newCol // Directly assign to the map
+		newCol := NewInMemStore()        // Create a new InMemStore for this collection.
+		newCol.LoadData(data)            // Load data into this specific InMemStore.
+		cm.collections[colName] = newCol // Directly assign to the map.
 		log.Printf("Loaded collection '%s' with %d items into CollectionManager from persistence.", colName, newCol.Size())
 	}
 	log.Printf("CollectionManager: Successfully loaded/updated %d collections from persistence.", len(allCollectionsData))
@@ -318,7 +315,7 @@ func (cm *CollectionManager) GetAllCollectionsDataForPersistence() map[string]ma
 
 	dataToSave := make(map[string]map[string][]byte)
 	for colName, col := range cm.collections {
-		dataToSave[colName] = col.GetAll() // Get all non-expired data from each collection's InMemStore
+		dataToSave[colName] = col.GetAll() // Get all non-expired data from each collection's InMemStore.
 	}
 	log.Printf("CollectionManager: Retrieved data from %d collections for persistence.", len(dataToSave))
 	return dataToSave
@@ -338,14 +335,14 @@ func (cm *CollectionManager) DeleteCollectionFromDisk(collectionName string) err
 
 // CleanExpiredItemsAndSave triggers TTL cleanup on all managed collections and saves modified ones to disk.
 func (cm *CollectionManager) CleanExpiredItemsAndSave() {
-	cm.mu.RLock() // Read lock to iterate collections without blocking new collection creation
+	cm.mu.RLock() // Read lock to iterate collections without blocking new collection creation.
 	collectionsAndNames := make(map[string]DataStore, len(cm.collections))
 	maps.Copy(collectionsAndNames, cm.collections)
 	cm.mu.RUnlock()
 
 	log.Println("TTL Cleaner (Collections): Starting sweep across all managed collections.")
 	for name, col := range collectionsAndNames {
-		if col.CleanExpiredItems() { // CleanExpiredItems now returns true if any item was deleted
+		if col.CleanExpiredItems() { // CleanExpiredItems now returns true if any item was deleted.
 			// If items were deleted, save the modified collection to disk.
 			if err := cm.SaveCollectionToDisk(name, col); err != nil {
 				log.Printf("Error saving collection '%s' to disk after TTL cleanup: %v", name, err)

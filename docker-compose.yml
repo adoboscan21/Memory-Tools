@@ -4,5 +4,7 @@ services:
       context: . # Look for the Dockerfile in the current directory
       dockerfile: Dockerfile # Specify the name of your Dockerfile
     ports:
-      - "8080:8080" # Map host port 8080 to container port 8080
+      - "8081:8081" # Map host port 8081 to container port 8081 (for REST API)
+    volumes:
+      - ./collections:/root/collections
     restart: always # Always restart the container if it stops

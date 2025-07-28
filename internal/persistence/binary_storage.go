@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"memory-tools/internal/store" // Keep this import, as persistence needs DataStore
+	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-// --- Persistence for the main InMemStore (database.mtdb) ---
+// Constants for main data persistence.
 const mainDataFile = "in-memory.mtdb"
 const mainSnapshotTempFile = "in-memory.mtdb.tmp"
 
 // SaveData saves all non-expired data from the main DataStore to a binary file.
 func SaveData(s store.DataStore) error {
-	data := s.GetAll() // Data is now map[string][]byte, containing only non-expired items.
+	data := s.GetAll()
 
 	file, err := os.Create(mainSnapshotTempFile)
 	if err != nil {
@@ -113,7 +113,7 @@ func LoadData(s store.DataStore) error {
 
 // SnapshotManager manages the scheduling and execution of data snapshots for the main InMemStore.
 type SnapshotManager struct {
-	Store            store.DataStore // Refers to the main DataStore
+	Store            store.DataStore // Refers to the main DataStore.
 	Interval         time.Duration
 	Quit             chan struct{}
 	SnapshotsEnabled bool
@@ -161,16 +161,16 @@ func (sm *SnapshotManager) Stop() {
 	}
 }
 
-// --- New Persistence for Collections ---
+// Constants for collections persistence.
 const collectionsDir = "collections"
-const collectionFileExtension = ".cmtdb"
+const collectionFileExtension = ".mtdb"
 
 // CollectionPersisterImpl implements the store.CollectionPersister interface.
 type CollectionPersisterImpl struct{}
 
 // SaveCollectionData saves all non-expired data from a single collection (DataStore) to a file.
 func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s store.DataStore) error {
-	// Ensure the collections directory exists
+	// Ensure the collections directory exists.
 	if err := os.MkdirAll(collectionsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create collections directory '%s': %w", collectionsDir, err)
 	}
@@ -250,7 +250,7 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("Collection file '%s' for '%s' not found, initializing with empty data.", filePath, collectionName)
-			return nil // Not an error if file doesn't exist for a single collection
+			return nil
 		}
 		return fmt.Errorf("failed to open collection file '%s': %w", filePath, err)
 	}
@@ -285,7 +285,7 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 		collectionData[key] = value
 	}
 
-	s.LoadData(collectionData) // Load data into the provided DataStore (InMemStore)
+	s.LoadData(collectionData) // Load data into the provided DataStore (InMemStore).
 	log.Printf("Collection '%s' successfully loaded from %s. Total keys: %d", collectionName, filePath, len(collectionData))
 	return nil
 }
@@ -293,7 +293,7 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 // ListCollectionFiles returns a list of all collection names found on disk.
 func ListCollectionFiles() ([]string, error) {
 	if _, err := os.Stat(collectionsDir); os.IsNotExist(err) {
-		return []string{}, nil // Directory doesn't exist, no collections
+		return []string{}, nil // Directory doesn't exist, no collections.
 	}
 
 	files, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
@@ -322,12 +322,12 @@ func LoadAllCollectionsIntoManager(cm *store.CollectionManager) error {
 	allLoadedCollectionsData := make(map[string]map[string][]byte)
 
 	for _, colName := range collectionNames {
-		tempStore := store.NewInMemStore() // Create a temporary InMemStore to load data
+		tempStore := store.NewInMemStore() // Create a temporary InMemStore to load data.
 		if err := LoadCollectionData(colName, tempStore); err != nil {
 			log.Printf("Warning: Failed to load data for collection '%s': %v", colName, err)
-			continue // Continue with the next collection even if this one fails
+			continue // Continue with the next collection even if this one fails.
 		}
-		allLoadedCollectionsData[colName] = tempStore.GetAll() // Get loaded data from tempStore
+		allLoadedCollectionsData[colName] = tempStore.GetAll() // Get loaded data from tempStore.
 	}
 
 	// Pass all loaded data to the CollectionManager.
@@ -341,7 +341,7 @@ func LoadAllCollectionsIntoManager(cm *store.CollectionManager) error {
 func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 	dataToSave := cm.GetAllCollectionsDataForPersistence()
 
-	// Get a list of existing collection files on disk to detect and remove old ones
+	// Get a list of existing collection files on disk to detect and remove old ones.
 	existingFiles, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
 	if err != nil {
 		log.Printf("Warning: Failed to list existing collection files for cleanup: %v", err)
@@ -353,23 +353,23 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 		existingFileMap[colName] = true
 	}
 
-	// Create an instance of the persister to use its methods
+	// Create an instance of the persister to use its methods.
 	persister := &CollectionPersisterImpl{}
 
 	for colName, colData := range dataToSave {
 		// Create a tempStore and load collection data for saving.
-		tempStore := store.NewInMemStore() // Create a new InMemStore instance
-		tempStore.LoadData(colData)        // Load the specific collection data into this temp store
+		tempStore := store.NewInMemStore() // Create a new InMemStore instance.
+		tempStore.LoadData(colData)        // Load the specific collection data into this temp store.
 
-		if err := persister.SaveCollectionData(colName, tempStore); err != nil { // Use the persister instance
+		if err := persister.SaveCollectionData(colName, tempStore); err != nil { // Use the persister instance.
 			log.Printf("Error saving collection '%s': %v", colName, err)
 		}
-		delete(existingFileMap, colName) // Mark this file as saved, don't delete it
+		delete(existingFileMap, colName) // Mark this file as saved, don't delete it.
 	}
 
-	// Remove any collection files that no longer exist in memory
+	// Remove any collection files that no longer exist in memory.
 	for colName := range existingFileMap {
-		if err := persister.DeleteCollectionFile(colName); err != nil { // Use the persister instance
+		if err := persister.DeleteCollectionFile(colName); err != nil { // Use the persister instance.
 			log.Printf("Warning: Failed to remove old collection file for '%s': %v", colName, err)
 		}
 	}

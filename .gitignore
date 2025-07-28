@@ -11,7 +11,7 @@ data.json
 tmp
 *.mtdb
 collections
-
+certificates
 # Test binary, built with `go test -c`
 *.test
 

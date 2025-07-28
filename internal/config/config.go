@@ -12,7 +12,6 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // Config holds application-wide configuration.
-// json:"tag" is used for JSON unmarshalling.
 type Config struct {
 	Port             string        `json:"port"`
 	ReadTimeout      time.Duration `json:"read_timeout"`
@@ -25,7 +24,6 @@ type Config struct {
 }
 
 // configJSON is an intermediate struct used for JSON unmarshalling.
-// All time.Duration fields are represented as strings here, to allow parsing "5s", "10m" etc.
 type configJSON struct {
 	Port             string `json:"port"`
 	ReadTimeout      string `json:"read_timeout"`
@@ -37,8 +35,7 @@ type configJSON struct {
 	TtlCleanInterval string `json:"ttl_clean_interval"`
 }
 
-// NewDefaultConfig creates and returns a Config struct with sensible default values.
-// These defaults will be used if a config file is not found or if a specific field is missing.
+// NewDefaultConfig creates a Config struct with sensible default values.
 func NewDefaultConfig() Config {
 	return Config{
 		Port:             ":8080",
@@ -53,11 +50,10 @@ func NewDefaultConfig() Config {
 }
 
 // LoadConfig loads configuration from a specified JSON file path.
-// It uses default values if the file is not found or if certain fields are missing.
 func LoadConfig(filePath string) (Config, error) {
 	// Start with default configuration values.
 	cfg := NewDefaultConfig()
-	jsonCfg := configJSON{} // Create an instance of the intermediate struct
+	jsonCfg := configJSON{} // Intermediate struct for string durations
 
 	// Read the content of the JSON file.
 	data, err := os.ReadFile(filePath)
@@ -70,23 +66,15 @@ func LoadConfig(filePath string) (Config, error) {
 	}
 
 	// Unmarshal JSON into the intermediate struct.
-	// This will populate string fields for durations.
 	if err := json.Unmarshal(data, &jsonCfg); err != nil {
 		return cfg, fmt.Errorf("failed to unmarshal config file '%s': %w", filePath, err)
 	}
 
-	// Now, convert the string durations from jsonCfg to time.Duration in the actual Config.
-	// Use the default values if a field was not present in the JSON (json.Unmarshal keeps zero values).
-	// For booleans and strings, they are directly taken from jsonCfg.
-
+	// Convert string durations from jsonCfg to time.Duration in the actual Config.
 	if jsonCfg.Port != "" {
 		cfg.Port = jsonCfg.Port
 	}
-	// Direct assignment for bools is safe because zero value for bool is false.
-	cfg.EnableSnapshots = jsonCfg.EnableSnapshots // Direct assignment is fine. If JSON sets it, it wins. If omitted, it's false, overriding default.
-	// If the default for EnableSnapshots *must* be true unless explicitly set to false in JSON,
-	// then jsonCfg.EnableSnapshots should be a *bool, and checked for nil.
-	// Sticking to current simple bool for now.
+	cfg.EnableSnapshots = jsonCfg.EnableSnapshots // Direct assignment.
 
 	var parseErr error
 

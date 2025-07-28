@@ -2,81 +2,140 @@ package main
 
 import (
 	"context"
-	"flag" // Used for command-line argument parsing.
+	"flag"
 	"log"
 	"memory-tools/internal/api"
-	"memory-tools/internal/config" // Import the config package.
+	"memory-tools/internal/config"
 	"memory-tools/internal/persistence"
-	"memory-tools/internal/store" // Store package with TTL features.
+	"memory-tools/internal/store"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings" // Required for path parsing
 	"syscall"
 	"time"
 )
 
 func main() {
-	// Configure logging format to include date, time, and file/line number.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	// Define a command-line flag for the config file path.
-	// Default to "config.json" in the current directory.
 	configPath := flag.String("config", "config.json", "Path to the JSON configuration file")
-	flag.Parse() // Parse command-line flags.
+	flag.Parse()
 
-	// Load application configuration.
-	// This will first get default values and then attempt to load from the specified JSON file,
-	// overriding defaults with values found in the file.
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Fatal error loading configuration: %v", err)
 	}
 
-	// 1. Initialize the in-memory data store.
-	inMemStore := store.NewInMemStore()
+	// Initialize the main in-memory data store.
+	mainInMemStore := store.NewInMemStore()
 
-	// 2. Load persistent data from the binary file on application start.
-	// If loading fails, it's a fatal error as the application cannot run without its data.
-	if err := persistence.LoadData(inMemStore); err != nil {
-		log.Fatalf("Fatal error loading persistent data: %v", err)
+	// Initialize the CollectionManager.
+	collectionPersister := &persistence.CollectionPersisterImpl{}
+	collectionManager := store.NewCollectionManager(collectionPersister)
+
+	// Load persistent data for the main store.
+	if err := persistence.LoadData(mainInMemStore); err != nil {
+		log.Fatalf("Fatal error loading main persistent data: %v", err)
 	}
 
-	// 3. Create an instance of the API handlers, injecting the store dependency.
-	apiHandlers := api.NewHandlers(inMemStore)
+	// Load persistent data for all collections into the CollectionManager.
+	if err := persistence.LoadAllCollectionsIntoManager(collectionManager); err != nil {
+		log.Fatalf("Fatal error loading persistent collections data: %v", err)
+	}
 
-	// 4. Create a new ServeMux for routing HTTP requests.
+	apiHandlers := api.NewHandlers(mainInMemStore, collectionManager)
+
+	// Use http.NewServeMux for standard routing
 	mux := http.NewServeMux()
 
-	// 5. Register HTTP routes with a logging middleware.
+	// Register HTTP routes for the main in-memory store.
 	mux.Handle("/set", api.LogRequest(http.HandlerFunc(apiHandlers.SetHandler)))
 	mux.Handle("/get", api.LogRequest(http.HandlerFunc(apiHandlers.GetHandler)))
 
-	// 6. Configure the HTTP server with timeouts and the router.
+	// Register HTTP routes for Collections.
+	mux.Handle("/collections/", api.LogRequest(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/collections/")
+		pathParts := strings.Split(path, "/")
+
+		// Handle /collections (list all collections)
+		if path == "" && r.Method == http.MethodGet {
+			apiHandlers.ListCollectionsHandler(w, r)
+			return
+		}
+
+		// collectionName is the first part of the path
+		collectionName := pathParts[0]
+		if collectionName == "" {
+			api.SendJSONResponse(w, false, "Collection name cannot be empty", nil, http.StatusBadRequest)
+			return
+		}
+
+		// Route based on method and path parts
+		switch {
+		case len(pathParts) == 1: // /collections/{collectionName}
+			if r.Method == http.MethodPost { // POST /collections/{collectionName} (Create/Ensure Collection)
+				apiHandlers.CreateCollectionHandler(w, r)
+				return
+			} else if r.Method == http.MethodDelete { // DELETE /collections/{collectionName} (Delete Collection)
+				apiHandlers.DeleteCollectionHandler(w, r)
+				return
+			}
+		case len(pathParts) == 2: // /collections/{collectionName}/subPath
+			subPath := pathParts[1]
+			switch subPath {
+			case "set": // POST /collections/{collectionName}/set
+				if r.Method == http.MethodPost {
+					apiHandlers.SetCollectionItemHandler(w, r)
+					return
+				}
+			case "get": // GET /collections/{collectionName}/get?key=...
+				if r.Method == http.MethodGet {
+					apiHandlers.GetCollectionItemHandler(w, r)
+					return
+				}
+			case "delete": // DELETE /collections/{collectionName}/delete?key=...
+				if r.Method == http.MethodDelete {
+					apiHandlers.DeleteCollectionItemHandler(w, r)
+					return
+				}
+			case "list": // GET /collections/{collectionName}/list
+				if r.Method == http.MethodGet {
+					apiHandlers.ListCollectionItemsHandler(w, r)
+					return
+				}
+			}
+		}
+
+		// If no route matches, send 404
+		api.SendJSONResponse(w, false, "Not Found", nil, http.StatusNotFound)
+	})))
+
+	// Configure the HTTP server.
 	server := &http.Server{
 		Addr:         cfg.Port,
-		Handler:      mux, // Our configured ServeMux.
+		Handler:      mux, // Use our standard ServeMux
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 
-	// 7. Initialize and start the snapshot manager in a separate goroutine.
-	// This goroutine will periodically save the data to the .mtdb file based on config.
-	snapshotManager := persistence.NewSnapshotManager(inMemStore, cfg.SnapshotInterval, cfg.EnableSnapshots)
+	// Initialize and start the snapshot manager for the main store.
+	snapshotManager := persistence.NewSnapshotManager(mainInMemStore, cfg.SnapshotInterval, cfg.EnableSnapshots)
 	go snapshotManager.Start()
 
-	// 8. Start the TTL cleaner goroutine.
-	// This goroutine will periodically remove expired items from the in-memory store based on config.
-	ttlCleanStopChan := make(chan struct{}) // Channel to signal the TTL cleaner to stop.
+	// Start the TTL cleaner goroutine.
+	ttlCleanStopChan := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
-		defer ticker.Stop() // Ensure the ticker is stopped when the goroutine exits.
-		log.Printf("Starting TTL cleaner with interval of %s", cfg.TtlCleanInterval)
+		defer ticker.Stop()
+		log.Printf("Starting TTL cleaner for main store and collections with interval of %s", cfg.TtlCleanInterval)
 
 		for {
 			select {
 			case <-ticker.C:
-				inMemStore.CleanExpiredItems()
+				mainInMemStore.CleanExpiredItems()
+				collectionManager.CleanExpiredItemsAndSave()
 			case <-ttlCleanStopChan:
 				log.Println("TTL cleaner received stop signal. Stopping.")
 				return
@@ -84,54 +143,50 @@ func main() {
 		}
 	}()
 
-	// 9. Start the HTTP server in a goroutine to not block the main thread.
+	// Start the HTTP server.
 	go func() {
 		log.Printf("Server listening on %s", cfg.Port)
-		// ListenAndServe returns an error, typically http.ErrServerClosed during graceful shutdown.
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			// Use Fatalf for unrecoverable errors during server startup.
 			log.Fatalf("Could not start server: %v", err)
 		}
 	}()
 
-	// 10. Set up graceful shutdown mechanism.
-	// Create a channel to listen for OS signals (Interrupt/Ctrl+C and Terminate).
+	// Set up graceful shutdown mechanism.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	// Block the main goroutine until a termination signal is received.
 	<-sigChan
 
 	log.Println("Termination signal received. Attempting graceful shutdown...")
 
-	// 11. Stop the snapshot manager first.
-	// This ensures no new snapshots are initiated while the server is shutting down.
+	// Stop the snapshot manager.
 	snapshotManager.Stop()
 
-	// 12. Stop the TTL cleaner goroutine.
-	// Closing the channel signals the goroutine to exit cleanly.
+	// Stop the TTL cleaner goroutine.
 	close(ttlCleanStopChan)
 
-	// Create a context with a timeout for the server shutdown.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	// Ensure the context cancellation function is called to release resources.
 	defer cancelShutdown()
 
-	// Shut down the HTTP server gracefully. This attempts to close active connections.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
-		// If shutdown fails, log the error and indicate a forced exit.
 		log.Println("Forcing server shutdown due to error.")
 	} else {
 		log.Println("HTTP server gracefully stopped.")
 	}
 
-	// 13. Save final data to disk before application exit.
-	// This ensures the latest state is persisted, even if no scheduled snapshot occurred recently.
-	log.Println("Saving final data before application exit...")
-	if err := persistence.SaveData(inMemStore); err != nil {
-		// Log the error but don't fatal, as the server is already down and exiting anyway.
-		log.Printf("Error saving final data during shutdown: %v", err)
+	// Save final data to disk for the main store.
+	log.Println("Saving final data for main store before application exit...")
+	if err := persistence.SaveData(mainInMemStore); err != nil {
+		log.Printf("Error saving final data for main store during shutdown: %v", err)
 	} else {
-		log.Println("Final data saved. Application exiting.")
+		log.Println("Final main store data saved.")
+	}
+
+	// Save final data for all collections to disk.
+	log.Println("Saving final data for all collections before application exit...")
+	if err := persistence.SaveAllCollectionsFromManager(collectionManager); err != nil {
+		log.Printf("Error saving final data for collections during shutdown: %v", err)
+	} else {
+		log.Println("Final collection data saved. Application exiting.")
 	}
 }

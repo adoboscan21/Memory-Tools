@@ -1,213 +1,189 @@
 package store
 
 import (
-	"hash/fnv" // Import for FNV hash function (standard library)
+	"hash/fnv"
 	"log"
 	"sync"
 	"time"
 )
 
 // Item represents an individual key-value entry stored in the in-memory database.
-// It includes metadata for TTL management.
 type Item struct {
 	Value     []byte        // The actual value, stored as raw JSON bytes.
-	CreatedAt time.Time     // The timestamp when this item was created or last updated.
-	TTL       time.Duration // The time-to-live for this item. A value of 0 means no expiration.
+	CreatedAt time.Time     // Timestamp when item was created or updated.
+	TTL       time.Duration // Time-to-live for this item. 0 means no expiration.
 }
 
 // Shard represents a segment of the in-memory store.
-// Each shard contains a portion of the data map and its own mutex.
 type Shard struct {
-	data map[string]Item // The actual map for this shard.
-	mu   sync.RWMutex    // Mutex to protect concurrent access to this specific shard.
+	data map[string]Item // Map for this shard.
+	mu   sync.RWMutex    // Mutex to protect concurrent access.
 }
 
-// DataStore is the interface that defines the basic operations for our key-value store.
-// The interface methods remain the same, but their internal implementation will change due to sharding.
+// DataStore is the interface that defines basic key-value store operations.
 type DataStore interface {
 	Set(key string, value []byte, ttl time.Duration)
 	Get(key string) ([]byte, bool)
 	Delete(key string)
-	GetAll() map[string][]byte
+	GetAll() map[string][]byte // Get all non-expired data
 	LoadData(data map[string][]byte)
+	CleanExpiredItems() bool // Returns true if any items were cleaned
+	Size() int               // Returns the current number of items
 }
 
-// InMemStore implements DataStore for in-memory storage, now with sharding for better concurrency.
-// It uses an array of Shard structs to distribute data and reduce mutex contention.
+// InMemStore implements DataStore for in-memory storage, with sharding.
 type InMemStore struct {
-	shards []*Shard // Array of pointers to Shard structs, each holding a part of the data.
-	// No global mutex for the whole InMemStore data map itself, as shards have their own.
-	// A global mutex might still be needed for operations that affect *all* shards, like LoadData.
-	// For LoadData, we'll acquire individual shard locks sequentially for simplicity, or
-	// manage a global lock if the data map replacement is truly atomic across shards.
-	// For this sharding implementation, LoadData will acquire individual shard locks.
+	shards    []*Shard // Array of pointers to Shard structs.
+	numShards int      // Number of shards.
 }
 
-// Default number of shards. This value should be a power of 2 for efficient hashing.
-// Adjust based on expected concurrency and profiling. More shards can reduce contention,
-// but add overhead.
-const defaultNumShards = 256
+// Default number of shards.
+const defaultNumShards = 16
 
-// NewInMemStore creates and returns a new instance of InMemStore with sharding enabled.
+// NewInMemStore creates a new InMemStore with default sharding.
 func NewInMemStore() *InMemStore {
+	return NewInMemStoreWithShards(defaultNumShards)
+}
+
+// NewInMemStoreWithShards creates a new InMemStore with a specified number of shards.
+func NewInMemStoreWithShards(numShards int) *InMemStore {
 	s := &InMemStore{
-		shards: make([]*Shard, defaultNumShards), // Initialize the slice of shards.
+		shards:    make([]*Shard, numShards),
+		numShards: numShards,
 	}
-	// Initialize each shard with its own map.
-	for i := range defaultNumShards {
+	for i := range numShards {
 		s.shards[i] = &Shard{
 			data: make(map[string]Item),
 		}
 	}
-	log.Printf("InMemStore initialized with %d shards.", defaultNumShards)
+	log.Printf("InMemStore initialized with %d shards.", numShards)
 	return s
 }
 
 // getShard determines which shard a given key belongs to.
-// It uses FNV-64a hash function for key distribution.
 func (s *InMemStore) getShard(key string) *Shard {
-	// FNV-64a hash is fast and generally provides good distribution.
 	h := fnv.New64a()
 	h.Write([]byte(key))
-	// Use the hash sum modulo the number of shards to get the shard index.
-	shardIndex := h.Sum64() % uint64(defaultNumShards)
+	shardIndex := h.Sum64() % uint64(s.numShards)
 	return s.shards[shardIndex]
 }
 
-// Set saves a key-value pair in the in-memory store securely within its respective shard.
-// It now accepts a byte slice for the value and a time.Duration for its Time-To-Live.
-// If ttl is 0, the item will not expire.
+// getShardIndex for logging purposes.
+func (s *InMemStore) getShardIndex(key string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(key))
+	return h.Sum64() % uint64(s.numShards)
+}
+
+// Set saves a key-value pair in the store within its respective shard.
 func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
-	shard := s.getShard(key) // Get the specific shard for this key.
-	shard.mu.Lock()          // Acquire a write lock ONLY for this shard.
-	defer shard.mu.Unlock()  // Release the shard's write lock.
+	shard := s.getShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	shard.data[key] = Item{
 		Value:     value,
-		CreatedAt: time.Now(), // Record the current time of creation/update.
+		CreatedAt: time.Now(),
 		TTL:       ttl,
 	}
-	// Log for the specific shard, indicating improved concurrency.
-	log.Printf("SET [Shard %d]: Key='%s', ValueLength=%d bytes, TTL=%s", shard.getShardIndex(key), key, len(value), ttl)
+	log.Printf("SET [Shard %d]: Key='%s', ValueLength=%d bytes, TTL=%s", s.getShardIndex(key), key, len(value), ttl)
 }
 
-// Helper to get shard index for logging purposes (optional, for better logs).
-func (sh *Shard) getShardIndex(key string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(key))
-	return h.Sum64() % uint64(defaultNumShards)
-}
-
-// Get retrieves a value from the in-memory store by its key securely within its respective shard.
-// It returns a byte slice for the value, after checking for expiration.
+// Get retrieves a value from the store by its key within its respective shard.
 func (s *InMemStore) Get(key string) ([]byte, bool) {
-	shard := s.getShard(key) // Get the specific shard for this key.
-	shard.mu.RLock()         // Acquire a read lock ONLY for this shard.
-	defer shard.mu.RUnlock() // Release the shard's read lock.
+	shard := s.getShard(key)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
 
-	item, found := shard.data[key] // Access data within the specific shard.
+	item, found := shard.data[key]
 	if !found {
-		log.Printf("GET [Shard %d]: Key='%s' (not found)", shard.getShardIndex(key), key)
+		log.Printf("GET [Shard %d]: Key='%s' (not found)", s.getShardIndex(key), key)
 		return nil, false
 	}
 
-	// Check if the item has expired.
 	if item.TTL > 0 && time.Since(item.CreatedAt) > item.TTL {
-		log.Printf("GET [Shard %d]: Key='%s' (found, but expired)", shard.getShardIndex(key), key)
+		log.Printf("GET [Shard %d]: Key='%s' (found, but expired)", s.getShardIndex(key), key)
 		return nil, false
 	}
 
-	log.Printf("GET [Shard %d]: Key='%s' (found, not expired)", shard.getShardIndex(key), key)
+	log.Printf("GET [Shard %d]: Key='%s' (found, not expired)", s.getShardIndex(key), key)
 	return item.Value, true
 }
 
-// Delete removes a key-value pair from the in-memory store within its respective shard.
+// Delete removes a key-value pair from the store within its respective shard.
 func (s *InMemStore) Delete(key string) {
-	shard := s.getShard(key) // Get the specific shard for this key.
-	shard.mu.Lock()          // Acquire a write lock ONLY for this shard.
-	defer shard.mu.Unlock()  // Release the shard's write lock.
+	shard := s.getShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	delete(shard.data, key) // Delete from the specific shard's map.
-	log.Printf("DELETE [Shard %d]: Key='%s'", shard.getShardIndex(key), key)
+	delete(shard.data, key)
+	log.Printf("DELETE [Shard %d]: Key='%s'", s.getShardIndex(key), key)
 }
 
 // GetAll returns a copy of all non-expired data from ALL shards for persistence.
-// This operation requires locking ALL shards, so it can be slower and more impactful on performance.
-// For extremely high-throughput, consider offloading this with a copy-on-write strategy or similar.
 func (s *InMemStore) GetAll() map[string][]byte {
-	snapshotData := make(map[string][]byte) // Map to hold combined snapshot data.
+	snapshotData := make(map[string][]byte)
 	now := time.Now()
 
-	// Iterate over all shards and acquire their read locks sequentially.
-	// This is the bottleneck for GetAll in a sharded setup.
 	for i, shard := range s.shards {
-		shard.mu.RLock() // Acquire read lock for current shard.
-		// Note: The defer here would release the lock after the entire function returns,
-		// which is incorrect for sequential locking.
-		// We must release the lock *before* moving to the next shard.
-		// So, no defer here; explicit Unlock is needed below.
-
+		shard.mu.RLock()
 		for k, item := range shard.data {
-			// Only include non-expired items in the snapshot for persistence.
 			if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
-				// Make a deep copy of the byte slice value.
 				copyValue := make([]byte, len(item.Value))
 				copy(copyValue, item.Value)
 				snapshotData[k] = copyValue
 			}
 		}
-		shard.mu.RUnlock() // Explicitly release read lock for current shard.
+		shard.mu.RUnlock()
 		log.Printf("GetAll: Processed Shard %d", i)
 	}
-	log.Printf("GetAll: Combined snapshot data from all %d shards. Total items: %d", defaultNumShards, len(snapshotData))
+	log.Printf("GetAll: Combined snapshot data from all %d shards. Total items: %d", s.numShards, len(snapshotData))
 	return snapshotData
 }
 
-// LoadData loads data into the in-memory store across its shards from a persistent source.
-// Items loaded from persistence will have no TTL by default upon loading.
-// This operation requires writing to shards, so it will acquire write locks for each.
+// LoadData loads data into the store across its shards from a persistent source.
 func (s *InMemStore) LoadData(data map[string][]byte) {
 	// Clear all existing data from all shards before loading new data.
 	for _, shard := range s.shards {
-		shard.mu.Lock()                    // Acquire write lock for each shard.
+		shard.mu.Lock()
 		shard.data = make(map[string]Item) // Clear map in shard.
-		shard.mu.Unlock()                  // Release write lock.
+		shard.mu.Unlock()
 	}
 	log.Println("LoadData: All shards cleared.")
 
-	// Distribute loaded data into appropriate shards.
 	loadedCount := 0
 	for k, v := range data {
-		shard := s.getShard(k) // Determine which shard the key belongs to.
-		shard.mu.Lock()        // Acquire write lock for that specific shard.
+		shard := s.getShard(k)
+		shard.mu.Lock()
 		shard.data[k] = Item{
 			Value:     v,
 			CreatedAt: time.Now(), // Assume loaded items are "created" at load time.
 			TTL:       0,          // Loaded items have no TTL by default.
 		}
-		shard.mu.Unlock() // Release write lock for that shard.
+		shard.mu.Unlock()
 		loadedCount++
 	}
-	log.Printf("LoadData: Data successfully loaded into %d shards. Total keys: %d", defaultNumShards, loadedCount)
+	log.Printf("LoadData: Data successfully loaded into %d shards. Total keys: %d", s.numShards, loadedCount)
 }
 
 // CleanExpiredItems iterates through each shard and physically deletes expired items.
-// It acquires write locks for each shard individually, allowing other shards to remain accessible.
-func (s *InMemStore) CleanExpiredItems() {
+// Returns true if any items were deleted.
+func (s *InMemStore) CleanExpiredItems() bool {
 	totalDeletedCount := 0
 	now := time.Now()
+	wasModified := false
 
-	// Iterate over all shards to clean expired items.
 	for i, shard := range s.shards {
-		shard.mu.Lock() // Acquire a write lock for the current shard.
+		shard.mu.Lock()
 		deletedInShard := 0
 		for key, item := range shard.data {
 			if item.TTL > 0 && now.After(item.CreatedAt.Add(item.TTL)) {
 				delete(shard.data, key)
 				deletedInShard++
+				wasModified = true
 			}
 		}
-		shard.mu.Unlock() // Explicitly release the write lock for the current shard.
+		shard.mu.Unlock()
 
 		if deletedInShard > 0 {
 			totalDeletedCount += deletedInShard
@@ -219,4 +195,163 @@ func (s *InMemStore) CleanExpiredItems() {
 	} else {
 		log.Println("TTL Cleaner: No expired items found to remove.")
 	}
+	return wasModified
+}
+
+// Size returns the total number of items in the store across all shards.
+func (s *InMemStore) Size() int {
+	total := 0
+	for _, shard := range s.shards {
+		shard.mu.RLock()
+		total += len(shard.data)
+		shard.mu.RUnlock()
+	}
+	return total
+}
+
+// --- New Collection Management Layer ---
+
+// CollectionPersister defines the interface for persistence operations specific to collections.
+type CollectionPersister interface {
+	SaveCollectionData(collectionName string, s DataStore) error
+	DeleteCollectionFile(collectionName string) error
+}
+
+// CollectionManager manages multiple named InMemStore instances, each representing a collection.
+type CollectionManager struct {
+	collections map[string]DataStore // Map of collection names to their DataStore instances
+	mu          sync.RWMutex         // Mutex to protect the 'collections' map
+	persister   CollectionPersister  // Interface for persistence operations
+}
+
+// NewCollectionManager creates a new instance of CollectionManager.
+func NewCollectionManager(persister CollectionPersister) *CollectionManager {
+	return &CollectionManager{
+		collections: make(map[string]DataStore),
+		persister:   persister, // Inject the persister
+	}
+}
+
+// GetCollection retrieves an existing collection (InMemStore) by name, or creates a new one.
+func (cm *CollectionManager) GetCollection(name string) DataStore {
+	// Attempt to get with RLock first.
+	cm.mu.RLock()
+	col, found := cm.collections[name]
+	cm.mu.RUnlock()
+
+	if found {
+		return col
+	}
+
+	// Acquire write lock to create if not found.
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	// Double-check after acquiring lock.
+	col, found = cm.collections[name]
+	if found {
+		return col
+	}
+
+	// Create new collection.
+	newCol := NewInMemStore() // Each collection gets its own sharded in-memory store
+	cm.collections[name] = newCol
+	log.Printf("Collection '%s' created and added to CollectionManager.", name)
+	return newCol
+}
+
+// DeleteCollection removes a collection entirely from the manager.
+func (cm *CollectionManager) DeleteCollection(name string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if _, exists := cm.collections[name]; exists {
+		delete(cm.collections, name)
+		log.Printf("Collection '%s' deleted from CollectionManager (in-memory).", name)
+	} else {
+		log.Printf("Attempted to delete non-existent collection '%s'.", name)
+	}
+}
+
+// ListCollections returns the names of all active collections.
+func (cm *CollectionManager) ListCollections() []string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	names := make([]string, 0, len(cm.collections))
+	for name := range cm.collections {
+		names = append(names, name)
+	}
+	log.Printf("ListCollections: Returning %d collection names.", len(names))
+	return names
+}
+
+// CollectionExists checks if a collection with the given name exists in the manager.
+func (cm *CollectionManager) CollectionExists(name string) bool {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	_, exists := cm.collections[name]
+	return exists
+}
+
+// LoadAllCollectionData loads data into the respective InMemStore instances within the manager.
+func (cm *CollectionManager) LoadAllCollectionData(allCollectionsData map[string]map[string][]byte) {
+	cm.mu.Lock() // Acquire write lock for the entire duration of loading collections
+	defer cm.mu.Unlock()
+
+	// Clear existing in-memory collection instances before loading.
+	cm.collections = make(map[string]DataStore) // Re-initialize to clear
+
+	for colName, data := range allCollectionsData {
+		// Directly create and load the new InMemStore for this collection.
+		newCol := NewInMemStore()        // Create a new InMemStore for this collection
+		newCol.LoadData(data)            // Load data into this specific InMemStore
+		cm.collections[colName] = newCol // Directly assign to the map
+		log.Printf("Loaded collection '%s' with %d items into CollectionManager from persistence.", colName, newCol.Size())
+	}
+	log.Printf("CollectionManager: Successfully loaded/updated %d collections from persistence.", len(allCollectionsData))
+}
+
+// GetAllCollectionsDataForPersistence gets data from all managed InMemStore instances for persistence.
+func (cm *CollectionManager) GetAllCollectionsDataForPersistence() map[string]map[string][]byte {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	dataToSave := make(map[string]map[string][]byte)
+	for colName, col := range cm.collections {
+		dataToSave[colName] = col.GetAll() // Get all non-expired data from each collection's InMemStore
+	}
+	log.Printf("CollectionManager: Retrieved data from %d collections for persistence.", len(dataToSave))
+	return dataToSave
+}
+
+// SaveCollectionToDisk saves a single collection's data to disk using the injected persister.
+func (cm *CollectionManager) SaveCollectionToDisk(collectionName string, col DataStore) error {
+	log.Printf("Attempting to save collection '%s' to disk (via injected persister)...", collectionName)
+	return cm.persister.SaveCollectionData(collectionName, col)
+}
+
+// DeleteCollectionFromDisk removes a collection's file from disk using the injected persister.
+func (cm *CollectionManager) DeleteCollectionFromDisk(collectionName string) error {
+	log.Printf("Attempting to delete collection file for '%s' from disk (via injected persister)...", collectionName)
+	return cm.persister.DeleteCollectionFile(collectionName)
+}
+
+// CleanExpiredItemsAndSave triggers TTL cleanup on all managed collections and saves modified ones to disk.
+func (cm *CollectionManager) CleanExpiredItemsAndSave() {
+	cm.mu.RLock() // Read lock to iterate collections without blocking new collection creation
+	collectionsAndNames := make(map[string]DataStore, len(cm.collections))
+	for name, col := range cm.collections {
+		collectionsAndNames[name] = col
+	}
+	cm.mu.RUnlock()
+
+	log.Println("TTL Cleaner (Collections): Starting sweep across all managed collections.")
+	for name, col := range collectionsAndNames {
+		if col.CleanExpiredItems() { // CleanExpiredItems now returns true if any item was deleted
+			// If items were deleted, save the modified collection to disk.
+			if err := cm.SaveCollectionToDisk(name, col); err != nil {
+				log.Printf("Error saving collection '%s' to disk after TTL cleanup: %v", name, err)
+			}
+		}
+	}
+	log.Println("TTL Cleaner (Collections): Finished sweep across all managed collections.")
 }

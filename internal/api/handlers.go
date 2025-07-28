@@ -18,9 +18,9 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // APIResponse defines the base structure for all JSON responses.
 type APIResponse struct {
-	Success bool        `json:"success"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // SendJSONResponse is a helper function to send any JSON response.

@@ -3,6 +3,7 @@ package store
 import (
 	"hash/fnv"
 	"log"
+	"maps"
 	"sync"
 	"time"
 )
@@ -339,9 +340,7 @@ func (cm *CollectionManager) DeleteCollectionFromDisk(collectionName string) err
 func (cm *CollectionManager) CleanExpiredItemsAndSave() {
 	cm.mu.RLock() // Read lock to iterate collections without blocking new collection creation
 	collectionsAndNames := make(map[string]DataStore, len(cm.collections))
-	for name, col := range cm.collections {
-		collectionsAndNames[name] = col
-	}
+	maps.Copy(collectionsAndNames, cm.collections)
 	cm.mu.RUnlock()
 
 	log.Println("TTL Cleaner (Collections): Starting sweep across all managed collections.")

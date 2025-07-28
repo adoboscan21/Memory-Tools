@@ -74,10 +74,11 @@ func main() {
 		// Route based on method and path parts
 		switch {
 		case len(pathParts) == 1: // /collections/{collectionName}
-			if r.Method == http.MethodPost { // POST /collections/{collectionName} (Create/Ensure Collection)
+			switch r.Method {
+			case http.MethodPost: // POST /collections/{collectionName} (Create/Ensure Collection)
 				apiHandlers.CreateCollectionHandler(w, r)
 				return
-			} else if r.Method == http.MethodDelete { // DELETE /collections/{collectionName} (Delete Collection)
+			case http.MethodDelete: // DELETE /collections/{collectionName} (Delete Collection)
 				apiHandlers.DeleteCollectionHandler(w, r)
 				return
 			}

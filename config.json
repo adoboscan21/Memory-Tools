@@ -1,0 +1,10 @@
+{
+  "port": ":8080",
+  "read_timeout": "5s",
+  "write_timeout": "10s",
+  "idle_timeout": "120s",
+  "shutdown_timeout": "10s",
+  "snapshot_interval": "5m",
+  "enable_snapshots": true,
+  "ttl_clean_interval": "1m"
+}

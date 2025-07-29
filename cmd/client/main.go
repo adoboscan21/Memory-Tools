@@ -28,8 +28,7 @@ func main() {
 	log.SetFlags(0) // No timestamps for client logs.
 
 	if len(os.Args) != 2 {
-		fmt.Println("Usage: client <address>")
-		fmt.Println("Example: client localhost:8080")
+		fmt.Println("Example: memory-tools-client localhost:8080")
 		return
 	}
 

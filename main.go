@@ -15,9 +15,25 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// lastActivity tracks the last time a data operation occurred.
+// Using atomic.Value to safely update it across goroutines.
+var lastActivity atomic.Value
+
+// init sets the initial lastActivity time when the application starts.
+func init() {
+	lastActivity.Store(time.Now())
+}
+
+// updateActivity updates the lastActivity timestamp.
+func updateActivity() {
+	lastActivity.Store(time.Now())
+}
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -102,6 +118,31 @@ func main() {
 		}
 	}()
 
+	// Goroutine to monitor for inactivity and trigger memory release to the OS.
+	idleMemoryCleanerStopChan := make(chan struct{})
+	go func() {
+		checkInterval := 2 * time.Minute // How often to check for inactivity
+		idleThreshold := 5 * time.Minute // Duration of inactivity to trigger memory release
+
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+		log.Printf("Idle memory cleaner started. Checking for inactivity every %s, with a threshold of %s.", checkInterval, idleThreshold)
+
+		for {
+			select {
+			case <-ticker.C:
+				lastActive := lastActivity.Load().(time.Time)
+				if time.Since(lastActive) >= idleThreshold {
+					log.Println("No activity detected for a while. Requesting Go runtime to release OS memory...")
+					debug.FreeOSMemory() // Suggests the Go runtime to release unused memory to the OS
+				}
+			case <-idleMemoryCleanerStopChan:
+				log.Println("Idle memory cleaner received stop signal. Stopping.")
+				return
+			}
+		}
+	}()
+
 	// Set up graceful shutdown.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -121,6 +162,9 @@ func main() {
 
 	// Stop TTL cleaner goroutine.
 	close(ttlCleanStopChan)
+
+	// Stop the idle memory cleaner goroutine.
+	close(idleMemoryCleanerStopChan)
 
 	// Context for graceful shutdown.
 	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -157,6 +201,9 @@ func handleConnection(conn net.Conn, mainStore store.DataStore, collectionManage
 			}
 			return // End connection handling for this client.
 		}
+
+		// Update activity timestamp for idle memory cleaner.
+		updateActivity()
 
 		switch cmdType {
 		// Main Store Commands.

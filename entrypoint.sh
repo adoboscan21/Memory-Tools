@@ -11,6 +11,7 @@ echo "Starting Memory Tools REST API..."
 # Use the new binary name: memory-tools-api
 # Pass the correct arguments for it: its listen address and the DB server address.
 # It runs in the background.
+# ONLY RECOMMENDED FOR DEVELOPMENT, COMMENT IF YOU WILL DEPLOY IN PRODUCTION
 memory-tools-api :8081 localhost:8080 &
 
 # The CLI client (memory-tools-client) is compiled within the container,

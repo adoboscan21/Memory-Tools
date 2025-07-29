@@ -23,6 +23,7 @@ RUN openssl req -x509 -newkey rsa:4096 -nodes -keyout server.key -out server.crt
 # Build the Go applications with specific names.
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-server ./main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-client ./cmd/client/main.go
+# ONLY RECOMMENDED FOR DEVELOPMENT, COMMENT IF YOU WILL DEPLOY IN PRODUCTION
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-api ./cmd/api/main.go
 
 # --- Stage 2: Production ---
@@ -36,6 +37,7 @@ RUN mkdir -p /root/certificates /root/collections /usr/local/bin/
 # Copy the binaries to the directory in the PATH.
 COPY --from=builder /app/memory-tools-server /usr/local/bin/
 COPY --from=builder /app/memory-tools-client /usr/local/bin/
+# ONLY RECOMMENDED FOR DEVELOPMENT, COMMENT IF YOU WILL DEPLOY IN PRODUCTION
 COPY --from=builder /app/memory-tools-api /usr/local/bin/
 
 # Copy the certificates and key to /root/certificates.

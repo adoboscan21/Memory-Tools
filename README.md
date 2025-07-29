@@ -33,7 +33,7 @@ Get the Memory Tools server and API up and running quickly:
 
 ## How to Use
 
-### HTTP API  **ONLY FOR DEVELOPMENT USE ¡IMPORTANT!**
+### HTTP API  **RECOMMENDED ONLY FOR DEVELOPMENT USE ¡IMPORTANT!**
 
 Access the API server at `http://localhost:8081`. Send `POST` requests to the `/command` endpoint with a JSON body.
 

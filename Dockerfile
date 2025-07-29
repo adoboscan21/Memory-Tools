@@ -53,6 +53,7 @@ RUN chmod +x /root/entrypoint.sh
 WORKDIR /root/
 
 # Expose the server ports.
+EXPOSE 8080
 EXPOSE 8081
 
 # Command to execute the entrypoint script when the container starts.

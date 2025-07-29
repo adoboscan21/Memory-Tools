@@ -31,32 +31,16 @@ Get the Memory Tools server and API up and running quickly:
 
 ---
 
-## How to Use
-
-### HTTP API  **RECOMMENDED ONLY FOR DEVELOPMENT USE ¡IMPORTANT!**
-
-Access the API server at `http://localhost:8081`. Send `POST` requests to the `/command` endpoint with a JSON body.
-
-**Example: Set a value**
-
-```bash
-curl -X POST -H "Content-Type: application/json" -d '{"command": "set", "args": "mykey", "value": {"message": "Hello!"}, "ttl": 300}' http://localhost:8081/command
-```
-
-**Example: Get a value**
-
-```bash
-curl -X POST -H "Content-Type: application/json" -d '{"command": "get", "args": "mykey"}' http://localhost:8081/command
-```
-
-For a full list of commands and detailed request/response examples, see [`docs/api.md`](https://github.com/adoboscan21/Memory-Tools/blob/main/docs/api.md).
-
 ### CLI Client
 
 You can use the interactive CLI client inside the running server container to connect directly to the database:
 
 ```bash
-docker exec -it memory-tools-server memory-tools-client localhost:8080
+docker exec -it containerid memory-tools-client
+```
+
+```bash
+docker exec -it containerid memory-tools-client -u user -p password localhost:8080
 ```
 
 For a full list of commands and detailed examples, see [`docs/client.md`](https://github.com/adoboscan21/Memory-Tools/blob/main/docs/client.md).

@@ -16,7 +16,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	jsoniter "github.com/json-iterator/go"
 )
+
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // lastActivity tracks the last time a data operation occurred.
 // Using atomic.Value to safely update it across goroutines.
@@ -59,6 +63,61 @@ func main() {
 		log.Fatalf("Fatal error loading persistent collections data: %v", err)
 	}
 
+	// Ensure system collection and default users.
+	systemCollection := collectionManager.GetCollection(handler.SystemCollectionName)
+
+	// Ensure default admin user
+	adminUserKey := handler.UserPrefix + "admin"
+	if _, found := systemCollection.Get(adminUserKey); !found {
+		log.Println("Default admin user 'admin' not found. Creating a default admin user with password 'adminpass'.")
+		hashedPassword, hashErr := handler.HashPassword("adminpass")
+		if hashErr != nil {
+			log.Fatalf("Fatal error hashing default admin password: %v", hashErr)
+		}
+		adminUserInfo := handler.UserInfo{
+			Username:     "admin",
+			PasswordHash: hashedPassword,
+			IsRoot:       false, // Not root, regular admin for general access
+		}
+		adminUserInfoBytes, marshalErr := json.Marshal(adminUserInfo)
+		if marshalErr != nil {
+			log.Fatalf("Fatal error marshalling default admin user info: %v", marshalErr)
+		}
+		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
+		if err := collectionManager.SaveCollectionToDisk(handler.SystemCollectionName, systemCollection); err != nil {
+			log.Fatalf("Fatal error saving default admin user to disk: %v", err)
+		}
+		log.Println("Default admin user 'admin' created with password 'adminpass'.")
+	} else {
+		log.Println("Default admin user 'admin' found. Using existing credentials.")
+	}
+
+	// Ensure default root user (localhost only)
+	rootUserKey := handler.UserPrefix + "root"
+	if _, found := systemCollection.Get(rootUserKey); !found {
+		log.Println("Default root user 'root' not found. Creating a default root user with password 'rootpass'.")
+		hashedPassword, hashErr := handler.HashPassword("rootpass")
+		if hashErr != nil {
+			log.Fatalf("Fatal error hashing default root password: %v", hashErr)
+		}
+		rootUserInfo := handler.UserInfo{
+			Username:     "root",
+			PasswordHash: hashedPassword,
+			IsRoot:       true, // This user is marked as root
+		}
+		rootUserInfoBytes, marshalErr := json.Marshal(rootUserInfo)
+		if marshalErr != nil {
+			log.Fatalf("Fatal error marshalling default root user info: %v", marshalErr)
+		}
+		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0) // No TTL for system users
+		if err := collectionManager.SaveCollectionToDisk(handler.SystemCollectionName, systemCollection); err != nil {
+			log.Fatalf("Fatal error saving default root user to disk: %v", err)
+		}
+		log.Println("Default root user 'root' created with password 'rootpass'.")
+	} else {
+		log.Println("Default root user 'root' found. Using existing credentials.")
+	}
+
 	// Load server certificate and key.
 	cert, err := tls.LoadX509KeyPair("certificates/server.crt", "certificates/server.key")
 	if err != nil {
@@ -70,12 +129,6 @@ func main() {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12, // Recommended minimum TLS version for security.
 	}
-
-	// Create an instance of the connection handler.
-	// We pass a function literal that calls the global updateActivity to satisfy the interface.
-	connHandler := handler.NewConnectionHandler(mainInMemStore, collectionManager, updateActivityFunc(func() {
-		lastActivity.Store(time.Now())
-	}))
 
 	// Start TLS TCP server.
 	listener, err := tls.Listen("tcp", cfg.Port, tlsConfig)
@@ -90,7 +143,6 @@ func main() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				// Check if the error is due to server closing.
 				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" && opErr.Err.Error() == "use of closed network connection" {
 					log.Println("TLS TCP listener closed, stopping accept loop.")
 					return
@@ -98,8 +150,10 @@ func main() {
 				log.Printf("Error accepting connection: %v", err)
 				continue
 			}
-			// Call the HandleConnection method on the handler instance.
-			go connHandler.HandleConnection(conn)
+			// Create a new handler instance for each connection to maintain per-connection state.
+			go handler.NewConnectionHandler(mainInMemStore, collectionManager, updateActivityFunc(func() {
+				lastActivity.Store(time.Now())
+			}), conn).HandleConnection(conn) // Pass the net.Conn to the handler for IP check
 		}
 	}()
 

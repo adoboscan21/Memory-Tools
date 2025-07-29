@@ -1,4 +1,3 @@
-// internal/protocol/protocol.go
 package protocol
 
 import (
@@ -26,6 +25,10 @@ const (
 	CmdCollectionItemGet    // GET_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemDelete // DELETE_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemList   // LIST_COLLECTION_ITEMS collectionName
+
+	// Authentication Commands
+	CmdAuthenticate       // AUTH username, password
+	CmdChangeUserPassword // CHANGE_USER_PASSWORD target_username, new_password (formerly CmdUpdatePassword)
 )
 
 // ResponseStatus defines the status of a server response.
@@ -36,7 +39,7 @@ const (
 	StatusNotFound                    // Not found status.
 	StatusError                       // Generic error status.
 	StatusBadCommand                  // Bad command format.
-	StatusUnauthorized                // Unauthorized access (for future use).
+	StatusUnauthorized                // Unauthorized access.
 	StatusBadRequest                  // Bad request (e.g., empty key/name).
 )
 
@@ -350,4 +353,60 @@ func ReadCollectionItemListCommand(r io.Reader) (collectionName string, err erro
 		return "", fmt.Errorf("failed to read collection name: %w", err)
 	}
 	return collectionName, nil
+}
+
+// WriteAuthenticateCommand writes an AUTH command to the connection.
+// Format: [CmdAuthenticate (1 byte)] [UsernameLength (4 bytes)] [Username] [PasswordLength (4 bytes)] [Password]
+func WriteAuthenticateCommand(w io.Writer, username, password string) error {
+	if _, err := w.Write([]byte{byte(CmdAuthenticate)}); err != nil {
+		return fmt.Errorf("failed to write command type (authenticate): %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username (authenticate): %w", err)
+	}
+	if err := WriteString(w, password); err != nil {
+		return fmt.Errorf("failed to write password (authenticate): %w", err)
+	}
+	return nil
+}
+
+// ReadAuthenticateCommand reads an AUTH command from the connection.
+func ReadAuthenticateCommand(r io.Reader) (username, password string, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read username (authenticate): %w", err)
+	}
+	password, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read password (authenticate): %w", err)
+	}
+	return username, password, nil
+}
+
+// WriteChangeUserPasswordCommand writes a CHANGE_USER_PASSWORD command to the connection.
+// Format: [CmdChangeUserPassword (1 byte)] [TargetUsernameLength (4 bytes)] [TargetUsername] [NewPasswordLength (4 bytes)] [NewPassword]
+func WriteChangeUserPasswordCommand(w io.Writer, targetUsername, newPassword string) error {
+	if _, err := w.Write([]byte{byte(CmdChangeUserPassword)}); err != nil {
+		return fmt.Errorf("failed to write command type (change user password): %w", err)
+	}
+	if err := WriteString(w, targetUsername); err != nil {
+		return fmt.Errorf("failed to write target username (change user password): %w", err)
+	}
+	if err := WriteString(w, newPassword); err != nil {
+		return fmt.Errorf("failed to write new password (change user password): %w", err)
+	}
+	return nil
+}
+
+// ReadChangeUserPasswordCommand reads a CHANGE_USER_PASSWORD command from the connection.
+func ReadChangeUserPasswordCommand(r io.Reader) (targetUsername, newPassword string, err error) {
+	targetUsername, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read target username (change user password): %w", err)
+	}
+	newPassword, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read new password (change user password): %w", err)
+	}
+	return targetUsername, newPassword, nil
 }

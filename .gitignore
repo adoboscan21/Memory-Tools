@@ -7,6 +7,8 @@
 *.dll
 *.so
 *.dylib
+in-memory.mtdb
+in-memory.mtdb.tmp
 data.json
 tmp
 *.mtdb

@@ -61,7 +61,10 @@ Here's a list of all commands you can use:
   - **Description**: Authenticates with the server using the provided username and password. This is necessary to execute most commands.
   - **Example**:
     ```bash
-    login admin adminpass123
+    login admin adminpass
+    ```
+    ```bash
+    login root rootpass
     ```
 - **`update password <target_username> <new_password>`**
   - **Description**: Updates the password for a specified user.

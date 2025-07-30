@@ -18,8 +18,8 @@ To start the client, provide the address of the `memory-tools-server`. You can a
 **Via Docker Compose:**
 
 ```bash
-docker exec -it memory-tools-server memory-tools-client localhost:8080
-docker exec -it memory-tools-server memory-tools-client -u myuser -p mypassword localhost:8080
+docker exec -it containerid memory-tools-client localhost:8080
+docker exec -it containerid memory-tools-client -u myuser -p mypassword localhost:8080
 ```
 
 Once connected, you'll see a prompt: `Connected securely to Memory Tools server at <address>. Type 'help' for commands, 'exit' to quit.`

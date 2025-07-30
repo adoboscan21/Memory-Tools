@@ -31,15 +31,19 @@ Once connected, you'll see a prompt: `Connected securely to Memory Tools server 
 The client supports both automatic login via command-line flags and manual login via a command.
 
 - **Automatic Login**: Use the `-u <username>` and `-p <password>` flags when starting the client. If provided, the client will attempt to authenticate immediately upon connection.
+
   ```bash
   ./bin/memory-tools-client -u admin -p securepassword localhost:8080
   ```
+
 - **Manual Login**: If you don't use the flags, or if automatic login fails, you can log in manually after connecting using the `login` command.
+
   ```bash
   login <username> <password>
   ```
+
   - **Example**:
-    ```bash
+    ```
     login root mysecretpassword
     ```
 
@@ -51,7 +55,7 @@ Here's a list of all commands you can use:
 
 ### General Commands
 
-- **`help`**: Displays all available commands and their syntax.
+- **`help`**: Displays all available commands and their syntax, including examples for `collection query`.
 - **`clear`**: Clears the terminal screen.
 - **`exit`**: Disconnects from the server and quits the client.
 
@@ -145,4 +149,104 @@ These commands allow you to manipulate key-value pairs within specific collectio
     collection item list products
     ```
 
-**Tip:** When entering JSON values, make sure they are properly formatted.
+---
+
+### **Collection Query Command (NEW)**
+
+This powerful command allows you to retrieve, filter, sort, and aggregate data from a collection using a flexible JSON-based query language.
+
+- **`collection query <collection_name> <query_json>`**
+  - **Description**: Executes a query against the specified collection. The `query_json` must be a valid JSON object defining your query criteria.
+  - **Example**:
+    ```bash
+    collection query products {"filter": {"field": "category", "op": "=", "value": "Electronics"}, "limit": 5}
+    ```
+
+---
+
+### Query JSON Examples
+
+When using `collection query`, the `<query_json>` parameter supports various operations:
+
+- **Filter (WHERE clauses):**
+  - Equality:
+    ```json
+    { "filter": { "field": "status", "op": "=", "value": "active" } }
+    ```
+  - `AND` combined conditions:
+    ```json
+    {
+      "filter": {
+        "and": [
+          { "field": "age", "op": ">", "value": 30 },
+          { "field": "city", "op": "like", "value": "New%" }
+        ]
+      }
+    }
+    ```
+  - `OR` combined conditions:
+    ```json
+    {
+      "filter": {
+        "or": [
+          { "field": "category", "op": "=", "value": "Books" },
+          { "field": "stock", "op": "<", "value": 10 }
+        ]
+      }
+    }
+    ```
+  - `IN` operator (value is an array):
+    ```json
+    { "filter": { "field": "tags", "op": "in", "value": ["A", "B"] } }
+    ```
+  - `LIKE` operator (use `%` as wildcard):
+    ```json
+    { "filter": { "field": "name", "op": "like", "value": "%Book%" } }
+    ```
+  - `BETWEEN` operator (value is a two-element array `[min, max]`):
+    ```json
+    { "filter": { "field": "price", "op": "between", "value": [100, 200] } }
+    ```
+  - `IS NULL` / `IS NOT NULL`:
+    ```json
+    {"filter": {"field": "description", "op": "is null"}}
+    {"filter": {"field": "description", "op": "is not null"}}
+    ```
+- **Order By:**
+  - Sort results by one or more fields.
+  ```json
+  {
+    "order_by": [
+      { "field": "name", "direction": "asc" },
+      { "field": "age", "direction": "desc" }
+    ]
+  }
+  ```
+- **Limit/Offset:**
+  - Limit the number of results and/or skip a certain number of results.
+  ```json
+  { "limit": 5, "offset": 10 }
+  ```
+- **Count:**
+  - Get a count of items matching the filter.
+  ```json
+  { "count": true, "filter": { "field": "active", "op": "=", "value": true } }
+  ```
+- **Aggregations (SUM, AVG, MIN, MAX):**
+  - Perform aggregate functions on numeric fields, optionally grouped by one or more fields.
+  - Supported functions: `"sum"`, `"avg"`, `"min"`, `"max"`.
+  ```json
+  {
+    "aggregations": { "total_sales": { "func": "sum", "field": "sales" } },
+    "group_by": ["category"]
+  }
+  ```
+- **Distinct:**
+  - Get unique values for a specified field.
+  ```json
+  { "distinct": "city" }
+  ```
+
+---
+
+**Tip:** When entering JSON values, especially for `set` or `collection item set`, ensure they are properly formatted and escaped if necessary for your shell. For `collection query`, the entire query object must be valid JSON.

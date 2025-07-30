@@ -1,6 +1,6 @@
 # Memory Tools
 
-Memory Tools is a high-performance, sharded in-memory key-value store with support for collections and persistent storage. It offers a secure TLS-encrypted TCP interface and a convenient HTTP API.
+Memory Tools is a high-performance, sharded in-memory key-value store with support for collections and persistent storage. It offers a secure TLS-encrypted TCP interface.
 
 ---
 
@@ -27,7 +27,7 @@ Get the Memory Tools server and API up and running quickly:
     ```bash
     docker-compose up -d
     ```
-    This starts the main database server (on port `8080`) and the HTTP API server (on port `8081`).
+    This starts the main database server (on port `8080`)
 
 ---
 

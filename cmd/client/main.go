@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -285,22 +286,62 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
 	parts := strings.Fields(rawArgs)
 
-	if len(parts) < fixedArgCount+1 {
-		return nil, "", 0, fmt.Errorf("not enough arguments provided (need %d leading args + JSON value)", fixedArgCount)
+	// Determine if the key is optional (only for collection item set, where fixedArgCount is 2).
+	// For 'set', fixedArgCount is 1, and the key is always expected.
+	isKeyOptional := (fixedArgCount == 2)
+
+	if !isKeyOptional { // For commands like 'set' where key is always required.
+		if len(parts) < fixedArgCount+1 {
+			return nil, "", 0, fmt.Errorf("not enough arguments provided (need %d leading args + JSON value)", fixedArgCount)
+		}
+	} else { // For 'collection item set' where key can be optional.
+		if len(parts) < 1 { // At least collection name or key and JSON
+			return nil, "", 0, fmt.Errorf("not enough arguments for collection item set (need collection name and JSON, or collection name, key, and JSON)")
+		}
 	}
 
 	leadingArgs = make([]string, fixedArgCount)
-	for i := range fixedArgCount {
-		leadingArgs[i] = parts[i]
+	var actualJsonStart int
+	var generatedUUID string
+	var hasExplicitKey bool = true // Assume key is explicit by default
+
+	if isKeyOptional { // Logic for 'collection item set'
+		collectionName := parts[0]
+		leadingArgs[0] = collectionName
+
+		if len(parts) >= fixedArgCount { // Check if a potential key part exists
+			potentialKeyCandidate := parts[fixedArgCount-1] // This would be the key if explicit
+			// If the *next* part after collection name is JSON, then key is omitted.
+			// Example: "collection item set my_col {"name":"val"}"
+			// parts[0]="my_col", parts[1]="{"name":"val"}"
+			if strings.HasPrefix(potentialKeyCandidate, "{") || strings.HasPrefix(potentialKeyCandidate, "[") {
+				hasExplicitKey = false
+				generatedUUID = uuid.New().String()
+				leadingArgs[1] = generatedUUID      // The key for the protocol
+				actualJsonStart = fixedArgCount - 1 // JSON starts where the key would be
+			} else {
+				// User provided an explicit key
+				leadingArgs[1] = potentialKeyCandidate // Explicit key
+				actualJsonStart = fixedArgCount        // JSON starts after key
+			}
+		} else { // Only collection name provided, key and JSON are missing
+			return nil, "", 0, fmt.Errorf("missing key and/or JSON value for collection item set")
+		}
+	} else { // Logic for commands like 'set' (key is always fixedArgCount-1 and required)
+		for i := 0; i < fixedArgCount; i++ {
+			leadingArgs[i] = parts[i]
+		}
+		actualJsonStart = fixedArgCount
 	}
 
-	jsonPartStartIndex := fixedArgCount
+	jsonPartStartIndex := actualJsonStart
 
 	potentialTTLStr := parts[len(parts)-1]
 	ttlSeconds = 0
 
 	isLastPartTTL := false
-	if len(parts) > fixedArgCount {
+	// Only check for TTL if there's enough room for JSON and a potential TTL after leading args
+	if len(parts) > jsonPartStartIndex {
 		if val, err := strconv.ParseInt(potentialTTLStr, 10, 64); err == nil {
 			isLastPartTTL = true
 			ttlSeconds = val
@@ -321,6 +362,22 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 
 	if len(jsonString) == 0 {
 		return nil, "", 0, fmt.Errorf("JSON value cannot be empty (use {} or [])")
+	}
+
+	// Now, inject the _id into the JSON string if a UUID was generated for collections
+	if isKeyOptional && !hasExplicitKey { // Only for optional key scenarios (collections)
+		var jsonData map[string]any
+		if err := json.Unmarshal([]byte(jsonString), &jsonData); err != nil {
+			return nil, "", 0, fmt.Errorf("invalid initial JSON for _id injection: %w", err)
+		}
+		// The generated UUID is now in leadingArgs[fixedArgCount-1] (which is leadingArgs[1] for collection item set)
+		jsonData["_id"] = leadingArgs[fixedArgCount-1]
+		updatedJSONBytes, err := json.Marshal(jsonData)
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("failed to marshal JSON after _id injection: %w", err)
+		}
+		jsonString = string(updatedJSONBytes)
+		fmt.Printf("Note: Key not provided. Generated key: '%s' and injected '_id' into JSON.\n", leadingArgs[fixedArgCount-1])
 	}
 
 	if !json.Valid([]byte(jsonString)) {
@@ -476,16 +533,16 @@ func printHelp() {
 	fmt.Println("\nAvailable Commands:")
 	fmt.Println("    login <username> <password>")
 	fmt.Println("    update password <target_username> <new_password>")
-	fmt.Println("    set <key> <value_json> [ttl_seconds]")
+	fmt.Println("    set <key> <value_json> [ttl_seconds]") // Revertido: Key is now required.
 	fmt.Println("    get <key>")
 	fmt.Println("    collection create <collection_name>")
 	fmt.Println("    collection delete <collection_name>")
 	fmt.Println("    collection list")
-	fmt.Println("    collection item set <collection_name> <key> <value_json> [ttl_seconds]")
+	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)") // Keep as optional
 	fmt.Println("    collection item get <collection_name> <key>")
 	fmt.Println("    collection item delete <collection_name> <key>")
 	fmt.Println("    collection item list <collection_name>")
-	fmt.Println("    collection query <collection_name> <query_json>") // NEW
+	fmt.Println("    collection query <collection_name> <query_json>")
 	fmt.Println("    clear")
 	fmt.Println("    exit")
 	fmt.Println("---")

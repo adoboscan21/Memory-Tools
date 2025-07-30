@@ -3,6 +3,7 @@ module memory-tools
 go 1.24.4
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/json-iterator/go v1.1.12
 	golang.org/x/crypto v0.40.0
 )

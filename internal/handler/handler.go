@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -101,335 +102,366 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			} else {
 				log.Printf("Error reading command type from %s: %v", conn.RemoteAddr(), err)
 			}
-			return
+			return // Exit goroutine on read error
 		}
 
 		h.ActivityUpdater.UpdateActivity()
 
-		// Commands that do not require prior authentication.
+		// --- MAIN COMMAND DISPATCH ---
+		// Handle commands based on type. Authentication is checked *within* relevant cases.
 		switch cmdType {
 		case protocol.CmdAuthenticate:
 			h.handleAuthenticate(conn)
+			// After authentication attempt, continue the loop to process next command.
 			continue
+
 		case protocol.CmdChangeUserPassword:
+			// This command has its own specific authorization logic (requires 'root' from localhost),
+			// which is checked inside its handler.
 			h.handleChangeUserPassword(conn)
 			continue
-		}
 
-		// All other commands require authentication.
-		if !h.IsAuthenticated {
-			log.Printf("Unauthorized access attempt from %s (command %d). Connection not authenticated.", conn.RemoteAddr(), cmdType)
-			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
-			continue
-		}
-
-		switch cmdType {
-		// Main Store Commands.
-		case protocol.CmdSet:
-			key, value, ttl, err := protocol.ReadSetCommand(conn)
-			if err != nil {
-				log.Printf("Error reading SET command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET command format", nil)
-				continue
-			}
-			h.MainStore.Set(key, value, ttl)
-			if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in main store", key), nil); err != nil {
-				log.Printf("Error writing SET response to %s: %v", conn.RemoteAddr(), err)
+		// --- ALL OTHER COMMANDS require prior authentication ---
+		default:
+			if !h.IsAuthenticated {
+				log.Printf("Unauthorized access attempt from %s for command %d. Connection not authenticated.", conn.RemoteAddr(), cmdType)
+				protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
+				continue // Go to the next loop iteration, expecting an AUTH command
 			}
 
-		case protocol.CmdGet:
-			key, err := protocol.ReadGetCommand(conn)
-			if err != nil {
-				log.Printf("Error reading GET command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid GET command format", nil)
-				continue
-			}
-			value, found := h.MainStore.Get(key)
-			if found {
-				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from main store", key), value); err != nil {
-					log.Printf("Error writing GET success response to %s: %v", conn.RemoteAddr(), err)
+			// If we reach here, the client is authenticated. Now, dispatch the command.
+			switch cmdType {
+			// Main Store Commands.
+			case protocol.CmdSet:
+				key, value, ttl, err := protocol.ReadSetCommand(conn)
+				if err != nil {
+					log.Printf("Error reading SET command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET command format", nil)
+					continue
 				}
-			} else {
-				if err := protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found or expired in main store", key), nil); err != nil {
-					log.Printf("Error writing GET not found response to %s: %v", conn.RemoteAddr(), err)
+				h.MainStore.Set(key, value, ttl)
+				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in main store", key), nil); err != nil {
+					log.Printf("Error writing SET response to %s: %v", conn.RemoteAddr(), err)
 				}
-			}
 
-		// Collection Management Commands.
-		case protocol.CmdCollectionCreate:
-			collectionName, err := protocol.ReadCollectionCreateCommand(conn)
-			if err != nil {
-				log.Printf("Error reading CREATE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CREATE_COLLECTION command format", nil)
-				continue
-			}
-			if collectionName == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
-				continue
-			}
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can create collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-
-			colStore := h.CollectionManager.GetCollection(collectionName)
-			if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-				log.Printf("Error saving new/ensured collection '%s' to disk: %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to ensure collection '%s' persistence", collectionName), nil)
-			} else {
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' ensured and persisted", collectionName), nil)
-			}
-
-		case protocol.CmdCollectionDelete:
-			collectionName, err := protocol.ReadCollectionDeleteCommand(conn)
-			if err != nil {
-				log.Printf("Error reading DELETE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION command format", nil)
-				continue
-			}
-			if collectionName == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
-				continue
-			}
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-
-			h.CollectionManager.DeleteCollection(collectionName)
-			if err := h.CollectionManager.DeleteCollectionFromDisk(collectionName); err != nil {
-				log.Printf("Error deleting collection file for '%s': %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to delete collection '%s' from disk", collectionName), nil)
-			} else {
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' deleted", collectionName), nil)
-			}
-
-		case protocol.CmdCollectionList:
-			collectionNames := h.CollectionManager.ListCollections()
-			jsonNames, err := json.Marshal(collectionNames)
-			if err != nil {
-				log.Printf("Error marshalling collection names to JSON: %v", err)
-				protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection names", nil)
-				continue
-			}
-			if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Collections listed", jsonNames); err != nil {
-				log.Printf("Error writing collection list response to %s: %v", conn.RemoteAddr(), err)
-			}
-
-		// Collection Item Commands.
-		case protocol.CmdCollectionItemSet:
-			collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(conn)
-			if err != nil {
-				log.Printf("Error reading COLLECTION_ITEM_SET command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_SET command format", nil)
-				continue
-			}
-			if collectionName == "" || key == "" || len(value) == 0 {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name, key, or value cannot be empty", nil)
-				continue
-			}
-			// Prevent normal users from modifying the system collection directly
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can modify collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-
-			colStore := h.CollectionManager.GetCollection(collectionName)
-			colStore.Set(key, value, ttl)
-			if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-				log.Printf("Error saving collection '%s' to disk after SET operation: %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence error logged)", key, collectionName), nil)
-			} else {
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s'", key, collectionName), nil)
-			}
-
-		case protocol.CmdCollectionItemGet:
-			collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
-			if err != nil {
-				log.Printf("Error reading COLLECTION_ITEM_GET command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_GET command format", nil)
-				continue
-			}
-			if collectionName == "" || key == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
-				continue
-			}
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				log.Printf("Unauthorized attempt to GET item '%s' from _system collection by user '%s' from %s.", key, h.AuthenticatedUser, conn.RemoteAddr())
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can get items from collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-
-			colStore := h.CollectionManager.GetCollection(collectionName)
-			value, found := colStore.Get(key)
-			if found {
-				// Special handling for reading user data (do not send raw password hash)
-				if collectionName == SystemCollectionName && strings.HasPrefix(key, UserPrefix) {
-					var userInfo UserInfo
-					if err := json.Unmarshal(value, &userInfo); err == nil {
-						sanitizedInfo := map[string]string{"username": userInfo.Username, "is_root": fmt.Sprintf("%t", userInfo.IsRoot)}
-						sanitizedBytes, _ := json.Marshal(sanitizedInfo)
-						protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from collection '%s' (sanitized)", key, collectionName), sanitizedBytes)
-						continue
+			case protocol.CmdGet:
+				key, err := protocol.ReadGetCommand(conn)
+				if err != nil {
+					log.Printf("Error reading GET command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid GET command format", nil)
+					continue
+				}
+				value, found := h.MainStore.Get(key)
+				if found {
+					if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from main store", key), value); err != nil {
+						log.Printf("Error writing GET success response to %s: %v", conn.RemoteAddr(), err)
+					}
+				} else {
+					if err := protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found or expired in main store", key), nil); err != nil {
+						log.Printf("Error writing GET not found response to %s: %v", conn.RemoteAddr(), err)
 					}
 				}
-				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from collection '%s'", key, collectionName), value); err != nil {
-					log.Printf("Error writing COLLECTION_ITEM_GET success response to %s: %v", conn.RemoteAddr(), err)
+
+			// Collection Management Commands.
+			case protocol.CmdCollectionCreate:
+				collectionName, err := protocol.ReadCollectionCreateCommand(conn)
+				if err != nil {
+					log.Printf("Error reading CREATE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CREATE_COLLECTION command format", nil)
+					continue
 				}
-			} else {
-				if err := protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found or expired in collection '%s'", key, collectionName), nil); err != nil {
-					log.Printf("Error writing COLLECTION_ITEM_GET not found response to %s: %v", conn.RemoteAddr(), err)
+				if collectionName == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
+					continue
 				}
-			}
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can create collection '%s'", SystemCollectionName), nil)
+					continue
+				}
 
-		case protocol.CmdCollectionItemDelete:
-			collectionName, key, err := protocol.ReadCollectionItemDeleteCommand(conn)
-			if err != nil {
-				log.Printf("Error reading COLLECTION_ITEM_DELETE command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_DELETE command format", nil)
-				continue
-			}
-			if collectionName == "" || key == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
-				continue
-			}
-			if !h.CollectionManager.CollectionExists(collectionName) {
-				protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
-				continue
-			}
-			// Prevent normal users from deleting from the system collection
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete from collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-			colStore := h.CollectionManager.GetCollection(collectionName)
-			colStore.Delete(key)
-			if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-				log.Printf("Error saving collection '%s' to disk after DELETE operation: %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s' (persistence error logged)", key, collectionName), nil)
-			} else {
-				protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s'", key, collectionName), nil)
-			}
+				colStore := h.CollectionManager.GetCollection(collectionName)
+				if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
+					log.Printf("Error saving new/ensured collection '%s' to disk: %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to ensure collection '%s' persistence", collectionName), nil)
+				} else {
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' ensured and persisted", collectionName), nil)
+				}
 
-		case protocol.CmdCollectionItemList:
-			collectionName, err := protocol.ReadCollectionItemListCommand(conn)
-			if err != nil {
-				log.Printf("Error reading COLLECTION_ITEM_LIST command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_LIST command format", nil)
-				continue
-			}
-			if collectionName == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
-				continue
-			}
-			if !h.CollectionManager.CollectionExists(collectionName) {
-				protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for listing items", collectionName), nil)
-				continue
-			}
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				log.Printf("Unauthorized attempt to LIST items from _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can list items from collection '%s'", SystemCollectionName), nil)
-				continue
-			}
+			case protocol.CmdCollectionDelete:
+				collectionName, err := protocol.ReadCollectionDeleteCommand(conn)
+				if err != nil {
+					log.Printf("Error reading DELETE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION command format", nil)
+					continue
+				}
+				if collectionName == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
+					continue
+				}
+				if !h.CollectionManager.CollectionExists(collectionName) {
+					protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
+					continue
+				}
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete collection '%s'", SystemCollectionName), nil)
+					continue
+				}
 
-			colStore := h.CollectionManager.GetCollection(collectionName)
-			allData := colStore.GetAll()
+				h.CollectionManager.DeleteCollection(collectionName)
+				if err := h.CollectionManager.DeleteCollectionFromDisk(collectionName); err != nil {
+					log.Printf("Error deleting collection file for '%s': %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to delete collection '%s' from disk", collectionName), nil)
+				} else {
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' deleted", collectionName), nil)
+				}
 
-			// Special handling for user data in _system collection: do not expose password hashes
-			if collectionName == SystemCollectionName {
-				sanitizedData := make(map[string]map[string]string)
-				for key, val := range allData {
-					if strings.HasPrefix(key, UserPrefix) {
+			case protocol.CmdCollectionList:
+				collectionNames := h.CollectionManager.ListCollections()
+				jsonNames, err := json.Marshal(collectionNames)
+				if err != nil {
+					log.Printf("Error marshalling collection names to JSON: %v", err)
+					protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection names", nil)
+					continue
+				}
+				if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Collections listed", jsonNames); err != nil {
+					log.Printf("Error writing collection list response to %s: %v", conn.RemoteAddr(), err)
+				}
+
+			// Collection Item Commands.
+			case protocol.CmdCollectionItemSet:
+				collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(conn)
+				if err != nil {
+					log.Printf("Error reading COLLECTION_ITEM_SET command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_SET command format", nil)
+					continue
+				}
+				if collectionName == "" || len(value) == 0 { // Key can be empty for UUID generation
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+					continue
+				}
+				if key == "" { // The client is expected to send a UUID here, but as a fallback.
+					key = uuid.New().String()
+					log.Printf("Warning: Empty key received for COLLECTION_ITEM_SET. Generated UUID '%s'. Ensure client sends UUIDs.", key)
+				}
+
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can modify collection '%s'", SystemCollectionName), nil)
+					continue
+				}
+
+				// Ensure _id field exists in the JSON value
+				updatedValue, err := ensureIDField(value, key)
+				if err != nil {
+					log.Printf("Error ensuring _id field for key '%s' in collection '%s': %v", key, collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value for _id field", nil)
+					continue
+				}
+
+				colStore := h.CollectionManager.GetCollection(collectionName)
+				colStore.Set(key, updatedValue, ttl)
+				if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
+					log.Printf("Error saving collection '%s' to disk after SET operation: %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence error logged)", key, collectionName), nil)
+				} else {
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s'", key, collectionName), nil)
+				}
+
+			case protocol.CmdCollectionItemGet:
+				collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
+				if err != nil {
+					log.Printf("Error reading COLLECTION_ITEM_GET command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_GET command format", nil)
+					continue
+				}
+				if collectionName == "" || key == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
+					continue
+				}
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					log.Printf("Unauthorized attempt to GET item '%s' from _system collection by user '%s' from %s.", key, h.AuthenticatedUser, conn.RemoteAddr())
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can get items from collection '%s'", SystemCollectionName), nil)
+					continue
+				}
+
+				colStore := h.CollectionManager.GetCollection(collectionName)
+				value, found := colStore.Get(key)
+				if found {
+					// Special handling for reading user data (do not send raw password hash)
+					if collectionName == SystemCollectionName && strings.HasPrefix(key, UserPrefix) {
 						var userInfo UserInfo
-						if err := json.Unmarshal(val, &userInfo); err == nil {
-							// Only expose username and IsRoot flag, not password hash
-							sanitizedData[key] = map[string]string{
-								"username": userInfo.Username,
-								"is_root":  fmt.Sprintf("%t", userInfo.IsRoot),
+						if err := json.Unmarshal(value, &userInfo); err == nil {
+							sanitizedInfo := map[string]string{"username": userInfo.Username, "is_root": fmt.Sprintf("%t", userInfo.IsRoot)}
+							sanitizedBytes, _ := json.Marshal(sanitizedInfo)
+							protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from collection '%s' (sanitized)", key, collectionName), sanitizedBytes)
+							continue
+						}
+					}
+					if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' retrieved from collection '%s'", key, collectionName), value); err != nil {
+						log.Printf("Error writing COLLECTION_ITEM_GET success response to %s: %v", conn.RemoteAddr(), err)
+					}
+				} else {
+					if err := protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found or expired in collection '%s'", key, collectionName), nil); err != nil {
+						log.Printf("Error writing COLLECTION_ITEM_GET not found response to %s: %v", conn.RemoteAddr(), err)
+					}
+				}
+
+			case protocol.CmdCollectionItemDelete:
+				collectionName, key, err := protocol.ReadCollectionItemDeleteCommand(conn)
+				if err != nil {
+					log.Printf("Error reading COLLECTION_ITEM_DELETE command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_DELETE command format", nil)
+					continue
+				}
+				if collectionName == "" || key == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
+					continue
+				}
+				if !h.CollectionManager.CollectionExists(collectionName) {
+					protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
+					continue
+				}
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete from collection '%s'", SystemCollectionName), nil)
+					continue
+				}
+				colStore := h.CollectionManager.GetCollection(collectionName)
+				colStore.Delete(key)
+				if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
+					log.Printf("Error saving collection '%s' to disk after DELETE operation: %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s' (persistence error logged)", key, collectionName), nil)
+				} else {
+					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s'", key, collectionName), nil)
+				}
+
+			case protocol.CmdCollectionItemList:
+				collectionName, err := protocol.ReadCollectionItemListCommand(conn)
+				if err != nil {
+					log.Printf("Error reading COLLECTION_ITEM_LIST command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_LIST command format", nil)
+					continue
+				}
+				if collectionName == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
+					continue
+				}
+				if !h.CollectionManager.CollectionExists(collectionName) {
+					protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for listing items", collectionName), nil)
+					continue
+				}
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					log.Printf("Unauthorized attempt to LIST items from _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can list items from collection '%s'", SystemCollectionName), nil)
+					continue
+				}
+
+				colStore := h.CollectionManager.GetCollection(collectionName)
+				allData := colStore.GetAll()
+
+				// Special handling for user data in _system collection: do not expose password hashes
+				if collectionName == SystemCollectionName {
+					sanitizedData := make(map[string]map[string]string)
+					for key, val := range allData {
+						if strings.HasPrefix(key, UserPrefix) {
+							var userInfo UserInfo
+							if err := json.Unmarshal(val, &userInfo); err == nil {
+								// Only expose username and IsRoot flag, not password hash
+								sanitizedData[key] = map[string]string{
+									"username": userInfo.Username,
+									"is_root":  fmt.Sprintf("%t", userInfo.IsRoot),
+								}
+							} else {
+								log.Printf("Warning: Failed to unmarshal user info for key '%s': %v", key, err)
+								sanitizedData[key] = map[string]string{"username": "UNKNOWN", "status": "corrupted"}
 							}
 						} else {
-							log.Printf("Warning: Failed to unmarshal user info for key '%s': %v", key, err)
-							sanitizedData[key] = map[string]string{"username": "UNKNOWN", "status": "corrupted"}
+							// For non-user system data, just indicate it's non-user for security reasons.
+							sanitizedData[key] = map[string]string{"data": "non-user system data (omitted for security)"}
 						}
-					} else {
-						// For non-user system data, just indicate it's non-user for security reasons.
-						sanitizedData[key] = map[string]string{"data": "non-user system data (omitted for security)"}
+					}
+					jsonResponseData, err := json.Marshal(sanitizedData)
+					if err != nil {
+						log.Printf("Error marshalling sanitized system collection items to JSON for '%s': %v", collectionName, err)
+						protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal sanitized collection items", nil)
+						continue
+					}
+					if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Sanitized items from collection '%s' retrieved", collectionName), jsonResponseData); err != nil {
+						log.Printf("Error writing COLLECTION_ITEM_LIST response to %s: %v", conn.RemoteAddr(), err)
+					}
+				} else {
+					// For normal collections, marshal as before
+					jsonResponseData, err := json.Marshal(allData)
+					if err != nil {
+						log.Printf("Error marshalling collection items to JSON for '%s': %v", collectionName, err)
+						protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection items", nil)
+						continue
+					}
+					if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Items from collection '%s' retrieved", collectionName), jsonResponseData); err != nil {
+						log.Printf("Error writing COLLECTION_ITEM_LIST response to %s: %v", conn.RemoteAddr(), err)
 					}
 				}
-				jsonResponseData, err := json.Marshal(sanitizedData)
+
+			// NEW: Collection Query Command
+			case protocol.CmdCollectionQuery:
+				collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
 				if err != nil {
-					log.Printf("Error marshalling sanitized system collection items to JSON for '%s': %v", collectionName, err)
-					protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal sanitized collection items", nil)
+					log.Printf("Error reading COLLECTION_QUERY command from %s: %v", conn.RemoteAddr(), err)
+					protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_QUERY command format", nil)
 					continue
 				}
-				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Sanitized items from collection '%s' retrieved", collectionName), jsonResponseData); err != nil {
-					log.Printf("Error writing COLLECTION_ITEM_LIST response to %s: %v", conn.RemoteAddr(), err)
-				}
-			} else {
-				// For normal collections, marshal as before
-				jsonResponseData, err := json.Marshal(allData)
-				if err != nil {
-					log.Printf("Error marshalling collection items to JSON for '%s': %v", collectionName, err)
-					protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection items", nil)
+				if collectionName == "" {
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
 					continue
 				}
-				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Items from collection '%s' retrieved", collectionName), jsonResponseData); err != nil {
-					log.Printf("Error writing COLLECTION_ITEM_LIST response to %s: %v", conn.RemoteAddr(), err)
+				// Specific authorization check for _system collection (even if authenticated)
+				if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+					log.Printf("Unauthorized attempt to QUERY _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
+					protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can query collection '%s'", SystemCollectionName), nil)
+					continue
 				}
-			}
+				if !h.CollectionManager.CollectionExists(collectionName) {
+					protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for query", collectionName), nil)
+					continue
+				}
 
-		// NEW: Collection Query Command
-		case protocol.CmdCollectionQuery:
-			collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
-			if err != nil {
-				log.Printf("Error reading COLLECTION_QUERY command from %s: %v", conn.RemoteAddr(), err)
-				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_QUERY command format", nil)
-				continue
-			}
-			if collectionName == "" {
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
-				continue
-			}
-			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-				log.Printf("Unauthorized attempt to QUERY _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can query collection '%s'", SystemCollectionName), nil)
-				continue
-			}
-			if !h.CollectionManager.CollectionExists(collectionName) {
-				protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for query", collectionName), nil)
-				continue
-			}
+				var query Query
+				if err := json.Unmarshal(queryJSONBytes, &query); err != nil {
+					log.Printf("Error unmarshalling query JSON for collection '%s': %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid query JSON format", nil)
+					continue
+				}
 
-			var query Query
-			if err := json.Unmarshal(queryJSONBytes, &query); err != nil {
-				log.Printf("Error unmarshalling query JSON for collection '%s': %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid query JSON format", nil)
-				continue
-			}
+				// Process the query
+				results, err := h.processCollectionQuery(collectionName, query)
+				if err != nil {
+					log.Printf("Error processing query for collection '%s': %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to execute query: %v", err), nil)
+					continue
+				}
 
-			// Process the query
-			results, err := h.processCollectionQuery(collectionName, query)
-			if err != nil {
-				log.Printf("Error processing query for collection '%s': %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to execute query: %v", err), nil)
-				continue
-			}
+				responseBytes, err := json.Marshal(results)
+				if err != nil {
+					log.Printf("Error marshalling query results for collection '%s': %v", collectionName, err)
+					protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal query results", nil)
+					continue
+				}
 
-			responseBytes, err := json.Marshal(results)
-			if err != nil {
-				log.Printf("Error marshalling query results for collection '%s': %v", collectionName, err)
-				protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal query results", nil)
-				continue
-			}
+				if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Query executed on collection '%s'", collectionName), responseBytes); err != nil {
+					log.Printf("Error writing COLLECTION_QUERY response to %s: %v", conn.RemoteAddr(), err)
+				}
 
-			if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Query executed on collection '%s'", collectionName), responseBytes); err != nil {
-				log.Printf("Error writing COLLECTION_QUERY response to %s: %v", conn.RemoteAddr(), err)
-			}
-
-		default:
-			log.Printf("Received unknown command type %d from %s", cmdType, conn.RemoteAddr())
-			if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unknown command type %d", cmdType), nil); err != nil {
-				log.Printf("Error writing unknown command response to %s: %v", conn.RemoteAddr(), err)
+			default:
+				// This 'default' case handles any command type that is explicitly listed as requiring
+				// authentication but is not handled in the specific cases above (e.g., a typo in cmdType).
+				log.Printf("Received unhandled or unknown authenticated command type %d from client %s.", cmdType, conn.RemoteAddr())
+				if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil); err != nil {
+					log.Printf("Error writing bad command response to %s: %v", conn.RemoteAddr(), err)
+				}
 			}
 		}
 	}
@@ -472,7 +504,8 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 		return
 	}
 
-	// Root user specific check: if is_root but not localhost, deny.
+	// Root user specific check: if IsRoot but not localhost, deny.
+	// This check applies ONLY to users marked as IsRoot in the system collection.
 	if storedUserInfo.IsRoot && !h.IsLocalhostConn {
 		log.Printf("Authentication failed for root user '%s' from %s: Not a localhost connection.", username, conn.RemoteAddr())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Root access only from localhost.", nil)
@@ -501,7 +534,7 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 		return
 	}
 
-	// Security Check: Only root from localhost can execute this command.
+	// Security Check: Only 'root' authenticated from localhost can execute this command.
 	if !(h.IsAuthenticated && h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
 		log.Printf("Unauthorized attempt to change password for '%s' by user '%s' from %s (IsLocalhost: %t).",
 			targetUsername, h.AuthenticatedUser, conn.RemoteAddr(), h.IsLocalhostConn)
@@ -1004,4 +1037,25 @@ func (h *ConnectionHandler) performAggregations(items []struct {
 	}
 
 	return aggregatedResults, nil
+}
+
+// ensureIDField unmarshals the value, ensures it's a JSON object (map),
+// sets the "_id" field with the provided key, and marshals it back to bytes.
+func ensureIDField(value []byte, key string) ([]byte, error) {
+	var data map[string]any
+	// Attempt to unmarshal as a map. If it's not a map, we can't inject _id.
+	if err := json.Unmarshal(value, &data); err != nil {
+		// If it's not a JSON object, or is invalid JSON, return original value and an error.
+		// Or, if you want to be more strict, return an error.
+		return value, fmt.Errorf("value is not a JSON object, cannot inject _id field: %w", err)
+	}
+
+	// Set or override the _id field.
+	data["_id"] = key
+
+	updatedValue, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal JSON after injecting _id: %w", err)
+	}
+	return updatedValue, nil
 }

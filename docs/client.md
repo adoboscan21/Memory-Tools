@@ -1,10 +1,10 @@
-# Memory Tools CLI Client
+## Memory Tools CLI Client
 
 The `memory-tools-client` is an interactive command-line interface (CLI) for direct, secure interaction with the `memory-tools-server` via its custom TLS-encrypted TCP protocol.
 
 ---
 
-## How to Run
+### How to Run
 
 To start the client, provide the address of the `memory-tools-server`. You can also provide credentials for automatic login using flags.
 
@@ -26,7 +26,7 @@ Once connected, you'll see a prompt: `Connected securely to Memory Tools server 
 
 ---
 
-## Authentication
+### Authentication
 
 The client supports both automatic login via command-line flags and manual login via a command.
 
@@ -43,23 +43,23 @@ The client supports both automatic login via command-line flags and manual login
   ```
 
   - **Example**:
-    ```
+    ```bash
     login root mysecretpassword
     ```
 
 ---
 
-## Available Commands
+### Available Commands
 
 Here's a list of all commands you can use:
 
-### General Commands
+#### General Commands
 
 - **`help`**: Displays all available commands and their syntax, including examples for `collection query`.
 - **`clear`**: Clears the terminal screen.
 - **`exit`**: Disconnects from the server and quits the client.
 
-### User Management Commands
+#### User Management Commands
 
 - **`login <username> <password>`**
   - **Description**: Authenticates with the server using the provided username and password. This is necessary to execute most commands.
@@ -78,7 +78,7 @@ Here's a list of all commands you can use:
     update password user1 newSecurePassword
     ```
 
-### Main Data Store Commands
+#### Main Data Store Commands
 
 These commands operate on the primary, default key-value store.
 
@@ -96,7 +96,7 @@ These commands operate on the primary, default key-value store.
     get mykey
     ```
 
-### Collection Management Commands
+#### Collection Management Commands
 
 These commands manage named collections, which are essentially independent key-value stores.
 
@@ -119,17 +119,21 @@ These commands manage named collections, which are essentially independent key-v
     collection list
     ```
 
-### Collection Item Commands
+#### Collection Item Commands
 
 These commands allow you to manipulate key-value pairs within specific collections.
 
-- **`collection item set <collection_name> <key> <value_json> [ttl_seconds]`**
-  - **Description**: Sets a key-value pair within the specified collection. `value_json` must be valid JSON. `ttl_seconds` (optional) is in seconds.
+- **`collection item set <collection_name> [<key>] <value_json> [ttl_seconds]`**
+  - **Description**: Sets a key-value pair within the specified collection. `value_json` must be valid JSON. `ttl_seconds` (optional) is in seconds. **If `<key>` is omitted, a unique UUID will be generated and used as the key, and also injected into the `value_json` as an `_id` field.**
   - **Examples**:
-    ```bash
-    collection item set users user:123 {"id": "user:123", "email": "a@b.com"} 3600
-    collection item set products item:A01 {"name": "Widget"}
-    ```
+    - **With explicit key:**
+      ```bash
+      collection item set users user:123 {"id": "user:123", "email": "a@b.com"} 3600
+      ```
+    - **Without explicit key (UUID generated for key and `_id` field):**
+      ```bash
+      collection item set products {"name": "New Gadget", "price": 99.99} 180
+      ```
 - **`collection item get <collection_name> <key>`**
   - **Description**: Retrieves the value for a key from the specified collection.
   - **Example**:
@@ -151,7 +155,7 @@ These commands allow you to manipulate key-value pairs within specific collectio
 
 ---
 
-### **Collection Query Command (NEW)**
+### Collection Query Command (NEW)
 
 This powerful command allows you to retrieve, filter, sort, and aggregate data from a collection using a flexible JSON-based query language.
 

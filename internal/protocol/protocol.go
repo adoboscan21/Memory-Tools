@@ -25,6 +25,7 @@ const (
 	CmdCollectionItemGet    // GET_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemDelete // DELETE_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemList   // LIST_COLLECTION_ITEMS collectionName
+	CmdCollectionQuery      // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
@@ -409,4 +410,32 @@ func ReadChangeUserPasswordCommand(r io.Reader) (targetUsername, newPassword str
 		return "", "", fmt.Errorf("failed to read new password (change user password): %w", err)
 	}
 	return targetUsername, newPassword, nil
+}
+
+// WriteCollectionQueryCommand writes a QUERY_COLLECTION command to the connection.
+// Format: [CmdCollectionQuery (1 byte)] [CollectionNameLength (4 bytes)] [CollectionName] [QueryJSONLength (4 bytes)] [QueryJSON]
+func WriteCollectionQueryCommand(w io.Writer, collectionName string, queryJSON []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionQuery)}); err != nil {
+		return fmt.Errorf("failed to write command type (collection query): %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name (collection query): %w", err)
+	}
+	if err := WriteBytes(w, queryJSON); err != nil {
+		return fmt.Errorf("failed to write query JSON (collection query): %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionQueryCommand reads a QUERY_COLLECTION command from the connection.
+func ReadCollectionQueryCommand(r io.Reader) (collectionName string, queryJSON []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read collection name (collection query): %w", err)
+	}
+	queryJSON, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read query JSON (collection query): %w", err)
+	}
+	return collectionName, queryJSON, nil
 }

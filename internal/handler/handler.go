@@ -7,6 +7,9 @@ import (
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
 	"net"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	jsoniter "github.com/json-iterator/go"
@@ -38,6 +41,32 @@ type ConnectionHandler struct {
 	IsAuthenticated   bool            // Tracks authentication status for this connection
 	AuthenticatedUser string          // Stores the authenticated username
 	IsLocalhostConn   bool            // True if connection is from localhost
+}
+
+// Query defines the structure for a collection query command,
+// encompassing filtering, ordering, limiting, and aggregation.
+type Query struct {
+	Filter       map[string]any         `json:"filter,omitempty"`       // WHERE clause equivalents (AND, OR, NOT, LIKE, BETWEEN, IN, IS NULL)
+	OrderBy      []OrderByClause        `json:"order_by,omitempty"`     // ORDER BY clause
+	Limit        *int                   `json:"limit,omitempty"`        // LIMIT clause
+	Offset       int                    `json:"offset,omitempty"`       // OFFSET clause
+	Count        bool                   `json:"count,omitempty"`        // COUNT(*) equivalent
+	Aggregations map[string]Aggregation `json:"aggregations,omitempty"` // SUM, AVG, MIN, MAX
+	GroupBy      []string               `json:"group_by,omitempty"`     // GROUP BY clause
+	Having       map[string]any         `json:"having,omitempty"`       // HAVING clause (filters aggregated results)
+	Distinct     string                 `json:"distinct,omitempty"`     // DISTINCT field
+}
+
+// OrderByClause defines a single ordering criterion.
+type OrderByClause struct {
+	Field     string `json:"field"`
+	Direction string `json:"direction"` // "asc" or "desc"
+}
+
+// Aggregation defines an aggregation function.
+type Aggregation struct {
+	Func  string `json:"func"`  // "sum", "avg", "min", "max", "count"
+	Field string `json:"field"` // Field to aggregate on, "*" for count
 }
 
 // NewConnectionHandler creates a new instance of ConnectionHandler.
@@ -349,6 +378,54 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 				}
 			}
 
+		// NEW: Collection Query Command
+		case protocol.CmdCollectionQuery:
+			collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
+			if err != nil {
+				log.Printf("Error reading COLLECTION_QUERY command from %s: %v", conn.RemoteAddr(), err)
+				protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_QUERY command format", nil)
+				continue
+			}
+			if collectionName == "" {
+				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
+				continue
+			}
+			if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+				log.Printf("Unauthorized attempt to QUERY _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
+				protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can query collection '%s'", SystemCollectionName), nil)
+				continue
+			}
+			if !h.CollectionManager.CollectionExists(collectionName) {
+				protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for query", collectionName), nil)
+				continue
+			}
+
+			var query Query
+			if err := json.Unmarshal(queryJSONBytes, &query); err != nil {
+				log.Printf("Error unmarshalling query JSON for collection '%s': %v", collectionName, err)
+				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid query JSON format", nil)
+				continue
+			}
+
+			// Process the query
+			results, err := h.processCollectionQuery(collectionName, query)
+			if err != nil {
+				log.Printf("Error processing query for collection '%s': %v", collectionName, err)
+				protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to execute query: %v", err), nil)
+				continue
+			}
+
+			responseBytes, err := json.Marshal(results)
+			if err != nil {
+				log.Printf("Error marshalling query results for collection '%s': %v", collectionName, err)
+				protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal query results", nil)
+				continue
+			}
+
+			if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Query executed on collection '%s'", collectionName), responseBytes); err != nil {
+				log.Printf("Error writing COLLECTION_QUERY response to %s: %v", conn.RemoteAddr(), err)
+			}
+
 		default:
 			log.Printf("Received unknown command type %d from %s", cmdType, conn.RemoteAddr())
 			if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unknown command type %d", cmdType), nil); err != nil {
@@ -484,4 +561,447 @@ func HashPassword(password string) (string, error) {
 func CheckPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
+}
+
+// processCollectionQuery executes a complex query on a collection.
+// It applies filters, performs aggregations, orders, limits, and offsets.
+func (h *ConnectionHandler) processCollectionQuery(collectionName string, query Query) (any, error) {
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	allData := colStore.GetAll() // Get all non-expired data from the collection
+
+	// Convert map[string][]byte to map[string]map[string]any for easier processing
+	// We also need to store the original key to return it if needed
+	var itemsWithKeys []struct {
+		Key string
+		Val map[string]any
+	}
+	for k, vBytes := range allData {
+		var val map[string]any
+		if err := json.Unmarshal(vBytes, &val); err != nil {
+			log.Printf("Warning: Failed to unmarshal JSON for key '%s' in collection '%s': %v", k, collectionName, err)
+			continue // Skip corrupted items
+		}
+		itemsWithKeys = append(itemsWithKeys, struct {
+			Key string
+			Val map[string]any
+		}{Key: k, Val: val})
+	}
+
+	// 1. Filtering (WHERE clause)
+	filteredItems := []struct {
+		Key string
+		Val map[string]any
+	}{}
+	for _, item := range itemsWithKeys {
+		if h.matchFilter(item.Val, query.Filter) {
+			filteredItems = append(filteredItems, item)
+		}
+	}
+
+	// Handle DISTINCT early if requested
+	if query.Distinct != "" {
+		distinctValues := make(map[any]bool)
+		var resultList []any
+		for _, item := range filteredItems {
+			if val, ok := item.Val[query.Distinct]; ok && val != nil {
+				if _, seen := distinctValues[val]; !seen {
+					distinctValues[val] = true
+					resultList = append(resultList, val)
+				}
+			}
+		}
+		return resultList, nil // Distinct is a terminal operation
+	}
+
+	// NEW: Handle top-level Count if no other aggregations or group by are specified
+	if query.Count && len(query.Aggregations) == 0 && len(query.GroupBy) == 0 {
+		return map[string]int{"count": len(filteredItems)}, nil
+	}
+
+	// 2. Aggregations & Group By
+	if len(query.Aggregations) > 0 || len(query.GroupBy) > 0 {
+		return h.performAggregations(filteredItems, query)
+	}
+
+	// For non-aggregated queries, continue with sorting and pagination
+	results := make([]map[string]any, 0, len(filteredItems))
+	for _, item := range filteredItems {
+		results = append(results, item.Val)
+	}
+
+	// 3. Ordering (ORDER BY clause)
+	if len(query.OrderBy) > 0 {
+		sort.Slice(results, func(i, j int) bool {
+			for _, ob := range query.OrderBy {
+				valA, okA := results[i][ob.Field]
+				valB, okB := results[j][ob.Field]
+
+				// Handle missing fields (nulls first/last depends on DB, here we'll put missing first for consistency)
+				if !okA && !okB {
+					continue // Both missing, continue to next order by
+				}
+				if !okA {
+					return true // A is missing, A comes first
+				}
+				if !okB {
+					return false // B is missing, B comes first (A does not come first)
+				}
+
+				cmp := compare(valA, valB)
+				if cmp != 0 {
+					if ob.Direction == "desc" {
+						return cmp > 0
+					}
+					return cmp < 0
+				}
+			}
+			return false // Items are equal based on all order by criteria
+		})
+	}
+
+	// 4. Pagination (OFFSET and LIMIT)
+	offset := query.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(results) {
+		offset = len(results)
+	}
+	results = results[offset:]
+
+	if query.Limit != nil && *query.Limit >= 0 {
+		limit := *query.Limit
+		if limit == 0 { // Explicitly limit 0 means empty result set
+			return []map[string]any{}, nil
+		}
+		if limit > len(results) {
+			limit = len(results)
+		}
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
+// matchFilter evaluates an item against a filter condition (recursive for AND/OR/NOT).
+// Filter structure example:
+// {"and": [{"field": "age", "op": ">", "value": 30}, {"field": "city", "op": "=", "value": "New York"}]}
+// {"or": [...]}
+// {"not": {"field": "status", "op": "=", "value": "inactive"}}
+// {"field": "name", "op": "like", "value": "J%"}
+func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]any) bool {
+	if len(filter) == 0 {
+		return true // No filter, matches all
+	}
+
+	// AND condition
+	if andConditions, ok := filter["and"].([]any); ok {
+		for _, cond := range andConditions {
+			if condMap, isMap := cond.(map[string]any); isMap {
+				if !h.matchFilter(item, condMap) {
+					return false
+				}
+			} else {
+				log.Printf("Warning: Invalid 'and' condition format: %+v", cond)
+				return false // Treat malformed filter as no match
+			}
+		}
+		return true
+	}
+
+	// OR condition
+	if orConditions, ok := filter["or"].([]any); ok {
+		for _, cond := range orConditions {
+			if condMap, isMap := cond.(map[string]any); isMap {
+				if h.matchFilter(item, condMap) {
+					return true
+				}
+			} else {
+				log.Printf("Warning: Invalid 'or' condition format: %+v", cond)
+				return false // Treat malformed filter as no match
+			}
+		}
+		return false
+	}
+
+	// NOT condition
+	if notCondition, ok := filter["not"].(map[string]any); ok {
+		return !h.matchFilter(item, notCondition)
+	}
+
+	// Single field condition
+	field, fieldOk := filter["field"].(string)
+	op, opOk := filter["op"].(string)
+	value := filter["value"] // Value can be nil, array, string, number, bool
+
+	if !fieldOk || !opOk {
+		log.Printf("Warning: Invalid filter condition (missing field/op): %+v", filter)
+		return false
+	}
+
+	itemValue, itemValueExists := item[field]
+
+	switch op {
+	case "=":
+		if !itemValueExists {
+			return false
+		}
+		return compare(itemValue, value) == 0
+	case "!=":
+		if !itemValueExists {
+			return true
+		} // If item value doesn't exist, it's not equal to anything
+		return compare(itemValue, value) != 0
+	case ">":
+		if !itemValueExists {
+			return false
+		}
+		return compare(itemValue, value) > 0
+	case ">=":
+		if !itemValueExists {
+			return false
+		}
+		return compare(itemValue, value) >= 0
+	case "<":
+		if !itemValueExists {
+			return false
+		}
+		return compare(itemValue, value) < 0
+	case "<=":
+		if !itemValueExists {
+			return false
+		}
+		return compare(itemValue, value) <= 0
+	case "like": // Case-insensitive, % as wildcard
+		if !itemValueExists {
+			return false
+		}
+		if sVal, isStr := itemValue.(string); isStr {
+			if pattern, isStrPattern := value.(string); isStrPattern {
+				pattern = strings.ReplaceAll(regexp.QuoteMeta(pattern), "%", ".*")
+				matched, err := regexp.MatchString("(?i)^"+pattern+"$", sVal) // (?i) for case-insensitive
+				if err != nil {
+					log.Printf("Error in LIKE regex for pattern '%s': %v", pattern, err)
+					return false
+				}
+				return matched
+			}
+		}
+		return false
+	case "between":
+		if !itemValueExists {
+			return false
+		}
+		if values, ok := value.([]any); ok && len(values) == 2 {
+			return compare(itemValue, values[0]) >= 0 && compare(itemValue, values[1]) <= 0
+		}
+		return false
+	case "in":
+		if !itemValueExists {
+			return false
+		}
+		if values, ok := value.([]any); ok {
+			for _, v := range values {
+				if compare(itemValue, v) == 0 {
+					return true
+				}
+			}
+		}
+		return false
+	case "is null":
+		return !itemValueExists || itemValue == nil
+	case "is not null":
+		return itemValueExists && itemValue != nil
+	default:
+		log.Printf("Warning: Unsupported filter operator '%s'", op)
+		return false
+	}
+}
+
+// compare two any values (numbers, strings, bools). Returns -1 if a<b, 0 if a==b, 1 if a>b.
+// Handles different numeric types by converting to float64 for comparison.
+func compare(a, b any) int {
+	// Try numeric comparison first
+	if numA, okA := toFloat64(a); okA {
+		if numB, okB := toFloat64(b); okB {
+			if numA < numB {
+				return -1
+			}
+			if numA > numB {
+				return 1
+			}
+			return 0
+		}
+	}
+
+	// Fallback to string comparison
+	strA := fmt.Sprintf("%v", a)
+	strB := fmt.Sprintf("%v", b)
+	return strings.Compare(strA, strB)
+}
+
+// toFloat64 attempts to convert an any to float64, returns false if not a number.
+func toFloat64(val any) (float64, bool) {
+	switch v := val.(type) {
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	case jsoniter.Number: // jsoniter's numeric type
+		f, err := v.Float64()
+		return f, err == nil
+	case string: // Try parsing string to float
+		f, err := strconv.ParseFloat(v, 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// performAggregations handles GROUP BY and aggregation functions.
+func (h *ConnectionHandler) performAggregations(items []struct {
+	Key string
+	Val map[string]any
+}, query Query) (any, error) {
+	// Map to store grouped results: groupKey -> []items_in_group
+	groupedData := make(map[string][]map[string]any)
+
+	// If no GROUP BY, all items go into a single "default" group
+	if len(query.GroupBy) == 0 {
+		groupKey := "_no_group_"
+		groupedData[groupKey] = make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			groupedData[groupKey] = append(groupedData[groupKey], item.Val)
+		}
+	} else {
+		for _, item := range items {
+			groupKeyParts := make([]string, len(query.GroupBy))
+			for i, field := range query.GroupBy {
+				if val, ok := item.Val[field]; ok && val != nil {
+					groupKeyParts[i] = fmt.Sprintf("%v", val)
+				} else {
+					groupKeyParts[i] = "NULL" // Consistent representation for missing/null group keys
+				}
+			}
+			groupKey := strings.Join(groupKeyParts, "|") // Composite key for grouping
+			groupedData[groupKey] = append(groupedData[groupKey], item.Val)
+		}
+	}
+
+	// Calculate aggregations for each group
+	var aggregatedResults []map[string]any
+	for groupKey, groupItems := range groupedData {
+		resultRow := make(map[string]any)
+
+		// Add GroupBy fields to the result row
+		if len(query.GroupBy) > 0 {
+			if groupKey == "_no_group_" {
+				// This case should ideally not happen if len(query.GroupBy) > 0
+				// but as a fallback, ensure the group by fields are not added if no actual grouping occurred.
+			} else {
+				groupKeyValues := strings.Split(groupKey, "|")
+				for i, field := range query.GroupBy {
+					if i < len(groupKeyValues) {
+						// Attempt to convert back to original type if possible (e.g., number, bool)
+						// For now, keep as string as we don't know original type
+						resultRow[field] = groupKeyValues[i]
+						// More robust parsing could go here based on expected field types
+					}
+				}
+			}
+		}
+
+		// Process aggregations
+		for aggName, agg := range query.Aggregations {
+			var aggValue any
+			var err error
+
+			switch agg.Func {
+			case "count":
+				// Count is special; depends on whether it's count(*) or count(field)
+				if agg.Field == "*" {
+					aggValue = len(groupItems)
+				} else {
+					count := 0
+					for _, item := range groupItems {
+						if _, ok := item[agg.Field]; ok {
+							count++
+						}
+					}
+					aggValue = count
+				}
+			case "sum", "avg", "min", "max":
+				numbers := []float64{}
+				for _, item := range groupItems {
+					if val, ok := item[agg.Field]; ok {
+						if num, convertedOk := toFloat64(val); convertedOk {
+							numbers = append(numbers, num)
+						}
+					}
+				}
+
+				if len(numbers) == 0 {
+					aggValue = nil // No numeric data to aggregate
+					continue
+				}
+
+				switch agg.Func {
+				case "sum":
+					sum := 0.0
+					for _, n := range numbers {
+						sum += n
+					}
+					aggValue = sum
+				case "avg":
+					sum := 0.0
+					for _, n := range numbers {
+						sum += n
+					}
+					aggValue = sum / float64(len(numbers))
+				case "min":
+					min := numbers[0]
+					for _, n := range numbers {
+						if n < min {
+							min = n
+						}
+					}
+					aggValue = min
+				case "max":
+					max := numbers[0]
+					for _, n := range numbers {
+						if n > max {
+							max = n
+						}
+					}
+					aggValue = max
+				default:
+					err = fmt.Errorf("unsupported aggregation function: %s", agg.Func)
+				}
+			default:
+				err = fmt.Errorf("unsupported aggregation function: %s", agg.Func)
+			}
+
+			if err != nil {
+				return nil, err
+			}
+			resultRow[aggName] = aggValue
+		}
+
+		// 3. Having clause (filters aggregated results)
+		if h.matchFilter(resultRow, query.Having) {
+			aggregatedResults = append(aggregatedResults, resultRow)
+		}
+	}
+
+	return aggregatedResults, nil
 }

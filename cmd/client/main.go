@@ -214,6 +214,24 @@ func main() {
 				collectionName := argsList[0]
 				writeErr = protocol.WriteCollectionItemListCommand(&cmdBuf, collectionName)
 
+			// NEW: Collection Query Command
+			case "collection query":
+				parts := strings.SplitN(rawArgs, " ", 2) // Split into collection_name and query_json
+				if len(parts) < 2 {
+					fmt.Println("Error: collection query command requires collection_name and query_json.")
+					fmt.Println("Usage: collection query <collection_name> <query_json>")
+					printHelp()
+					continue
+				}
+				collectionName := parts[0]
+				queryJSON := strings.TrimSpace(parts[1])
+
+				if !json.Valid([]byte(queryJSON)) {
+					fmt.Printf("Error: Invalid JSON query: '%s'\n", queryJSON)
+					continue
+				}
+				writeErr = protocol.WriteCollectionQueryCommand(&cmdBuf, collectionName, []byte(queryJSON))
+
 			default:
 				fmt.Printf("Error: Unknown command '%s'. Type 'help' for commands.\n", cmd)
 				continue
@@ -243,6 +261,7 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 		"collection create",
 		"collection delete",
 		"collection list",
+		"collection query", // NEW
 		"update password",
 	}
 
@@ -347,8 +366,8 @@ func readResponse(conn net.Conn, lastCmd string) {
 		}
 	}
 
-	fmt.Printf(" 	Status: %s (%d)\n", getStatusString(status), status)
-	fmt.Printf(" 	Message: %s\n", message)
+	fmt.Printf("    Status: %s (%d)\n", getStatusString(status), status)
+	fmt.Printf("    Message: %s\n", message)
 	if dataLen > 0 {
 		var decodedData []byte
 		var decodeErr error
@@ -357,8 +376,8 @@ func readResponse(conn net.Conn, lastCmd string) {
 		// Check if it's a "collection item list" command AND the message indicates it's from _system.
 		isCollectionItemListSystemCmd := (lastCmd == "collection item list" && strings.Contains(message, "from collection '_system' retrieved"))
 
-		if isCollectionItemListSystemCmd {
-			// If it's the _system collection list, dataBytes is already sanitized JSON.
+		if isCollectionItemListSystemCmd || lastCmd == "collection query" { // NEW: Handle collection query results directly
+			// If it's the _system collection list or a query, dataBytes is already sanitized JSON.
 			// No Base64 decoding needed here.
 			decodedData = dataBytes
 		} else if lastCmd == "get" || lastCmd == "collection item get" {
@@ -401,15 +420,15 @@ func readResponse(conn net.Conn, lastCmd string) {
 		// Attempt to pretty print decodedData.
 		if decodeErr != nil || !json.Valid(decodedData) {
 			if decodeErr != nil {
-				fmt.Printf(" 	Warning: Failed to decode/process data: %v\n", decodeErr)
+				fmt.Printf("    Warning: Failed to decode/process data: %v\n", decodeErr)
 			}
-			fmt.Printf(" 	Data (Raw):\n%s\n", string(dataBytes))
+			fmt.Printf("    Data (Raw):\n%s\n", string(dataBytes))
 		} else {
 			var prettyJSON bytes.Buffer
-			if err := stdjson.Indent(&prettyJSON, decodedData, " 	", " 	"); err == nil {
-				fmt.Printf(" 	Data (JSON):\n%s\n", prettyJSON.String())
+			if err := stdjson.Indent(&prettyJSON, decodedData, "    ", "    "); err == nil {
+				fmt.Printf("    Data (JSON):\n%s\n", prettyJSON.String())
 			} else {
-				fmt.Printf(" 	Data (Raw - not valid JSON for pretty print):\n%s\n", string(decodedData))
+				fmt.Printf("    Data (Raw - not valid JSON for pretty print):\n%s\n", string(decodedData))
 			}
 		}
 	}
@@ -455,18 +474,36 @@ func clearScreen() {
 // printHelp displays the available commands and their usage.
 func printHelp() {
 	fmt.Println("\nAvailable Commands:")
-	fmt.Println(" 	login <username> <password>")
-	fmt.Println(" 	update password <target_username> <new_password>")
-	fmt.Println(" 	set <key> <value_json> [ttl_seconds]")
-	fmt.Println(" 	get <key>")
-	fmt.Println(" 	collection create <collection_name>")
-	fmt.Println(" 	collection delete <collection_name>")
-	fmt.Println(" 	collection list")
-	fmt.Println(" 	collection item set <collection_name> <key> <value_json> [ttl_seconds]")
-	fmt.Println(" 	collection item get <collection_name> <key>")
-	fmt.Println(" 	collection item delete <collection_name> <key>")
-	fmt.Println(" 	collection item list <collection_name>")
-	fmt.Println(" 	clear")
-	fmt.Println(" 	exit")
+	fmt.Println("    login <username> <password>")
+	fmt.Println("    update password <target_username> <new_password>")
+	fmt.Println("    set <key> <value_json> [ttl_seconds]")
+	fmt.Println("    get <key>")
+	fmt.Println("    collection create <collection_name>")
+	fmt.Println("    collection delete <collection_name>")
+	fmt.Println("    collection list")
+	fmt.Println("    collection item set <collection_name> <key> <value_json> [ttl_seconds]")
+	fmt.Println("    collection item get <collection_name> <key>")
+	fmt.Println("    collection item delete <collection_name> <key>")
+	fmt.Println("    collection item list <collection_name>")
+	fmt.Println("    collection query <collection_name> <query_json>") // NEW
+	fmt.Println("    clear")
+	fmt.Println("    exit")
+	fmt.Println("---")
+	fmt.Println("Query JSON Examples:")
+	fmt.Println("    Filter (WHERE):")
+	fmt.Println(`        {"filter": {"field": "status", "op": "=", "value": "active"}}`)
+	fmt.Println(`        {"filter": {"and": [{"field": "age", "op": ">", "value": 30}, {"field": "city", "op": "like", "value": "New%"}]}}`)
+	fmt.Println(`        {"filter": {"field": "tags", "op": "in", "value": ["A", "B"]}}`)
+	fmt.Println(`        {"filter": {"field": "description", "op": "is not null"}}`)
+	fmt.Println("    Order By:")
+	fmt.Println(`        {"order_by": [{"field": "name", "direction": "asc"}, {"field": "age", "direction": "desc"}]}`)
+	fmt.Println("    Limit/Offset:")
+	fmt.Println(`        {"limit": 5, "offset": 10}`)
+	fmt.Println("    Count:")
+	fmt.Println(`        {"count": true, "filter": {"field": "active", "op": "=", "value": true}}`)
+	fmt.Println("    Aggregations (SUM, AVG, MIN, MAX):")
+	fmt.Println(`        {"aggregations": {"total_sales": {"func": "sum", "field": "sales"}}, "group_by": ["category"]}`)
+	fmt.Println("    Distinct:")
+	fmt.Println(`        {"distinct": "city"}`)
 	fmt.Println("---")
 }

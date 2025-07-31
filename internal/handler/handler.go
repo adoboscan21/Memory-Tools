@@ -761,13 +761,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	}
 
 	// 4. Pagination (OFFSET and LIMIT)
-	offset := query.Offset
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > len(results) {
-		offset = len(results)
-	}
+	offset := min(max(query.Offset, 0), len(results))
 	results = results[offset:]
 
 	if query.Limit != nil && *query.Limit >= 0 {

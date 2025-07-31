@@ -134,6 +134,10 @@ These commands allow you to manipulate key-value pairs within specific collectio
       ```bash
       collection item set products {"name": "New Gadget", "price": 99.99} 180
       ```
+          - **Without explicit key (UUID generated for key and `_id` field):**
+      ```bash
+      collection item set many products [{"name": "New Thing", "price": 99.99},{"name": "New Gadget", "price": 99.99}]
+      ```
 - **`collection item get <collection_name> <key>`**
   - **Description**: Retrieves the value for a key from the specified collection.
   - **Example**:

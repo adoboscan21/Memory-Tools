@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
@@ -20,11 +19,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
+// Global variables for readline.
+var completer = readline.NewPrefixCompleter(
+	readline.PcItem("login"),
+	readline.PcItem("update password"),
+	readline.PcItem("set"),
+	readline.PcItem("get"),
+	readline.PcItem("collection",
+		readline.PcItem("create"),
+		readline.PcItem("delete"),
+		readline.PcItem("list"),
+		readline.PcItem("item",
+			readline.PcItem("set"),
+			readline.PcItem("set many"),
+			readline.PcItem("get"),
+			readline.PcItem("delete"),
+			readline.PcItem("delete many"),
+			readline.PcItem("list"),
+		),
+		readline.PcItem("query"),
+	),
+	readline.PcItem("clear"),
+	readline.PcItem("help"),
+	readline.PcItem("exit"),
+)
 
 func main() {
 	log.SetFlags(0)
@@ -80,11 +105,37 @@ func main() {
 		fmt.Println("Please login using: login <username> <password> if not already authenticated.")
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	// --- CHANGES TO IMPROVE TERMINAL UX ---
+	// Using the readline library for advanced command-line handling.
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "> ",
+		HistoryFile:     "/tmp/readline_history.tmp",
+		AutoComplete:    completer,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		VimMode:         false,
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize readline: %v", err)
+	}
+	defer rl.Close()
+	// Replaced `bufio.NewReader(os.Stdin)` with the `rl` object from readline.
 
 	for {
-		fmt.Print("> ")
-		input, _ := reader.ReadString('\n')
+		// rl.Readline() handles arrow keys and history navigation.
+		input, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			if len(input) == 0 {
+				fmt.Println("Exiting client.")
+				return // Exit the program on Ctrl+C if the line is empty
+			} else {
+				continue // Clear the line and continue on Ctrl+C if there's text
+			}
+		} else if err == io.EOF {
+			fmt.Println("Exiting client.")
+			return // Exit the program on Ctrl+D
+		}
+
 		input = strings.TrimSpace(input)
 
 		if input == "exit" {
@@ -149,8 +200,8 @@ func main() {
 		} else if cmd == "collection item delete many" {
 			parts := strings.SplitN(rawArgs, " ", 2)
 			if len(parts) < 2 {
-				fmt.Println("Error: 'collection item delete many' requiere un nombre de colección y un array JSON de objetos.")
-				fmt.Println("Uso: collection item delete many <collection_name> <json_array_de_objetos>")
+				fmt.Println("Error: 'collection item delete many' requires a collection name and a JSON array of objects.")
+				fmt.Println("Usage: collection item delete many <collection_name> <json_array_of_objects>")
 				printHelp()
 				continue
 			}
@@ -159,13 +210,13 @@ func main() {
 			jsonArray := strings.TrimSpace(parts[1])
 
 			if !json.Valid([]byte(jsonArray)) {
-				fmt.Printf("Error: Array JSON inválido: '%s'\n", jsonArray)
+				fmt.Printf("Error: Invalid JSON array: '%s'\n", jsonArray)
 				continue
 			}
 
 			var records []map[string]any
 			if err := json.Unmarshal([]byte(jsonArray), &records); err != nil {
-				fmt.Printf("Error analizando el array JSON: %v\n", err)
+				fmt.Printf("Error parsing the JSON array: %v\n", err)
 				continue
 			}
 
@@ -174,12 +225,12 @@ func main() {
 				if id, ok := record["_id"].(string); ok && id != "" {
 					keysToDelete = append(keysToDelete, id)
 				} else {
-					fmt.Printf("Advertencia: Se encontró un objeto sin el campo '_id' o con valor vacío. Objeto omitido: %+v\n", record)
+					fmt.Printf("Warning: Found an object without a valid '_id' field. Object omitted: %+v\n", record)
 				}
 			}
 
 			if len(keysToDelete) == 0 {
-				fmt.Println("Error: No se encontraron claves válidas ('_id') en el array JSON para eliminar.")
+				fmt.Println("Error: No valid keys ('_id') found in the JSON array to delete.")
 				continue
 			}
 
@@ -304,6 +355,8 @@ func main() {
 		readResponse(conn, cmd)
 	}
 }
+
+// Helper functions (unmodified)
 
 // getCommandAndRawArgs parses the input string into a command and its raw arguments.
 func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {

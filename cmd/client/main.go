@@ -146,6 +146,44 @@ func main() {
 			}
 			writeErr = protocol.WriteCollectionItemSetManyCommand(&cmdBuf, collectionName, []byte(jsonArray))
 
+		} else if cmd == "collection item delete many" {
+			parts := strings.SplitN(rawArgs, " ", 2)
+			if len(parts) < 2 {
+				fmt.Println("Error: 'collection item delete many' requiere un nombre de colección y un array JSON de objetos.")
+				fmt.Println("Uso: collection item delete many <collection_name> <json_array_de_objetos>")
+				printHelp()
+				continue
+			}
+
+			collectionName := parts[0]
+			jsonArray := strings.TrimSpace(parts[1])
+
+			if !json.Valid([]byte(jsonArray)) {
+				fmt.Printf("Error: Array JSON inválido: '%s'\n", jsonArray)
+				continue
+			}
+
+			var records []map[string]any
+			if err := json.Unmarshal([]byte(jsonArray), &records); err != nil {
+				fmt.Printf("Error analizando el array JSON: %v\n", err)
+				continue
+			}
+
+			var keysToDelete []string
+			for _, record := range records {
+				if id, ok := record["_id"].(string); ok && id != "" {
+					keysToDelete = append(keysToDelete, id)
+				} else {
+					fmt.Printf("Advertencia: Se encontró un objeto sin el campo '_id' o con valor vacío. Objeto omitido: %+v\n", record)
+				}
+			}
+
+			if len(keysToDelete) == 0 {
+				fmt.Println("Error: No se encontraron claves válidas ('_id') en el array JSON para eliminar.")
+				continue
+			}
+
+			writeErr = protocol.WriteCollectionItemDeleteManyCommand(&cmdBuf, collectionName, keysToDelete)
 		} else {
 			switch cmd {
 			case "set":
@@ -271,6 +309,7 @@ func main() {
 func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 	multiWordCommands := []string{
 		"collection item set many",
+		"collection item delete many",
 		"collection item set",
 		"collection item get",
 		"collection item delete",
@@ -558,6 +597,7 @@ func printHelp() {
 	fmt.Println("    collection item set many <collection_name> <value_json_array>")
 	fmt.Println("    collection item get <collection_name> <key>")
 	fmt.Println("    collection item delete <collection_name> <key>")
+	fmt.Println("    collection item delete many <collection_name> <value_json_array>")
 	fmt.Println("    collection item list <collection_name>")
 	fmt.Println("    collection query <collection_name> <query_json>")
 	fmt.Println("    clear")

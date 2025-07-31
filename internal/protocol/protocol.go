@@ -21,12 +21,13 @@ const (
 	CmdCollectionList   // LIST_COLLECTIONS
 
 	// Collection Item Commands
-	CmdCollectionItemSet     // SET_COLLECTION_ITEM collectionName, key, value, ttl
-	CmdCollectionItemSetMany // NEW: SET_COLLECTION_ITEMS_MANY collectionName, json_array
-	CmdCollectionItemGet     // GET_COLLECTION_ITEM collectionName, key
-	CmdCollectionItemDelete  // DELETE_COLLECTION_ITEM collectionName, key
-	CmdCollectionItemList    // LIST_COLLECTION_ITEMS collectionName
-	CmdCollectionQuery       // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
+	CmdCollectionItemSet        // SET_COLLECTION_ITEM collectionName, key, value, ttl
+	CmdCollectionItemSetMany    // NEW: SET_COLLECTION_ITEMS_MANY collectionName, json_array
+	CmdCollectionItemGet        // GET_COLLECTION_ITEM collectionName, key
+	CmdCollectionItemDelete     // DELETE_COLLECTION_ITEM collectionName, key
+	CmdCollectionItemList       // LIST_COLLECTION_ITEMS collectionName
+	CmdCollectionQuery          // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
+	CmdCollectionItemDeleteMany // NEW: DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
@@ -467,4 +468,53 @@ func ReadCollectionItemSetManyCommand(r io.Reader) (collectionName string, value
 		return "", nil, fmt.Errorf("failed to read value: %w", err)
 	}
 	return collectionName, value, nil
+}
+
+// WriteCollectionItemDeleteManyCommand writes a DELETE_COLLECTION_ITEMS_MANY command to the connection.
+// Format: [CmdCollectionItemDeleteMany (1 byte)] [ColNameLength] [ColName] [KeysArrayLength] [Key1Length] [Key1] [Key2Length] [Key2] ...
+func WriteCollectionItemDeleteManyCommand(w io.Writer, collectionName string, keys []string) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemDeleteMany)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+
+	// Write the number of keys.
+	if err := binary.Write(w, ByteOrder, uint32(len(keys))); err != nil {
+		return fmt.Errorf("failed to write keys count: %w", err)
+	}
+
+	// Write each key as a length-prefixed string.
+	for _, key := range keys {
+		if err := WriteString(w, key); err != nil {
+			return fmt.Errorf("failed to write key '%s': %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+// ReadCollectionItemDeleteManyCommand reads a DELETE_COLLECTION_ITEMS_MANY command from the connection.
+func ReadCollectionItemDeleteManyCommand(r io.Reader) (collectionName string, keys []string, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+
+	var keysCount uint32
+	if err := binary.Read(r, ByteOrder, &keysCount); err != nil {
+		return "", nil, fmt.Errorf("failed to read keys count: %w", err)
+	}
+
+	keys = make([]string, keysCount)
+	for i := 0; i < int(keysCount); i++ {
+		key, err := ReadString(r)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to read key %d: %w", i, err)
+		}
+		keys[i] = key
+	}
+
+	return collectionName, keys, nil
 }

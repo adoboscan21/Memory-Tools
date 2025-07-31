@@ -273,6 +273,10 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 				h.handleCollectionItemSetMany(conn)
 				continue
 
+			case protocol.CmdCollectionItemDeleteMany:
+				h.handleCollectionItemDeleteMany(conn)
+				continue
+
 			case protocol.CmdCollectionItemGet:
 				collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
 				if err != nil {
@@ -1122,4 +1126,45 @@ func ensureIDField(value []byte, key string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal JSON after injecting _id: %w", err)
 	}
 	return updatedValue, nil
+}
+
+// handleCollectionItemDeleteMany processes the CmdCollectionItemDeleteMany command.
+func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
+	collectionName, keys, err := protocol.ReadCollectionItemDeleteManyCommand(conn)
+	if err != nil {
+		log.Printf("Error reading DELETE_COLLECTION_ITEMS_MANY command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_ITEMS_MANY command format", nil)
+		return
+	}
+
+	if collectionName == "" || len(keys) == 0 {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty and at least one key must be provided", nil)
+		return
+	}
+
+	// Authorization check for _system collection.
+	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete from collection '%s'", SystemCollectionName), nil)
+		return
+	}
+
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
+		return
+	}
+
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	deletedCount := 0
+	for _, key := range keys {
+		colStore.Delete(key)
+		deletedCount++
+	}
+
+	// Save the collection to disk after all deletions are done.
+	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
+		log.Printf("Error saving collection '%s' to disk after DELETE_MANY operation: %v", collectionName, err)
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s' (persistence error logged)", deletedCount, collectionName), nil)
+	} else {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s'", deletedCount, collectionName), nil)
+	}
 }

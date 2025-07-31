@@ -148,7 +148,9 @@ These commands allow you to manipulate key-value pairs within specific collectio
   - **Description**: Deletes a key-value pair from the specified collection.
   - **Example**:
     ```bash
-    collection item delete users user:123
+    collection item delete users user:123 or "_id" content.
+
+    collection item delete many products [ {"_id": "27cb8c82-3cb0-43fc-b93c-399b6aac22f3"}, {"_id": "85c337b2-e05a-4691-97a7-2e58f582145a"} ]
     ```
 - **`collection item list <collection_name>`**
   - **Description**: Lists all non-expired key-value pairs (items) within the specified collection.

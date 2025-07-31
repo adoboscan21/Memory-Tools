@@ -269,6 +269,10 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 					protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s'", key, collectionName), nil)
 				}
 
+			case protocol.CmdCollectionItemSetMany:
+				h.handleCollectionItemSetMany(conn)
+				continue
+
 			case protocol.CmdCollectionItemGet:
 				collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
 				if err != nil {
@@ -594,6 +598,66 @@ func HashPassword(password string) (string, error) {
 func CheckPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
+}
+
+// handleCollectionItemSetMany processes the CmdCollectionItemSetMany command.
+func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
+	collectionName, value, err := protocol.ReadCollectionItemSetManyCommand(conn)
+	if err != nil {
+		log.Printf("Error reading SET_COLLECTION_ITEMS_MANY command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET_COLLECTION_ITEMS_MANY command format", nil)
+		return
+	}
+
+	if collectionName == "" || len(value) == 0 {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+		return
+	}
+
+	// Specific authorization check for _system collection (even if authenticated)
+	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can modify collection '%s'", SystemCollectionName), nil)
+		return
+	}
+
+	var records []map[string]any
+	if err := json.Unmarshal(value, &records); err != nil {
+		log.Printf("Error unmarshalling JSON array for SET_COLLECTION_ITEMS_MANY in collection '%s': %v", collectionName, err)
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format", nil)
+		return
+	}
+
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	insertedCount := 0
+
+	for _, record := range records {
+		var key string
+		if id, ok := record["_id"].(string); ok && id != "" {
+			key = id
+		} else {
+			key = uuid.New().String()
+		}
+
+		// Ensure the _id field exists before serializing
+		record["_id"] = key
+
+		updatedValue, err := json.Marshal(record)
+		if err != nil {
+			log.Printf("Error marshalling record for SET_COLLECTION_ITEMS_MANY: %v", err)
+			continue
+		}
+
+		colStore.Set(key, updatedValue, 0) // No TTL by default
+		insertedCount++
+	}
+
+	// Only save to disk once, after all insertions
+	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
+		log.Printf("Error saving collection '%s' to disk after SET_MANY operation: %v", collectionName, err)
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence error logged)", insertedCount, collectionName), nil)
+	} else {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s'", insertedCount, collectionName), nil)
+	}
 }
 
 // processCollectionQuery executes a complex query on a collection.

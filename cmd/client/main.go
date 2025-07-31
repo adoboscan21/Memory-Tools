@@ -108,7 +108,6 @@ func main() {
 		var cmdBuf bytes.Buffer
 		var writeErr error
 
-		// Handle login command (explicitly entered in shell).
 		if cmd == "login" {
 			argsList := strings.Fields(rawArgs)
 			if len(argsList) != 2 {
@@ -130,8 +129,24 @@ func main() {
 			targetUsername := argsList[0]
 			newPassword := argsList[1]
 			writeErr = protocol.WriteChangeUserPasswordCommand(&cmdBuf, targetUsername, newPassword)
+		} else if cmd == "collection item set many" { // NEW: Handle SET_MANY command directly
+			parts := strings.SplitN(rawArgs, " ", 2)
+			if len(parts) < 2 {
+				fmt.Println("Error: 'collection item set many' requires collection_name and json_array.")
+				fmt.Println("Usage: collection item set many <collection_name> <json_array>")
+				printHelp()
+				continue
+			}
+			collectionName := parts[0]
+			jsonArray := strings.TrimSpace(parts[1])
+
+			if !json.Valid([]byte(jsonArray)) {
+				fmt.Printf("Error: Invalid JSON array: '%s'\n", jsonArray)
+				continue
+			}
+			writeErr = protocol.WriteCollectionItemSetManyCommand(&cmdBuf, collectionName, []byte(jsonArray))
+
 		} else {
-			// Existing command handling.
 			switch cmd {
 			case "set":
 				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 1)
@@ -255,6 +270,7 @@ func main() {
 // getCommandAndRawArgs parses the input string into a command and its raw arguments.
 func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 	multiWordCommands := []string{
+		"collection item set many",
 		"collection item set",
 		"collection item get",
 		"collection item delete",
@@ -262,7 +278,7 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 		"collection create",
 		"collection delete",
 		"collection list",
-		"collection query", // NEW
+		"collection query",
 		"update password",
 	}
 
@@ -533,12 +549,13 @@ func printHelp() {
 	fmt.Println("\nAvailable Commands:")
 	fmt.Println("    login <username> <password>")
 	fmt.Println("    update password <target_username> <new_password>")
-	fmt.Println("    set <key> <value_json> [ttl_seconds]") // Revertido: Key is now required.
+	fmt.Println("    set <key> <value_json> [ttl_seconds]")
 	fmt.Println("    get <key>")
 	fmt.Println("    collection create <collection_name>")
 	fmt.Println("    collection delete <collection_name>")
 	fmt.Println("    collection list")
-	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)") // Keep as optional
+	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)")
+	fmt.Println("    collection item set many <collection_name> <value_json_array>")
 	fmt.Println("    collection item get <collection_name> <key>")
 	fmt.Println("    collection item delete <collection_name> <key>")
 	fmt.Println("    collection item list <collection_name>")

@@ -21,11 +21,12 @@ const (
 	CmdCollectionList   // LIST_COLLECTIONS
 
 	// Collection Item Commands
-	CmdCollectionItemSet    // SET_COLLECTION_ITEM collectionName, key, value, ttl
-	CmdCollectionItemGet    // GET_COLLECTION_ITEM collectionName, key
-	CmdCollectionItemDelete // DELETE_COLLECTION_ITEM collectionName, key
-	CmdCollectionItemList   // LIST_COLLECTION_ITEMS collectionName
-	CmdCollectionQuery      // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
+	CmdCollectionItemSet     // SET_COLLECTION_ITEM collectionName, key, value, ttl
+	CmdCollectionItemSetMany // NEW: SET_COLLECTION_ITEMS_MANY collectionName, json_array
+	CmdCollectionItemGet     // GET_COLLECTION_ITEM collectionName, key
+	CmdCollectionItemDelete  // DELETE_COLLECTION_ITEM collectionName, key
+	CmdCollectionItemList    // LIST_COLLECTION_ITEMS collectionName
+	CmdCollectionQuery       // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
@@ -438,4 +439,32 @@ func ReadCollectionQueryCommand(r io.Reader) (collectionName string, queryJSON [
 		return "", nil, fmt.Errorf("failed to read query JSON (collection query): %w", err)
 	}
 	return collectionName, queryJSON, nil
+}
+
+// WriteCollectionItemSetManyCommand writes a SET_COLLECTION_ITEMS_MANY command to the connection.
+// Format: [CmdCollectionItemSetMany (1 byte)] [ColNameLength] [ColName] [ValueLength] [Value_JSON_Array]
+func WriteCollectionItemSetManyCommand(w io.Writer, collectionName string, value []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemSetMany)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteBytes(w, value); err != nil {
+		return fmt.Errorf("failed to write value: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionItemSetManyCommand reads a SET_COLLECTION_ITEMS_MANY command from the connection.
+func ReadCollectionItemSetManyCommand(r io.Reader) (collectionName string, value []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+	value, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read value: %w", err)
+	}
+	return collectionName, value, nil
 }

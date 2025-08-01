@@ -59,7 +59,7 @@ func main() {
 	passwordPtr := flag.String("p", "", "Password for authentication")
 	flag.Parse()
 
-	addr := "localhost:8080" // Default address.
+	addr := "localhost:3443" // Default address.
 	if flag.NArg() > 0 {
 		addr = flag.Arg(0) // Use positional argument as address if provided.
 	}

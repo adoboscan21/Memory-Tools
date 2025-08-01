@@ -52,7 +52,7 @@ WORKDIR /root/
 
 # Expose the server ports.
 #UNCOMMENT IF YOU USE DOCKER RUN -P#
-# EXPOSE 8080
+# EXPOSE 3443
 
 # Command to execute the entrypoint script when the container starts.
 CMD ["/root/entrypoint.sh"]

@@ -103,3 +103,33 @@ You can use the interactive CLI client to connect and operate with the server.
 For a full list of commands and detailed examples, see the [`docs/client.md`](./docs/client.md) file.
 
 Once connected, type `help` for available commands.
+
+---
+
+## Support the Project!
+
+Hello! I'm the developer behind **Memory Tools**. This is an open-source project.
+
+I've dedicated a lot of time and effort to this project, and with your support, I can continue to maintain it, add new features, and make it better for everyone.
+
+---
+
+### How You Can Help
+
+Every contribution, no matter the size, is a great help and is enormously appreciated. If you would like to support the continued development of this project, you can make a donation via PayPal.
+
+You can donate directly to my PayPal account by clicking the link below:
+
+**[Click here to donate](https://paypal.me/AdonayB?locale.x=es_XC&country.x=VE)**
+
+---
+
+### Other Ways to Contribute
+
+If you can't donate, don't worry! You can still help in other ways:
+
+- **Share the project:** Talk about it on social media or with your friends.
+- **Report bugs:** If you find a problem, open an issue on GitHub.
+- **Contribute code:** If you have coding skills, you can help improve the code.
+
+  Thank you for your support!

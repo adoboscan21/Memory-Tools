@@ -4,7 +4,7 @@ services:
       context: . # Look for the Dockerfile in the current directory
       dockerfile: Dockerfile # Specify the name of your Dockerfile
     ports:
-      - "8080:8080" # Map host port 8081 (for DATABASE)
+      - "3443:3443" # Map host port 8081 (for DATABASE)
     volumes:
       - ./collections:/root/collections
     restart: always # Always restart the container if it stops

@@ -38,7 +38,7 @@ type configJSON struct {
 // NewDefaultConfig creates a Config struct with sensible default values.
 func NewDefaultConfig() Config {
 	return Config{
-		Port:             ":3443",
+		Port:             ":5876",
 		ReadTimeout:      5 * time.Second,
 		WriteTimeout:     10 * time.Second,
 		IdleTimeout:      120 * time.Second,

@@ -34,7 +34,7 @@ To get the Memory Tools server up and running quickly, follow these steps:
     docker-compose up -d
     ```
 
-    This starts the main database server on port `3443`.
+    This starts the main database server on port `5876`.
 
 ---
 
@@ -95,7 +95,7 @@ You can use the interactive CLI client to connect and operate with the server.
 - **For a direct and authenticated connection:**
 
   ```bash
-  ./memory-tools-client -u admin -p adminpass localhost:3443
+  ./memory-tools-client -u admin -p adminpass localhost:5876
   ```
 
 > **Important:** The default password for the `admin` user is `adminpass`, and for the `root` user (only accessible from localhost) is `rootpass`. Please change these immediately in a production environment.

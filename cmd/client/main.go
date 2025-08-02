@@ -36,7 +36,6 @@ var preLoginCompleter = readline.NewPrefixCompleter(
 )
 
 var postLoginCompleter = readline.NewPrefixCompleter(
-	readline.PcItem("login"),
 	readline.PcItem("update password"),
 	readline.PcItem("set"),
 	readline.PcItem("get"),

@@ -100,6 +100,12 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 				h.handleCollectionDelete(conn)
 			case protocol.CmdCollectionList:
 				h.handleCollectionList(conn)
+			case protocol.CmdCollectionIndexCreate:
+				h.handleCollectionIndexCreate(conn)
+			case protocol.CmdCollectionIndexDelete:
+				h.handleCollectionIndexDelete(conn)
+			case protocol.CmdCollectionIndexList:
+				h.handleCollectionIndexList(conn)
 
 			// Collection Item Commands.
 			case protocol.CmdCollectionItemSet:
@@ -115,7 +121,7 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			case protocol.CmdCollectionItemList:
 				h.handleCollectionItemList(conn)
 
-			// NEW: Collection Query Command
+			// Collection Query Command
 			case protocol.CmdCollectionQuery:
 				h.handleCollectionQuery(conn)
 

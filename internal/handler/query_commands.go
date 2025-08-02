@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"memory-tools/internal/protocol"
+	"memory-tools/internal/store"
 	"net"
 	"regexp"
 	"sort"
@@ -66,13 +67,26 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 // processCollectionQuery executes a complex query on a collection.
 func (h *ConnectionHandler) processCollectionQuery(collectionName string, query Query) (any, error) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
-	allData := colStore.GetAll()
+	var itemsData map[string][]byte
+
+	// --- NEW: Index-based optimization ---
+	// Attempt to find candidate keys using an index before fetching all data.
+	candidateKeys, usedIndex := h.findCandidateKeysFromFilter(colStore, query.Filter)
+
+	if usedIndex {
+		log.Printf("Query on collection '%s' is using an index. Candidate keys: %d", collectionName, len(candidateKeys))
+		itemsData = colStore.GetMany(candidateKeys)
+	} else {
+		log.Printf("Query on collection '%s' is NOT using an index. Falling back to full scan.", collectionName)
+		itemsData = colStore.GetAll()
+	}
+	// --- END NEW ---
 
 	var itemsWithKeys []struct {
 		Key string
 		Val map[string]any
 	}
-	for k, vBytes := range allData {
+	for k, vBytes := range itemsData {
 		var val map[string]any
 		if err := json.Unmarshal(vBytes, &val); err != nil {
 			log.Printf("Warning: Failed to unmarshal JSON for key '%s' in collection '%s': %v", k, collectionName, err)
@@ -89,9 +103,20 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		Key string
 		Val map[string]any
 	}{}
-	for _, item := range itemsWithKeys {
-		if h.matchFilter(item.Val, query.Filter) {
-			filteredItems = append(filteredItems, item)
+	if usedIndex {
+		// If we used an index, the initial set is already pre-filtered.
+		// We still need to apply the full filter for complex 'and'/'or' conditions.
+		for _, item := range itemsWithKeys {
+			if h.matchFilter(item.Val, query.Filter) {
+				filteredItems = append(filteredItems, item)
+			}
+		}
+	} else {
+		// If no index was used, we filter the full set.
+		for _, item := range itemsWithKeys {
+			if h.matchFilter(item.Val, query.Filter) {
+				filteredItems = append(filteredItems, item)
+			}
 		}
 	}
 
@@ -169,6 +194,29 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	}
 
 	return results, nil
+}
+
+// NEW: findCandidateKeysFromFilter is a simple query optimizer that checks if an index can be used.
+func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore, filter map[string]any) (keys []string, usedIndex bool) {
+	if len(filter) == 0 {
+		return nil, false
+	}
+
+	// This is a simple optimizer. It only looks for a single, top-level equality condition.
+	// A more complex optimizer could analyze 'and'/'or' clauses.
+
+	field, fieldOk := filter["field"].(string)
+	op, opOk := filter["op"].(string)
+	value := filter["value"]
+
+	// Check for a simple equality condition: { "field": "x", "op": "=", "value": "y" }
+	if fieldOk && opOk && op == "=" {
+		if colStore.HasIndex(field) {
+			return colStore.Lookup(field, value)
+		}
+	}
+
+	return nil, false // No suitable index found or used.
 }
 
 // matchFilter evaluates an item against a filter condition.

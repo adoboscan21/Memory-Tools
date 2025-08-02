@@ -42,12 +42,10 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.Set(key, updatedValue, ttl)
-	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-		log.Printf("Error saving collection '%s' to disk after SET operation: %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence error logged)", key, collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s'", key, collectionName), nil)
-	}
+
+	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence will be handled asynchronously)", key, collectionName), nil)
 }
 
 // handleCollectionItemGet processes the CmdCollectionItemGet command.
@@ -112,12 +110,10 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 	}
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.Delete(key)
-	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-		log.Printf("Error saving collection '%s' to disk after DELETE operation: %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s' (persistence error logged)", key, collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s'", key, collectionName), nil)
-	}
+
+	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s' (persistence will be handled asynchronously)", key, collectionName), nil)
 }
 
 // handleCollectionItemList processes the CmdCollectionItemList command.
@@ -234,12 +230,9 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 		insertedCount++
 	}
 
-	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-		log.Printf("Error saving collection '%s' to disk after SET_MANY operation: %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence error logged)", insertedCount, collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s'", insertedCount, collectionName), nil)
-	}
+	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence will be handled asynchronously)", insertedCount, collectionName), nil)
 }
 
 // handleCollectionItemDeleteMany processes the CmdCollectionItemDeleteMany command.
@@ -273,10 +266,7 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 		deletedCount++
 	}
 
-	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-		log.Printf("Error saving collection '%s' to disk after DELETE_MANY operation: %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s' (persistence error logged)", deletedCount, collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s'", deletedCount, collectionName), nil)
-	}
+	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s' (persistence will be handled asynchronously)", deletedCount, collectionName), nil)
 }

@@ -16,9 +16,12 @@ const (
 	CmdGet                        // GET key
 
 	// Collection Management Commands
-	CmdCollectionCreate // CREATE_COLLECTION collectionName
-	CmdCollectionDelete // DELETE_COLLECTION collectionName
-	CmdCollectionList   // LIST_COLLECTIONS
+	CmdCollectionCreate      // CREATE_COLLECTION collectionName
+	CmdCollectionDelete      // DELETE_COLLECTION collectionName
+	CmdCollectionList        // LIST_COLLECTIONS
+	CmdCollectionIndexCreate // NEW: CREATE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexDelete // NEW: DELETE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexList   // NEW: LIST_COLLECTION_INDEXES collectionName
 
 	// Collection Item Commands
 	CmdCollectionItemSet        // SET_COLLECTION_ITEM collectionName, key, value, ttl
@@ -517,4 +520,81 @@ func ReadCollectionItemDeleteManyCommand(r io.Reader) (collectionName string, ke
 	}
 
 	return collectionName, keys, nil
+}
+
+// --- Indexing Commands ---
+
+// WriteCollectionIndexCreateCommand writes a CREATE_COLLECTION_INDEX command.
+// Format: [CmdCollectionIndexCreate (1 byte)] [ColNameLength] [ColName] [FieldNameLength] [FieldName]
+func WriteCollectionIndexCreateCommand(w io.Writer, collectionName, fieldName string) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionIndexCreate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteString(w, fieldName); err != nil {
+		return fmt.Errorf("failed to write field name: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionIndexCreateCommand reads a CREATE_COLLECTION_INDEX command.
+func ReadCollectionIndexCreateCommand(r io.Reader) (collectionName, fieldName string, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read collection name: %w", err)
+	}
+	fieldName, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read field name: %w", err)
+	}
+	return collectionName, fieldName, nil
+}
+
+// NEW: WriteCollectionIndexDeleteCommand writes a DELETE_COLLECTION_INDEX command.
+func WriteCollectionIndexDeleteCommand(w io.Writer, collectionName, fieldName string) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionIndexDelete)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteString(w, fieldName); err != nil {
+		return fmt.Errorf("failed to write field name: %w", err)
+	}
+	return nil
+}
+
+// NEW: ReadCollectionIndexDeleteCommand reads a DELETE_COLLECTION_INDEX command.
+func ReadCollectionIndexDeleteCommand(r io.Reader) (collectionName, fieldName string, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read collection name: %w", err)
+	}
+	fieldName, err = ReadString(r)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read field name: %w", err)
+	}
+	return collectionName, fieldName, nil
+}
+
+// NEW: WriteCollectionIndexListCommand writes a LIST_COLLECTION_INDEXES command.
+func WriteCollectionIndexListCommand(w io.Writer, collectionName string) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionIndexList)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	return nil
+}
+
+// NEW: ReadCollectionIndexListCommand reads a LIST_COLLECTION_INDEXES command.
+func ReadCollectionIndexListCommand(r io.Reader) (collectionName string, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read collection name: %w", err)
+	}
+	return collectionName, nil
 }

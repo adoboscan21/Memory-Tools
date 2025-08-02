@@ -84,9 +84,8 @@ func main() {
 			log.Fatalf("Fatal error marshalling default admin user info: %v", marshalErr)
 		}
 		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
-		if err := collectionManager.SaveCollectionToDisk(handler.SystemCollectionName, systemCollection); err != nil {
-			log.Fatalf("Fatal error saving default admin user to disk: %v", err)
-		}
+		// ASYNC SAVE: Enqueue save task for the system collection
+		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
 		log.Println("Default admin user 'admin' created with password 'adminpass'.")
 	} else {
 		log.Println("Default admin user 'admin' found. Using existing credentials.")
@@ -110,9 +109,8 @@ func main() {
 			log.Fatalf("Fatal error marshalling default root user info: %v", marshalErr)
 		}
 		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0) // No TTL for system users
-		if err := collectionManager.SaveCollectionToDisk(handler.SystemCollectionName, systemCollection); err != nil {
-			log.Fatalf("Fatal error saving default root user to disk: %v", err)
-		}
+		// ASYNC SAVE: Enqueue save task for the system collection
+		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
 		log.Println("Default root user 'root' created with password 'rootpass'.")
 	} else {
 		log.Println("Default root user 'root' found. Using existing credentials.")
@@ -227,6 +225,11 @@ func main() {
 
 	// Stop the idle memory cleaner goroutine.
 	close(idleMemoryCleanerStopChan)
+
+	// Wait for the asynchronous collection saver to finish its queue.
+	log.Println("Waiting for all pending collection persistence tasks to complete...")
+	collectionManager.Wait()
+	log.Println("All pending collection persistence tasks completed.")
 
 	// Context for graceful shutdown.
 	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)

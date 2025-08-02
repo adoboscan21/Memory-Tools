@@ -26,8 +26,16 @@ import (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-// Global variables for readline.
-var completer = readline.NewPrefixCompleter(
+// --- NEW: Define two separate completers for pre and post-login states ---
+
+var preLoginCompleter = readline.NewPrefixCompleter(
+	readline.PcItem("login"),
+	readline.PcItem("help"),
+	readline.PcItem("exit"),
+	readline.PcItem("clear"),
+)
+
+var postLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("login"),
 	readline.PcItem("update password"),
 	readline.PcItem("set"),
@@ -36,6 +44,11 @@ var completer = readline.NewPrefixCompleter(
 		readline.PcItem("create"),
 		readline.PcItem("delete"),
 		readline.PcItem("list"),
+		readline.PcItem("index",
+			readline.PcItem("create"),
+			readline.PcItem("delete"),
+			readline.PcItem("list"),
+		),
 		readline.PcItem("item",
 			readline.PcItem("set"),
 			readline.PcItem("set many"),
@@ -86,7 +99,23 @@ func main() {
 	defer conn.Close()
 
 	fmt.Printf("Connected securely to Memory Tools server at %s.\n", addr)
-	fmt.Println("Type 'help' for commands, 'exit' to quit.")
+
+	// Authentication state tracking
+	var isAuthenticated bool
+
+	// Initialize readline with the limited completer first.
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "> ",
+		HistoryFile:     "/tmp/readline_history.tmp",
+		AutoComplete:    preLoginCompleter, // MODIFIED
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		VimMode:         false,
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize readline: %v", err)
+	}
+	defer rl.Close()
 
 	// Automatic authentication if credentials are provided.
 	if *usernamePtr != "" && *passwordPtr != "" {
@@ -99,45 +128,38 @@ func main() {
 			if _, err := conn.Write(cmdBuf.Bytes()); err != nil {
 				log.Fatalf("Failed to send login command to server: %v", err)
 			}
-			readResponse(conn, "login")
+			status := readResponse(conn, "login")
+			if status == protocol.StatusOk {
+				isAuthenticated = true
+				rl.Config.AutoComplete = postLoginCompleter // MODIFIED: Update completer on success
+			}
 		}
-	} else {
-		fmt.Println("Please login using: login <username> <password> if not already authenticated.")
 	}
 
-	// --- CHANGES TO IMPROVE TERMINAL UX ---
-	// Using the readline library for advanced command-line handling.
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "> ",
-		HistoryFile:     "/tmp/readline_history.tmp",
-		AutoComplete:    completer,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		VimMode:         false,
-	})
-	if err != nil {
-		log.Fatalf("Failed to initialize readline: %v", err)
+	if !isAuthenticated {
+		fmt.Println("Please login using: login <username> <password>")
 	}
-	defer rl.Close()
-	// Replaced `bufio.NewReader(os.Stdin)` with the `rl` object from readline.
 
 	for {
-		// rl.Readline() handles arrow keys and history navigation.
 		input, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			if len(input) == 0 {
 				fmt.Println("Exiting client.")
-				return // Exit the program on Ctrl+C if the line is empty
+				return
 			} else {
-				continue // Clear the line and continue on Ctrl+C if there's text
+				continue
 			}
 		} else if err == io.EOF {
 			fmt.Println("Exiting client.")
-			return // Exit the program on Ctrl+D
+			return
 		}
 
 		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
 
+		// Utility commands that should always work.
 		if input == "exit" {
 			fmt.Println("Exiting client.")
 			return
@@ -150,11 +172,16 @@ func main() {
 			clearScreen()
 			continue
 		}
-		if input == "" {
-			continue
-		}
 
 		cmd, rawArgs := getCommandAndRawArgs(input)
+
+		// Client-side authentication check
+		if !isAuthenticated {
+			if cmd != "login" {
+				fmt.Println("Error: You must log in first. Use: login <username> <password>")
+				continue // Skip to the next command input.
+			}
+		}
 
 		var cmdBuf bytes.Buffer
 		var writeErr error
@@ -180,10 +207,10 @@ func main() {
 			targetUsername := argsList[0]
 			newPassword := argsList[1]
 			writeErr = protocol.WriteChangeUserPasswordCommand(&cmdBuf, targetUsername, newPassword)
-		} else if cmd == "collection item set many" { // NEW: Handle SET_MANY command directly
+		} else if cmd == "collection item set many" {
 			parts := strings.SplitN(rawArgs, " ", 2)
 			if len(parts) < 2 {
-				fmt.Println("Error: 'collection item set many' requires collection_name and json_array.")
+				fmt.Println("Error: 'collection item set many' requires a collection name and a JSON array.")
 				fmt.Println("Usage: collection item set many <collection_name> <json_array>")
 				printHelp()
 				continue
@@ -250,7 +277,7 @@ func main() {
 			case "get":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: get command requires key")
+					fmt.Println("Error: get command requires a key.")
 					printHelp()
 					continue
 				}
@@ -260,7 +287,7 @@ func main() {
 			case "collection create":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection create command requires collection_name")
+					fmt.Println("Error: collection create command requires a collection name.")
 					printHelp()
 					continue
 				}
@@ -269,7 +296,7 @@ func main() {
 			case "collection delete":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection delete command requires collection_name")
+					fmt.Println("Error: collection delete command requires a collection name.")
 					printHelp()
 					continue
 				}
@@ -277,6 +304,38 @@ func main() {
 				writeErr = protocol.WriteCollectionDeleteCommand(&cmdBuf, collectionName)
 			case "collection list":
 				writeErr = protocol.WriteCollectionListCommand(&cmdBuf)
+
+			case "collection index create":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) < 2 {
+					fmt.Println("Error: collection index create requires a collection name and a field name.")
+					printHelp()
+					continue
+				}
+				collectionName := argsList[0]
+				fieldName := argsList[1]
+				writeErr = protocol.WriteCollectionIndexCreateCommand(&cmdBuf, collectionName, fieldName)
+
+			case "collection index delete":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) < 2 {
+					fmt.Println("Error: collection index delete requires a collection name and a field name.")
+					printHelp()
+					continue
+				}
+				collectionName := argsList[0]
+				fieldName := argsList[1]
+				writeErr = protocol.WriteCollectionIndexDeleteCommand(&cmdBuf, collectionName, fieldName)
+
+			case "collection index list":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) < 1 {
+					fmt.Println("Error: collection index list requires a collection name.")
+					printHelp()
+					continue
+				}
+				collectionName := argsList[0]
+				writeErr = protocol.WriteCollectionIndexListCommand(&cmdBuf, collectionName)
 
 			case "collection item set":
 				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 2)
@@ -292,7 +351,7 @@ func main() {
 			case "collection item get":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection item get command requires collection_name and key")
+					fmt.Println("Error: collection item get requires a collection name and a key.")
 					printHelp()
 					continue
 				}
@@ -302,7 +361,7 @@ func main() {
 			case "collection item delete":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection item delete command requires collection_name and key")
+					fmt.Println("Error: collection item delete requires a collection name and a key.")
 					printHelp()
 					continue
 				}
@@ -312,18 +371,17 @@ func main() {
 			case "collection item list":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection item list command requires collection_name")
+					fmt.Println("Error: collection item list requires a collection name.")
 					printHelp()
 					continue
 				}
 				collectionName := argsList[0]
 				writeErr = protocol.WriteCollectionItemListCommand(&cmdBuf, collectionName)
 
-			// NEW: Collection Query Command
 			case "collection query":
-				parts := strings.SplitN(rawArgs, " ", 2) // Split into collection_name and query_json
+				parts := strings.SplitN(rawArgs, " ", 2)
 				if len(parts) < 2 {
-					fmt.Println("Error: collection query command requires collection_name and query_json.")
+					fmt.Println("Error: collection query command requires a collection name and a query JSON.")
 					fmt.Println("Usage: collection query <collection_name> <query_json>")
 					printHelp()
 					continue
@@ -352,11 +410,14 @@ func main() {
 			log.Fatalf("Failed to send command to server: %v", err)
 		}
 
-		readResponse(conn, cmd)
+		// Update authentication status on successful login.
+		status := readResponse(conn, cmd)
+		if cmd == "login" && status == protocol.StatusOk {
+			isAuthenticated = true
+			rl.Config.AutoComplete = postLoginCompleter // MODIFIED: Update completer on success
+		}
 	}
 }
-
-// Helper functions (unmodified)
 
 // getCommandAndRawArgs parses the input string into a command and its raw arguments.
 func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
@@ -367,6 +428,9 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 		"collection item get",
 		"collection item delete",
 		"collection item list",
+		"collection index create",
+		"collection index delete",
+		"collection index list",
 		"collection create",
 		"collection delete",
 		"collection list",
@@ -394,48 +458,40 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
 	parts := strings.Fields(rawArgs)
 
-	// Determine if the key is optional (only for collection item set, where fixedArgCount is 2).
-	// For 'set', fixedArgCount is 1, and the key is always expected.
 	isKeyOptional := (fixedArgCount == 2)
 
-	if !isKeyOptional { // For commands like 'set' where key is always required.
+	if !isKeyOptional {
 		if len(parts) < fixedArgCount+1 {
 			return nil, "", 0, fmt.Errorf("not enough arguments provided (need %d leading args + JSON value)", fixedArgCount)
 		}
-	} else { // For 'collection item set' where key can be optional.
-		if len(parts) < 1 { // At least collection name or key and JSON
+	} else {
+		if len(parts) < 1 {
 			return nil, "", 0, fmt.Errorf("not enough arguments for collection item set (need collection name and JSON, or collection name, key, and JSON)")
 		}
 	}
 
 	leadingArgs = make([]string, fixedArgCount)
 	var actualJsonStart int
-	var generatedUUID string
-	var hasExplicitKey bool = true // Assume key is explicit by default
+	var hasExplicitKey = true
 
-	if isKeyOptional { // Logic for 'collection item set'
+	if isKeyOptional {
 		collectionName := parts[0]
 		leadingArgs[0] = collectionName
 
-		if len(parts) >= fixedArgCount { // Check if a potential key part exists
-			potentialKeyCandidate := parts[fixedArgCount-1] // This would be the key if explicit
-			// If the *next* part after collection name is JSON, then key is omitted.
-			// Example: "collection item set my_col {"name":"val"}"
-			// parts[0]="my_col", parts[1]="{"name":"val"}"
+		if len(parts) >= fixedArgCount {
+			potentialKeyCandidate := parts[fixedArgCount-1]
 			if strings.HasPrefix(potentialKeyCandidate, "{") || strings.HasPrefix(potentialKeyCandidate, "[") {
 				hasExplicitKey = false
-				generatedUUID = uuid.New().String()
-				leadingArgs[1] = generatedUUID      // The key for the protocol
-				actualJsonStart = fixedArgCount - 1 // JSON starts where the key would be
+				leadingArgs[1] = uuid.New().String()
+				actualJsonStart = fixedArgCount - 1
 			} else {
-				// User provided an explicit key
-				leadingArgs[1] = potentialKeyCandidate // Explicit key
-				actualJsonStart = fixedArgCount        // JSON starts after key
+				leadingArgs[1] = potentialKeyCandidate
+				actualJsonStart = fixedArgCount
 			}
-		} else { // Only collection name provided, key and JSON are missing
+		} else {
 			return nil, "", 0, fmt.Errorf("missing key and/or JSON value for collection item set")
 		}
-	} else { // Logic for commands like 'set' (key is always fixedArgCount-1 and required)
+	} else {
 		for i := 0; i < fixedArgCount; i++ {
 			leadingArgs[i] = parts[i]
 		}
@@ -443,12 +499,10 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 	}
 
 	jsonPartStartIndex := actualJsonStart
-
 	potentialTTLStr := parts[len(parts)-1]
 	ttlSeconds = 0
-
 	isLastPartTTL := false
-	// Only check for TTL if there's enough room for JSON and a potential TTL after leading args
+
 	if len(parts) > jsonPartStartIndex {
 		if val, err := strconv.ParseInt(potentialTTLStr, 10, 64); err == nil {
 			isLastPartTTL = true
@@ -472,13 +526,11 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 		return nil, "", 0, fmt.Errorf("JSON value cannot be empty (use {} or [])")
 	}
 
-	// Now, inject the _id into the JSON string if a UUID was generated for collections
-	if isKeyOptional && !hasExplicitKey { // Only for optional key scenarios (collections)
+	if isKeyOptional && !hasExplicitKey {
 		var jsonData map[string]any
 		if err := json.Unmarshal([]byte(jsonString), &jsonData); err != nil {
 			return nil, "", 0, fmt.Errorf("invalid initial JSON for _id injection: %w", err)
 		}
-		// The generated UUID is now in leadingArgs[fixedArgCount-1] (which is leadingArgs[1] for collection item set)
 		jsonData["_id"] = leadingArgs[fixedArgCount-1]
 		updatedJSONBytes, err := json.Marshal(jsonData)
 		if err != nil {
@@ -495,39 +547,39 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 	return leadingArgs, jsonString, ttlSeconds, nil
 }
 
-// readResponse reads and processes the server's binary response.
-func readResponse(conn net.Conn, lastCmd string) {
+// readResponse now returns the status code from the server.
+func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 	statusByte := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusByte); err != nil {
 		fmt.Printf("Error: Failed to read response status: %v\n", err)
-		return
+		return protocol.StatusError
 	}
 	status := protocol.ResponseStatus(statusByte[0])
 
 	msgLenBytes := make([]byte, 4)
 	if _, err := io.ReadFull(conn, msgLenBytes); err != nil {
 		fmt.Printf("Error: Failed to read message length: %v\n", err)
-		return
+		return protocol.StatusError
 	}
 	msgLen := protocol.ByteOrder.Uint32(msgLenBytes)
 	msgBytes := make([]byte, msgLen)
 	if _, err := io.ReadFull(conn, msgBytes); err != nil {
 		fmt.Printf("Error: Failed to read message: %v\n", err)
-		return
+		return protocol.StatusError
 	}
 	message := string(msgBytes)
 
 	dataLenBytes := make([]byte, 4)
 	if _, err := io.ReadFull(conn, dataLenBytes); err != nil {
 		fmt.Printf("Error: Failed to read data length: %v\n", err)
-		return
+		return protocol.StatusError
 	}
 	dataLen := protocol.ByteOrder.Uint32(dataLenBytes)
 	dataBytes := make([]byte, dataLen)
 	if dataLen > 0 {
 		if _, err := io.ReadFull(conn, dataBytes); err != nil {
 			fmt.Printf("Error: Failed to read data: %v\n", err)
-			return
+			return protocol.StatusError
 		}
 	}
 
@@ -537,52 +589,43 @@ func readResponse(conn net.Conn, lastCmd string) {
 		var decodedData []byte
 		var decodeErr error
 
-		// Data handling based on the command type and collection.
-		// Check if it's a "collection item list" command AND the message indicates it's from _system.
 		isCollectionItemListSystemCmd := (lastCmd == "collection item list" && strings.Contains(message, "from collection '_system' retrieved"))
 
-		if isCollectionItemListSystemCmd || lastCmd == "collection query" { // NEW: Handle collection query results directly
-			// If it's the _system collection list or a query, dataBytes is already sanitized JSON.
-			// No Base64 decoding needed here.
+		if isCollectionItemListSystemCmd || lastCmd == "collection query" || lastCmd == "collection index list" {
 			decodedData = dataBytes
 		} else if lastCmd == "get" || lastCmd == "collection item get" {
-			// For single GETs, data is raw JSON bytes.
 			decodedData = dataBytes
 		} else if lastCmd == "collection item list" {
-			// For other collection item lists, data is a map of Base64 encoded JSON values.
-			var rawMap map[string]string // Expecting string values (Base64 encoded)
+			var rawMap map[string]string
 			if err := json.Unmarshal(dataBytes, &rawMap); err != nil {
 				decodeErr = fmt.Errorf("failed to unmarshal raw map for item list: %w", err)
 			} else {
 				decodedMap := make(map[string]any)
 				for k, v := range rawMap {
-					// All other collection items are Base64 encoded.
 					decodedVal, err := base64.StdEncoding.DecodeString(v)
 					if err != nil {
 						log.Printf("Warning: Failed to Base64 decode value for key '%s' in collection list: %v", k, err)
-						decodedMap[k] = v // Keep raw Base64 if decoding fails.
+						decodedMap[k] = v
 					} else {
 						var jsonVal any
 						if err := json.Unmarshal(decodedVal, &jsonVal); err != nil {
 							log.Printf("Warning: Failed to unmarshal decoded JSON for key '%s' in collection list: %v", k, err)
-							decodedMap[k] = string(decodedVal) // Keep raw decoded string if JSON unmarshal fails.
+							decodedMap[k] = string(decodedVal)
 						} else {
 							decodedMap[k] = jsonVal
 						}
 					}
 				}
-				dataBytes, decodeErr = json.Marshal(decodedMap) // Remarshal the decoded map to JSON for pretty printing.
+				dataBytes, decodeErr = json.Marshal(decodedMap)
 				if decodeErr != nil {
 					decodeErr = fmt.Errorf("failed to marshal decoded map for item list: %w", decodeErr)
 				}
 				decodedData = dataBytes
 			}
 		} else {
-			// Fallback for other commands that might return data.
 			decodedData = dataBytes
 		}
 
-		// Attempt to pretty print decodedData.
 		if decodeErr != nil || !json.Valid(decodedData) {
 			if decodeErr != nil {
 				fmt.Printf("    Warning: Failed to decode/process data: %v\n", decodeErr)
@@ -598,6 +641,7 @@ func readResponse(conn net.Conn, lastCmd string) {
 		}
 	}
 	fmt.Println("---")
+	return status
 }
 
 // getStatusString returns a string representation of a ResponseStatus.
@@ -626,14 +670,14 @@ func clearScreen() {
 	switch runtime.GOOS {
 	case "windows":
 		cmd = exec.Command("cmd", "/c", "cls")
-	case "linux", "darwin": // macOS is "darwin".
+	case "linux", "darwin":
 		cmd = exec.Command("clear")
 	default:
 		fmt.Println("Cannot clear screen: Unsupported operating system.")
 		return
 	}
 	cmd.Stdout = os.Stdout
-	cmd.Run() // Execute the command to clear the screen.
+	cmd.Run()
 }
 
 // printHelp displays the available commands and their usage.
@@ -646,6 +690,9 @@ func printHelp() {
 	fmt.Println("    collection create <collection_name>")
 	fmt.Println("    collection delete <collection_name>")
 	fmt.Println("    collection list")
+	fmt.Println("    collection index create <collection_name> <field_name>")
+	fmt.Println("    collection index delete <collection_name> <field_name>")
+	fmt.Println("    collection index list <collection_name>")
 	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)")
 	fmt.Println("    collection item set many <collection_name> <value_json_array>")
 	fmt.Println("    collection item get <collection_name> <key>")

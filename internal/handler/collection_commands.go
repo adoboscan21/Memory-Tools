@@ -26,12 +26,10 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 	}
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
-	if err := h.CollectionManager.SaveCollectionToDisk(collectionName, colStore); err != nil {
-		log.Printf("Error saving new/ensured collection '%s' to disk: %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to ensure collection '%s' persistence", collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' ensured and persisted", collectionName), nil)
-	}
+
+	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' ensured (persistence will be handled asynchronously)", collectionName), nil)
 }
 
 // handleCollectionDelete processes the CmdCollectionDelete command.
@@ -57,12 +55,10 @@ func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 	}
 
 	h.CollectionManager.DeleteCollection(collectionName)
-	if err := h.CollectionManager.DeleteCollectionFromDisk(collectionName); err != nil {
-		log.Printf("Error deleting collection file for '%s': %v", collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to delete collection '%s' from disk", collectionName), nil)
-	} else {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' deleted", collectionName), nil)
-	}
+
+	// --- ASYNC DELETE: Enqueue file deletion task asynchronously ---
+	h.CollectionManager.EnqueueDeleteTask(collectionName)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' deleted (persistence will be handled asynchronously)", collectionName), nil)
 }
 
 // handleCollectionList processes the CmdCollectionList command.
@@ -77,4 +73,84 @@ func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
 	if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Collections listed", jsonNames); err != nil {
 		log.Printf("Error writing collection list response to %s: %v", conn.RemoteAddr(), err)
 	}
+}
+
+// handleCollectionIndexCreate processes the CmdCollectionIndexCreate command.
+func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
+	collectionName, fieldName, err := protocol.ReadCollectionIndexCreateCommand(conn)
+	if err != nil {
+		log.Printf("Error reading CREATE_COLLECTION_INDEX command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CREATE_COLLECTION_INDEX command format", nil)
+		return
+	}
+	if collectionName == "" || fieldName == "" {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name and field name cannot be empty", nil)
+		return
+	}
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
+		return
+	}
+
+	// This operation can be long, in a real-world scenario, you might do this in the background.
+	// For now, we do it synchronously.
+	log.Printf("User '%s' requested to create index on '%s' for collection '%s'", h.AuthenticatedUser, fieldName, collectionName)
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	colStore.CreateIndex(fieldName)
+
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index creation process for field '%s' on collection '%s' completed.", fieldName, collectionName), nil)
+}
+
+// NEW: handleCollectionIndexDelete processes the CmdCollectionIndexDelete command.
+func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
+	collectionName, fieldName, err := protocol.ReadCollectionIndexDeleteCommand(conn)
+	if err != nil {
+		log.Printf("Error reading DELETE_COLLECTION_INDEX command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_INDEX command format", nil)
+		return
+	}
+	if collectionName == "" || fieldName == "" {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name and field name cannot be empty", nil)
+		return
+	}
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
+		return
+	}
+
+	log.Printf("User '%s' requested to delete index on '%s' for collection '%s'", h.AuthenticatedUser, fieldName, collectionName)
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	colStore.DeleteIndex(fieldName)
+
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index for field '%s' on collection '%s' deleted.", fieldName, collectionName), nil)
+}
+
+// NEW: handleCollectionIndexList processes the CmdCollectionIndexList command.
+func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
+	collectionName, err := protocol.ReadCollectionIndexListCommand(conn)
+	if err != nil {
+		log.Printf("Error reading LIST_COLLECTION_INDEXES command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid LIST_COLLECTION_INDEXES command format", nil)
+		return
+	}
+	if collectionName == "" {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
+		return
+	}
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
+		return
+	}
+
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	indexedFields := colStore.ListIndexes()
+
+	jsonResponse, err := json.Marshal(indexedFields)
+	if err != nil {
+		log.Printf("Error marshalling index list for collection '%s': %v", collectionName, err)
+		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal index list", nil)
+		return
+	}
+
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Indexes for collection '%s' retrieved.", collectionName), jsonResponse)
 }

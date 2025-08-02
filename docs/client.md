@@ -104,7 +104,7 @@ A collection is an independent data store that allows for grouping items and per
   - **Description**: Deletes an entire collection and all its data, both from memory and disk.
   - **Example**:
     ```bash
-    collection delete users
+    collection delete old_logs
     ```
 - **`collection list`**
   - **Description**: Lists the names of all existing collections.
@@ -118,20 +118,16 @@ A collection is an independent data store that allows for grouping items and per
 These commands allow you to manipulate key-value pairs within a specific collection.
 
 - **`collection item set <collection_name> [<key>] <value_json> [ttl_seconds]`**
-
   - **Description**: Sets a key-value pair within the specified collection. `value_json` must be valid JSON. **If `<key>` is omitted, a unique UUID will be generated and used as the key, and it will also be injected into the JSON as an `_id` field.**
   - **Examples**:
-
     - With an explicit key:
       ```bash
       collection item set users user:123 {"email": "a@b.com", "name": "User A"} 3600
       ```
     - Without an explicit key (a UUID is generated for the key and the `_id` field):
-
       ```bash
       collection item set products {"name": "New Gadget", "price": 99.99} 180
       ```
-
 - **`collection item set many <collection_name> <value_json_array>`**
   - **Description**: Inserts multiple items at once into a collection. The `value_json_array` must be an array of JSON objects. **If a JSON object does not contain the `_id` field, a UUID will be generated for it.**
   - **Example**:
@@ -165,6 +161,31 @@ These commands allow you to manipulate key-value pairs within a specific collect
 
 ---
 
+### Index Management Commands
+
+Indexes dramatically improve query performance by avoiding full scans of a collection's data.
+
+- **`collection index create <collection_name> <field_name>`**
+  - **Description**: Creates an index on a specific field within a collection. The server will scan all existing items to build the index.
+  - **Example**:
+    ```bash
+    collection index create users city
+    ```
+- **`collection index list <collection_name>`**
+  - **Description**: Lists all the fields that are currently indexed for a given collection.
+  - **Example**:
+    ```bash
+    collection index list users
+    ```
+- **`collection index delete <collection_name> <field_name>`**
+  - **Description**: Deletes an existing index. Subsequent queries on this field will revert to performing a full collection scan.
+  - **Example**:
+    ```bash
+    collection index delete users city
+    ```
+
+---
+
 ### Collection Query Command (`collection query`)
 
 This powerful command lets you perform complex queries to filter, sort, paginate, and aggregate data from a collection, similar to operations in a relational database.
@@ -183,6 +204,7 @@ This powerful command lets you perform complex queries to filter, sort, paginate
 The `query_json` parameter supports a variety of operations:
 
 - **Filter (`filter` - WHERE clauses):**
+
   - Equality:
     ```json
     { "filter": { "field": "status", "op": "=", "value": "active" } }
@@ -222,10 +244,12 @@ The `query_json` parameter supports a variety of operations:
     { "filter": { "field": "price", "op": "between", "value": [100, 200] } }
     ```
   - `IS NULL` / `IS NOT NULL`:
+
     ```json
     { "filter": { "field": "description", "op": "is null" } }
     { "filter": { "field": "description", "op": "is not null" } }
     ```
+
 - **Ordering (`order_by`):**
   - Sort results by one or more fields.
   ```json

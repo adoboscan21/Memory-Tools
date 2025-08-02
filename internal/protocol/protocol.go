@@ -31,6 +31,8 @@ const (
 	CmdCollectionItemList       // LIST_COLLECTION_ITEMS collectionName
 	CmdCollectionQuery          // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
 	CmdCollectionItemDeleteMany // NEW: DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
+	CmdCollectionItemUpdate     // UPDATE_COLLECTION_ITEM collectionName, key, patch_value
+	CmdCollectionItemUpdateMany // ++NUEVO: UPDATE_COLLECTION_ITEMS_MANY collectionName, json_array
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
@@ -284,6 +286,41 @@ func ReadCollectionItemSetCommand(r io.Reader) (collectionName, key string, valu
 	return collectionName, key, value, ttl, nil
 }
 
+// WriteCollectionItemUpdateCommand escribe un comando UPDATE_COLLECTION_ITEM a la conexión.
+// Formato: [CmdCollectionItemUpdate (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key] [PatchValueLength] [PatchValue]
+func WriteCollectionItemUpdateCommand(w io.Writer, collectionName, key string, patchValue []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteString(w, key); err != nil {
+		return fmt.Errorf("failed to write key: %w", err)
+	}
+	if err := WriteBytes(w, patchValue); err != nil {
+		return fmt.Errorf("failed to write patch value: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionItemUpdateCommand lee un comando UPDATE_COLLECTION_ITEM desde la conexión.
+func ReadCollectionItemUpdateCommand(r io.Reader) (collectionName, key string, patchValue []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+	key, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read key: %w", err)
+	}
+	patchValue, err = ReadBytes(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read patch value: %w", err)
+	}
+	return collectionName, key, patchValue, nil
+}
+
 // WriteCollectionItemGetCommand writes a GET_COLLECTION_ITEM command to the connection.
 // Format: [CmdCollectionItemGet (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key]
 func WriteCollectionItemGetCommand(w io.Writer, collectionName, key string) error {
@@ -472,6 +509,38 @@ func ReadCollectionItemSetManyCommand(r io.Reader) (collectionName string, value
 	}
 	return collectionName, value, nil
 }
+
+// === INICIO MEJORA: COMANDO UPDATE MANY ===
+
+// WriteCollectionItemUpdateManyCommand escribe un comando UPDATE_COLLECTION_ITEMS_MANY a la conexión.
+// Formato: [CmdCollectionItemUpdateMany (1 byte)] [ColNameLength] [ColName] [ValueLength] [Value_JSON_Array]
+func WriteCollectionItemUpdateManyCommand(w io.Writer, collectionName string, value []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdateMany)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteBytes(w, value); err != nil {
+		return fmt.Errorf("failed to write value: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionItemUpdateManyCommand lee un comando UPDATE_COLLECTION_ITEMS_MANY desde la conexión.
+func ReadCollectionItemUpdateManyCommand(r io.Reader) (collectionName string, value []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+	value, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read value: %w", err)
+	}
+	return collectionName, value, nil
+}
+
+// === FIN MEJORA ===
 
 // WriteCollectionItemDeleteManyCommand writes a DELETE_COLLECTION_ITEMS_MANY command to the connection.
 // Format: [CmdCollectionItemDeleteMany (1 byte)] [ColNameLength] [ColName] [KeysArrayLength] [Key1Length] [Key1] [Key2Length] [Key2] ...

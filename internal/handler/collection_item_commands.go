@@ -48,6 +48,168 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence will be handled asynchronously)", key, collectionName), nil)
 }
 
+// handleCollectionItemUpdate processes the CmdCollectionItemUpdate command.
+func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
+	collectionName, key, patchValue, err := protocol.ReadCollectionItemUpdateCommand(conn)
+	if err != nil {
+		log.Printf("Error reading COLLECTION_ITEM_UPDATE command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_UPDATE command format", nil)
+		return
+	}
+
+	if collectionName == "" || key == "" || len(patchValue) == 0 {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name, key, or patch value cannot be empty", nil)
+		return
+	}
+
+	// Authorization check
+	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can modify collection '%s'", SystemCollectionName), nil)
+		return
+	}
+
+	colStore := h.CollectionManager.GetCollection(collectionName)
+
+	// 1. Get the existing item
+	existingValue, found := colStore.Get(key)
+	if !found {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection '%s'", key, collectionName), nil)
+		return
+	}
+
+	// 2. Unmarshal existing and patch data
+	var existingData map[string]any
+	if err := json.Unmarshal(existingValue, &existingData); err != nil {
+		protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document. Cannot apply patch.", nil)
+		return
+	}
+
+	var patchData map[string]any
+	if err := json.Unmarshal(patchValue, &patchData); err != nil {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
+		return
+	}
+
+	// 3. Merge patch data into existing data
+	for k, v := range patchData {
+		// Ensure _id is immutable from a patch
+		if k == "_id" {
+			continue
+		}
+		existingData[k] = v
+	}
+
+	// 4. Marshal the merged data back to bytes
+	updatedValue, err := json.Marshal(existingData)
+	if err != nil {
+		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal updated document.", nil)
+		return
+	}
+
+	// 5. Set the new value (this implicitly keeps the original TTL)
+	// Note: A more advanced implementation might allow updating TTL as part of the patch.
+	colStore.Set(key, updatedValue, 0) // We assume TTL is not being updated here.
+
+	// 6. Enqueue async save and respond
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' updated in collection '%s' (persistence async)", key, collectionName), updatedValue)
+}
+
+// === INICIO MEJORA: HANDLER UPDATE MANY ===
+
+// updateManyPayload define la estructura esperada para cada objeto en el array de UPDATE MANY.
+type updateManyPayload struct {
+	ID    string         `json:"_id"`
+	Patch map[string]any `json:"patch"`
+}
+
+// handleCollectionItemUpdateMany processes the CmdCollectionItemUpdateMany command.
+func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
+	collectionName, value, err := protocol.ReadCollectionItemUpdateManyCommand(conn)
+	if err != nil {
+		log.Printf("Error reading UPDATE_COLLECTION_ITEMS_MANY command from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid UPDATE_COLLECTION_ITEMS_MANY command format", nil)
+		return
+	}
+
+	if collectionName == "" || len(value) == 0 {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+		return
+	}
+
+	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can modify collection '%s'", SystemCollectionName), nil)
+		return
+	}
+
+	var payloads []updateManyPayload
+	if err := json.Unmarshal(value, &payloads); err != nil {
+		log.Printf("Error unmarshalling JSON array for UPDATE_MANY in collection '%s': %v", collectionName, err)
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format. Expected an array of `{\"_id\": \"...\", \"patch\": {...}}`.", nil)
+		return
+	}
+
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	updatedCount := 0
+	failedKeys := []string{}
+
+	for _, p := range payloads {
+		if p.ID == "" || p.Patch == nil {
+			log.Printf("Skipping invalid payload in UPDATE_MANY batch for collection '%s': missing _id or patch.", collectionName)
+			continue
+		}
+
+		// Get the existing item
+		existingValue, found := colStore.Get(p.ID)
+		if !found {
+			failedKeys = append(failedKeys, p.ID)
+			continue
+		}
+
+		// Unmarshal, merge, and marshal back
+		var existingData map[string]any
+		if err := json.Unmarshal(existingValue, &existingData); err != nil {
+			log.Printf("Failed to unmarshal existing document for key '%s' in UPDATE_MANY. Skipping.", p.ID)
+			failedKeys = append(failedKeys, p.ID)
+			continue
+		}
+
+		for k, v := range p.Patch {
+			if k == "_id" {
+				continue
+			}
+			existingData[k] = v
+		}
+
+		updatedValue, err := json.Marshal(existingData)
+		if err != nil {
+			log.Printf("Failed to marshal updated document for key '%s' in UPDATE_MANY. Skipping.", p.ID)
+			failedKeys = append(failedKeys, p.ID)
+			continue
+		}
+
+		// Set the updated value back into the store
+		colStore.Set(p.ID, updatedValue, 0)
+		updatedCount++
+	}
+
+	// Enqueue a single save task after all updates are done in memory
+	if updatedCount > 0 {
+		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	}
+
+	// Prepare and send response
+	summary := fmt.Sprintf("OK: %d items updated. %d items failed or not found in collection '%s'.", updatedCount, len(failedKeys), collectionName)
+	var responseData []byte
+	if len(failedKeys) > 0 {
+		responseData, _ = json.Marshal(map[string][]string{"failed_keys": failedKeys})
+	}
+
+	protocol.WriteResponse(conn, protocol.StatusOk, summary, responseData)
+}
+
+// === FIN MEJORA ===
+
 // handleCollectionItemGet processes the CmdCollectionItemGet command.
 func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 	collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)

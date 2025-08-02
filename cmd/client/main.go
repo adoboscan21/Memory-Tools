@@ -51,6 +51,8 @@ var postLoginCompleter = readline.NewPrefixCompleter(
 		readline.PcItem("item",
 			readline.PcItem("set"),
 			readline.PcItem("set many"),
+			readline.PcItem("update"),
+			readline.PcItem("update many"),
 			readline.PcItem("get"),
 			readline.PcItem("delete"),
 			readline.PcItem("delete many"),
@@ -223,6 +225,24 @@ func main() {
 			}
 			writeErr = protocol.WriteCollectionItemSetManyCommand(&cmdBuf, collectionName, []byte(jsonArray))
 
+		} else if cmd == "collection item update many" {
+			parts := strings.SplitN(rawArgs, " ", 2)
+			if len(parts) < 2 {
+				fmt.Println("Error: 'collection item update many' requires a collection name and a JSON array.")
+				fmt.Println("Usage: collection item update many <collection_name> <json_array>")
+				printHelp()
+				continue
+			}
+			collectionName := parts[0]
+			jsonArray := strings.TrimSpace(parts[1])
+
+			if !json.Valid([]byte(jsonArray)) {
+				fmt.Printf("Error: Invalid JSON array: '%s'\n", jsonArray)
+				continue
+			}
+			writeErr = protocol.WriteCollectionItemUpdateManyCommand(&cmdBuf, collectionName, []byte(jsonArray))
+			// === FIN MEJORA ===
+
 		} else if cmd == "collection item delete many" {
 			parts := strings.SplitN(rawArgs, " ", 2)
 			if len(parts) < 2 {
@@ -264,7 +284,7 @@ func main() {
 		} else {
 			switch cmd {
 			case "set":
-				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 1)
+				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 1, false)
 				if parseErr != nil {
 					fmt.Printf("Error parsing 'set' command: %v\n", parseErr)
 					printHelp()
@@ -337,7 +357,8 @@ func main() {
 				writeErr = protocol.WriteCollectionIndexListCommand(&cmdBuf, collectionName)
 
 			case "collection item set":
-				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 2)
+				// Set es un caso especial donde la clave es opcional.
+				parsedArgs, jsonVal, _, parseErr := parseArgsForJSON(rawArgs, 2, true)
 				if parseErr != nil {
 					fmt.Printf("Error parsing 'collection item set' command: %v\n", parseErr)
 					printHelp()
@@ -345,7 +366,19 @@ func main() {
 				}
 				collectionName := parsedArgs[0]
 				key := parsedArgs[1]
-				writeErr = protocol.WriteCollectionItemSetCommand(&cmdBuf, collectionName, key, []byte(jsonVal), time.Duration(ttlSeconds)*time.Second)
+
+				writeErr = protocol.WriteCollectionItemSetCommand(&cmdBuf, collectionName, key, []byte(jsonVal), 0)
+
+			case "collection item update":
+				parsedArgs, jsonVal, _, parseErr := parseArgsForJSON(rawArgs, 2, false)
+				if parseErr != nil {
+					fmt.Printf("Error parsing 'collection item update' command: %v\n", parseErr)
+					printHelp()
+					continue
+				}
+				collectionName := parsedArgs[0]
+				key := parsedArgs[1]
+				writeErr = protocol.WriteCollectionItemUpdateCommand(&cmdBuf, collectionName, key, []byte(jsonVal))
 
 			case "collection item get":
 				argsList := strings.Fields(rawArgs)
@@ -421,8 +454,10 @@ func main() {
 // getCommandAndRawArgs parses the input string into a command and its raw arguments.
 func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 	multiWordCommands := []string{
+		"collection item update many",
 		"collection item set many",
 		"collection item delete many",
+		"collection item update",
 		"collection item set",
 		"collection item get",
 		"collection item delete",
@@ -454,55 +489,46 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 }
 
 // parseArgsForJSON parses arguments that include a JSON string and an optional TTL.
-func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
+// isKeyOptionalInSet se usa para manejar el caso especial de `collection item set`.
+func parseArgsForJSON(rawArgs string, fixedArgCount int, isKeyOptionalInSet bool) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
 	parts := strings.Fields(rawArgs)
 
-	isKeyOptional := (fixedArgCount == 2)
-
-	if !isKeyOptional {
+	if isKeyOptionalInSet {
+		if len(parts) < 1 {
+			return nil, "", 0, fmt.Errorf("not enough arguments, need at least collection name and JSON value")
+		}
+	} else {
 		if len(parts) < fixedArgCount+1 {
 			return nil, "", 0, fmt.Errorf("not enough arguments provided (need %d leading args + JSON value)", fixedArgCount)
 		}
-	} else {
-		if len(parts) < 1 {
-			return nil, "", 0, fmt.Errorf("not enough arguments for collection item set (need collection name and JSON, or collection name, key, and JSON)")
-		}
 	}
 
+	jsonPartStartIndex := 0
 	leadingArgs = make([]string, fixedArgCount)
-	var actualJsonStart int
-	var hasExplicitKey = true
 
-	if isKeyOptional {
-		collectionName := parts[0]
-		leadingArgs[0] = collectionName
-
-		if len(parts) >= fixedArgCount {
-			potentialKeyCandidate := parts[fixedArgCount-1]
-			if strings.HasPrefix(potentialKeyCandidate, "{") || strings.HasPrefix(potentialKeyCandidate, "[") {
-				hasExplicitKey = false
-				leadingArgs[1] = uuid.New().String()
-				actualJsonStart = fixedArgCount - 1
-			} else {
-				leadingArgs[1] = potentialKeyCandidate
-				actualJsonStart = fixedArgCount
-			}
+	if isKeyOptionalInSet {
+		leadingArgs[0] = parts[0]
+		if len(parts) > 1 && (strings.HasPrefix(parts[1], "{") || strings.HasPrefix(parts[1], "[")) {
+			leadingArgs[1] = uuid.New().String() // Generar clave
+			jsonPartStartIndex = 1
+			fmt.Printf("Note: Key not provided. Generated key: '%s' and injected '_id' into JSON.\n", leadingArgs[1])
+		} else if len(parts) > 2 {
+			leadingArgs[1] = parts[1]
+			jsonPartStartIndex = 2
 		} else {
-			return nil, "", 0, fmt.Errorf("missing key and/or JSON value for collection item set")
+			return nil, "", 0, fmt.Errorf("missing JSON value for 'collection item set'")
 		}
 	} else {
 		for i := 0; i < fixedArgCount; i++ {
 			leadingArgs[i] = parts[i]
 		}
-		actualJsonStart = fixedArgCount
+		jsonPartStartIndex = fixedArgCount
 	}
 
-	jsonPartStartIndex := actualJsonStart
 	potentialTTLStr := parts[len(parts)-1]
-	ttlSeconds = 0
 	isLastPartTTL := false
 
-	if len(parts) > jsonPartStartIndex {
+	if len(parts) > jsonPartStartIndex+1 {
 		if val, err := strconv.ParseInt(potentialTTLStr, 10, 64); err == nil {
 			isLastPartTTL = true
 			ttlSeconds = val
@@ -519,28 +545,22 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 	}
 
 	jsonString = strings.Join(parts[jsonPartStartIndex:jsonPartEndIndex], " ")
-	jsonString = strings.TrimSpace(jsonString)
 
-	if len(jsonString) == 0 {
-		return nil, "", 0, fmt.Errorf("JSON value cannot be empty (use {} or [])")
+	if !json.Valid([]byte(jsonString)) {
+		return nil, "", 0, fmt.Errorf("invalid JSON value: '%s'", jsonString)
 	}
 
-	if isKeyOptional && !hasExplicitKey {
+	if isKeyOptionalInSet && jsonPartStartIndex == 1 {
 		var jsonData map[string]any
 		if err := json.Unmarshal([]byte(jsonString), &jsonData); err != nil {
 			return nil, "", 0, fmt.Errorf("invalid initial JSON for _id injection: %w", err)
 		}
-		jsonData["_id"] = leadingArgs[fixedArgCount-1]
+		jsonData["_id"] = leadingArgs[1]
 		updatedJSONBytes, err := json.Marshal(jsonData)
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("failed to marshal JSON after _id injection: %w", err)
 		}
 		jsonString = string(updatedJSONBytes)
-		fmt.Printf("Note: Key not provided. Generated key: '%s' and injected '_id' into JSON.\n", leadingArgs[fixedArgCount-1])
-	}
-
-	if !json.Valid([]byte(jsonString)) {
-		return nil, "", 0, fmt.Errorf("invalid JSON value: '%s'", jsonString)
 	}
 
 	return leadingArgs, jsonString, ttlSeconds, nil
@@ -577,7 +597,7 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 	dataBytes := make([]byte, dataLen)
 	if dataLen > 0 {
 		if _, err := io.ReadFull(conn, dataBytes); err != nil {
-			fmt.Printf("Error: Failed to read data: %v\n", err)
+			fmt.Printf("Error: Failed to read data: %v", err)
 			return protocol.StatusError
 		}
 	}
@@ -590,9 +610,9 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 
 		isCollectionItemListSystemCmd := (lastCmd == "collection item list" && strings.Contains(message, "from collection '_system' retrieved"))
 
-		if isCollectionItemListSystemCmd || lastCmd == "collection query" || lastCmd == "collection index list" {
+		if isCollectionItemListSystemCmd || lastCmd == "collection query" || lastCmd == "collection index list" || lastCmd == "collection item update many" { // <-- AÑADIDO
 			decodedData = dataBytes
-		} else if lastCmd == "get" || lastCmd == "collection item get" {
+		} else if lastCmd == "get" || lastCmd == "collection item get" || lastCmd == "collection item update" {
 			decodedData = dataBytes
 		} else if lastCmd == "collection item list" {
 			var rawMap map[string]string
@@ -694,6 +714,8 @@ func printHelp() {
 	fmt.Println("    collection index list <collection_name>")
 	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)")
 	fmt.Println("    collection item set many <collection_name> <value_json_array>")
+	fmt.Println("    collection item update <collection_name> <key> <patch_json>")
+	fmt.Println("    collection item update many <collection_name> <patch_json_array>")
 	fmt.Println("    collection item get <collection_name> <key>")
 	fmt.Println("    collection item delete <collection_name> <key>")
 	fmt.Println("    collection item delete many <collection_name> <value_json_array>")
@@ -701,7 +723,7 @@ func printHelp() {
 	fmt.Println("    collection query <collection_name> <query_json>")
 	fmt.Println("    clear")
 	fmt.Println("    exit")
-	fmt.Println("---")
+	fmt.Println("-----------------------------")
 	fmt.Println("Query JSON Examples:")
 	fmt.Println("    Filter (WHERE):")
 	fmt.Println(`        {"filter": {"field": "status", "op": "=", "value": "active"}}`)
@@ -718,5 +740,5 @@ func printHelp() {
 	fmt.Println(`        {"aggregations": {"total_sales": {"func": "sum", "field": "sales"}}, "group_by": ["category"]}`)
 	fmt.Println("    Distinct:")
 	fmt.Println(`        {"distinct": "city"}`)
-	fmt.Println("---")
+	fmt.Println("-----------------------------")
 }

@@ -290,26 +290,73 @@ func (s *InMemStore) Get(key string) ([]byte, bool) {
 	return item.Value, true
 }
 
-// GetMany retrieves multiple keys, typically from an index lookup.
+// === INICIO DE LA MEJORA: GetMany en Paralelo ===
+
+// GetMany retrieves multiple keys concurrently by grouping them by shard.
 func (s *InMemStore) GetMany(keys []string) map[string][]byte {
-	results := make(map[string][]byte)
+	if len(keys) == 0 {
+		return make(map[string][]byte)
+	}
+
+	// 1. Group keys by the shard they belong to.
+	keysByShard := make([][]string, s.numShards)
+	for _, key := range keys {
+		h := fnv.New64a()
+		h.Write([]byte(key))
+		shardIndex := h.Sum64() % uint64(s.numShards)
+		keysByShard[shardIndex] = append(keysByShard[shardIndex], key)
+	}
+
+	// 2. Prepare for concurrent fetching.
+	resultsChan := make(chan map[string][]byte, s.numShards)
+	var wg sync.WaitGroup
+
 	now := time.Now()
 
-	// This is a simplified implementation. A more optimized version
-	// would group keys by shard and query each shard in parallel.
-	for _, key := range keys {
-		shard := s.getShard(key)
-		shard.mu.RLock()
-		item, found := shard.data[key]
-		if found {
-			if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
-				results[key] = item.Value
-			}
+	// 3. Launch a goroutine for each shard that has keys to fetch.
+	for i, shardKeys := range keysByShard {
+		if len(shardKeys) > 0 {
+			wg.Add(1)
+			go func(shardIndex int, keysInShard []string) {
+				defer wg.Done()
+
+				shard := s.shards[shardIndex]
+				shardResults := make(map[string][]byte, len(keysInShard))
+
+				shard.mu.RLock()
+				for _, key := range keysInShard {
+					if item, found := shard.data[key]; found {
+						// Check TTL
+						if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
+							shardResults[key] = item.Value
+						}
+					}
+				}
+				shard.mu.RUnlock()
+
+				resultsChan <- shardResults
+			}(i, shardKeys)
 		}
-		shard.mu.RUnlock()
 	}
-	return results
+
+	// 4. Wait for all goroutines to finish and close the channel.
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// 5. Combine results from all shards.
+	finalResults := make(map[string][]byte, len(keys))
+	for shardResults := range resultsChan {
+		for key, value := range shardResults {
+			finalResults[key] = value
+		}
+	}
+
+	return finalResults
 }
+
+// === FIN DE LA MEJORA ===
 
 // Delete removes a key-value pair and updates any relevant indexes.
 func (s *InMemStore) Delete(key string) {

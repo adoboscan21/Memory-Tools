@@ -120,6 +120,12 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 				h.handleCollectionItemDelete(conn)
 			case protocol.CmdCollectionItemList:
 				h.handleCollectionItemList(conn)
+			case protocol.CmdCollectionItemUpdate:
+				h.handleCollectionItemUpdate(conn)
+			// === INICIO MEJORA: AÑADIR UPDATE MANY AL SWITCH ===
+			case protocol.CmdCollectionItemUpdateMany:
+				h.handleCollectionItemUpdateMany(conn)
+			// === FIN MEJORA ===
 
 			// Collection Query Command
 			case protocol.CmdCollectionQuery:

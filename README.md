@@ -90,7 +90,7 @@ You can use the interactive CLI client to connect to and operate the server.
 
 > **Important:** The default password for the `admin` user is `adminpass`, and for the `root` user (only accessible from localhost) is `rootpass`. Please change these immediately in a production environment using the `update password` command.
 
-For a full list of commands and detailed examples, see the **[`docs/client.md`](https://github.com/adoboscan21/Memory-Tools/blob/dev/docs/client.md)** file.
+For a full list of commands and detailed examples, see the **[`docs/client.md`](https://github.com/adoboscan21/Memory-Tools/blob/main/docs/client.md)** file.
 
 Once connected, type `help` for available commands.
 

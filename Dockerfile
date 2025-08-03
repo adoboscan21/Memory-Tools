@@ -18,7 +18,12 @@ COPY . .
 RUN apk add --no-cache openssl
 
 # Generate TLS certificates.
-RUN openssl req -x509 -newkey rsa:4096 -nodes -keyout server.key -out server.crt -days 36500 -subj "/CN=localhost" -addext "subjectAltName = DNS:localhost,IP:127.0.0.1"
+# NOTE: These are generated inside the builder and copied to the final stage.
+RUN mkdir -p certificates && \
+    openssl req -x509 -newkey rsa:4096 -nodes \
+    -keyout certificates/server.key -out certificates/server.crt \
+    -days 3650 -subj "/CN=localhost" \
+    -addext "subjectAltName = DNS:localhost,IP:127.0.0.1"
 
 # Build the Go applications with specific names.
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-server ./main.go
@@ -28,31 +33,29 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-cl
 # Use a minimal base image for the production environment.
 FROM alpine:latest
 
-# Create necessary directories and ensure 'certificates' is in /root/certificates
-# so binaries can find it if they are in /usr/local/bin.
-RUN mkdir -p /root/certificates /root/collections /usr/local/bin/
+# Set the working directory where the data and config will live.
+WORKDIR /data
 
-# Copy the binaries to the directory in the PATH.
+# Create necessary directories. The WORKDIR will also be the data directory.
+RUN mkdir -p certificates collections
+
+# Copy the binaries to a standard location in the PATH.
 COPY --from=builder /app/memory-tools-server /usr/local/bin/
 COPY --from=builder /app/memory-tools-client /usr/local/bin/
 
-# Copy the certificates and key to /root/certificates.
-COPY --from=builder /app/server.crt /root/certificates/
-COPY --from=builder /app/server.key /root/certificates/
+# Copy the certificates. The server looks for a relative 'certificates' directory.
+COPY --from=builder /app/certificates/server.crt ./certificates/
+COPY --from=builder /app/certificates/server.key ./certificates/
 
-# Copy the configuration file to /root/.
-COPY config.json /root/
+# Copy the configuration file.
+COPY config.json .
 
 # Copy the entrypoint script and give it execution permissions.
-COPY entrypoint.sh /root/
-RUN chmod +x /root/entrypoint.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Set the working directory where the app expects to find config.json and the certificates directory.
-WORKDIR /root/
-
-# Expose the server ports.
-#UNCOMMENT IF YOU USE DOCKER RUN -P#
-# EXPOSE 5876
+# Expose the server port.
+#EXPOSE 5876
 
 # Command to execute the entrypoint script when the container starts.
-CMD ["/root/entrypoint.sh"]
+ENTRYPOINT ["entrypoint.sh"]

@@ -1,5 +1,5 @@
 services:
-  app: # Define a service named 'app' for your Go application
+  server: # Define a service named 'server' for your Go application
     build:
       context: . # Look for the Dockerfile in the current directory
       dockerfile: Dockerfile # Specify the name of your Dockerfile

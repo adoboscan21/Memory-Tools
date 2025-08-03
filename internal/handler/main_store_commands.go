@@ -9,6 +9,12 @@ import (
 
 // handleMainStoreSet processes the CmdSet command.
 func (h *ConnectionHandler) handleMainStoreSet(conn net.Conn) {
+	// Authorization check: Only root can use the main store.
+	if !h.IsRoot {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can operate on the main store.", nil)
+		return
+	}
+
 	key, value, ttl, err := protocol.ReadSetCommand(conn)
 	if err != nil {
 		log.Printf("Error reading SET command from %s: %v", conn.RemoteAddr(), err)
@@ -23,6 +29,12 @@ func (h *ConnectionHandler) handleMainStoreSet(conn net.Conn) {
 
 // handleMainStoreGet processes the CmdGet command.
 func (h *ConnectionHandler) handleMainStoreGet(conn net.Conn) {
+	// Authorization check: Only root can use the main store.
+	if !h.IsRoot {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can operate on the main store.", nil)
+		return
+	}
+
 	key, err := protocol.ReadGetCommand(conn)
 	if err != nil {
 		log.Printf("Error reading GET command from %s: %v", conn.RemoteAddr(), err)

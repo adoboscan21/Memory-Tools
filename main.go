@@ -23,7 +23,6 @@ import (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // lastActivity tracks the last time a data operation occurred.
-// Using atomic.Value to safely update it across goroutines.
 var lastActivity atomic.Value
 
 // init sets the initial lastActivity time when the application starts.
@@ -31,14 +30,13 @@ func init() {
 	lastActivity.Store(time.Now())
 }
 
-// updateActivity updates the lastActivity timestamp.
-// This function will now implement the handler.ActivityUpdater interface.
+// updateActivityFunc is a helper type to implement the handler.ActivityUpdater interface.
+type updateActivityFunc func()
+
+// UpdateActivity updates the lastActivity timestamp.
 func (f updateActivityFunc) UpdateActivity() {
 	lastActivity.Store(time.Now())
 }
-
-// updateActivityFunc is a helper type to implement the ActivityUpdater interface.
-type updateActivityFunc func()
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -70,21 +68,22 @@ func main() {
 	adminUserKey := handler.UserPrefix + "admin"
 	if _, found := systemCollection.Get(adminUserKey); !found {
 		log.Println("Default admin user 'admin' not found. Creating a default admin user with password 'adminpass'.")
-		hashedPassword, hashErr := handler.HashPassword("adminpass")
-		if hashErr != nil {
-			log.Fatalf("Fatal error hashing default admin password: %v", hashErr)
+		hashedPassword, err := handler.HashPassword("adminpass")
+		if err != nil {
+			log.Fatalf("Fatal error hashing default admin password: %v", err)
 		}
 		adminUserInfo := handler.UserInfo{
 			Username:     "admin",
 			PasswordHash: hashedPassword,
-			IsRoot:       false, // Not root, regular admin for general access
+			IsRoot:       false,
+			// Admin can write to any collection but can only read the system collection.
+			Permissions: map[string]string{"*": "write", handler.SystemCollectionName: "read"},
 		}
-		adminUserInfoBytes, marshalErr := json.Marshal(adminUserInfo)
-		if marshalErr != nil {
-			log.Fatalf("Fatal error marshalling default admin user info: %v", marshalErr)
+		adminUserInfoBytes, err := json.Marshal(adminUserInfo)
+		if err != nil {
+			log.Fatalf("Fatal error marshalling default admin user info: %v", err)
 		}
 		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
-		// ASYNC SAVE: Enqueue save task for the system collection
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
 		log.Println("Default admin user 'admin' created with password 'adminpass'.")
 	} else {
@@ -95,21 +94,22 @@ func main() {
 	rootUserKey := handler.UserPrefix + "root"
 	if _, found := systemCollection.Get(rootUserKey); !found {
 		log.Println("Default root user 'root' not found. Creating a default root user with password 'rootpass'.")
-		hashedPassword, hashErr := handler.HashPassword("rootpass")
-		if hashErr != nil {
-			log.Fatalf("Fatal error hashing default root password: %v", hashErr)
+		hashedPassword, err := handler.HashPassword("rootpass")
+		if err != nil {
+			log.Fatalf("Fatal error hashing default root password: %v", err)
 		}
 		rootUserInfo := handler.UserInfo{
 			Username:     "root",
 			PasswordHash: hashedPassword,
-			IsRoot:       true, // This user is marked as root
+			IsRoot:       true,
+			// Root has universal write access.
+			Permissions: map[string]string{"*": "write"},
 		}
-		rootUserInfoBytes, marshalErr := json.Marshal(rootUserInfo)
-		if marshalErr != nil {
-			log.Fatalf("Fatal error marshalling default root user info: %v", marshalErr)
+		rootUserInfoBytes, err := json.Marshal(rootUserInfo)
+		if err != nil {
+			log.Fatalf("Fatal error marshalling default root user info: %v", err)
 		}
-		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0) // No TTL for system users
-		// ASYNC SAVE: Enqueue save task for the system collection
+		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
 		log.Println("Default root user 'root' created with password 'rootpass'.")
 	} else {
@@ -125,7 +125,7 @@ func main() {
 	// Configure TLS settings.
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12, // Recommended minimum TLS version for security.
+		MinVersion:   tls.VersionTLS12,
 	}
 
 	// Start TLS TCP server.
@@ -148,10 +148,10 @@ func main() {
 				log.Printf("Error accepting connection: %v", err)
 				continue
 			}
-			// Create a new handler instance for each connection to maintain per-connection state.
+			// Create a new handler instance for each connection.
 			go handler.NewConnectionHandler(mainInMemStore, collectionManager, updateActivityFunc(func() {
 				lastActivity.Store(time.Now())
-			}), conn).HandleConnection(conn) // Pass the net.Conn to the handler for IP check
+			}), conn).HandleConnection(conn)
 		}
 	}()
 
@@ -164,7 +164,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
 		defer ticker.Stop()
-		log.Printf("Starting TTL cleaner for main store and collections with interval of %s", cfg.TtlCleanInterval)
+		log.Printf("Starting TTL cleaner with interval of %s", cfg.TtlCleanInterval)
 
 		for {
 			select {
@@ -181,20 +181,20 @@ func main() {
 	// Goroutine to monitor for inactivity and trigger memory release to the OS.
 	idleMemoryCleanerStopChan := make(chan struct{})
 	go func() {
-		checkInterval := 2 * time.Minute // How often to check for inactivity
-		idleThreshold := 5 * time.Minute // Duration of inactivity to trigger memory release
+		checkInterval := 2 * time.Minute
+		idleThreshold := 5 * time.Minute
 
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
-		log.Printf("Idle memory cleaner started. Checking for inactivity every %s, with a threshold of %s.", checkInterval, idleThreshold)
+		log.Printf("Idle memory cleaner started. Check interval: %s, threshold: %s.", checkInterval, idleThreshold)
 
 		for {
 			select {
 			case <-ticker.C:
 				lastActive := lastActivity.Load().(time.Time)
 				if time.Since(lastActive) >= idleThreshold {
-					log.Println("No activity detected for a while. Requesting Go runtime to release OS memory...")
-					debug.FreeOSMemory() // Suggests the Go runtime to release unused memory to the OS
+					log.Println("Inactivity detected. Requesting Go runtime to release OS memory...")
+					debug.FreeOSMemory()
 				}
 			case <-idleMemoryCleanerStopChan:
 				log.Println("Idle memory cleaner received stop signal. Stopping.")
@@ -217,16 +217,12 @@ func main() {
 		log.Println("TCP listener closed.")
 	}
 
-	// Stop snapshot manager.
+	// Stop background tasks.
 	snapshotManager.Stop()
-
-	// Stop TTL cleaner goroutine.
 	close(ttlCleanStopChan)
-
-	// Stop the idle memory cleaner goroutine.
 	close(idleMemoryCleanerStopChan)
 
-	// Wait for the asynchronous collection saver to finish its queue.
+	// Wait for the asynchronous collection saver to finish.
 	log.Println("Waiting for all pending collection persistence tasks to complete...")
 	collectionManager.Wait()
 	log.Println("All pending collection persistence tasks completed.")
@@ -235,7 +231,7 @@ func main() {
 	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancelShutdown()
 
-	// Save final data to disk for main store and collections.
+	// Save final data to disk.
 	log.Println("Saving final data for main store before application exit...")
 	if err := persistence.SaveData(mainInMemStore); err != nil {
 		log.Printf("Error saving final data for main store during shutdown: %v", err)

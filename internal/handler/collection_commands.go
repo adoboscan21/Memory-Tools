@@ -19,9 +19,10 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
 		return
 	}
-	// Specific authorization check for _system collection (even if authenticated)
-	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can create collection '%s'", SystemCollectionName), nil)
+
+	// Authorization check
+	if !h.hasPermission(collectionName, "write") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
@@ -44,13 +45,15 @@ func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
 		return
 	}
-	if !h.CollectionManager.CollectionExists(collectionName) {
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
+
+	// Authorization check
+	if !h.hasPermission(collectionName, "write") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
-	// Specific authorization check for _system collection (even if authenticated)
-	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can delete collection '%s'", SystemCollectionName), nil)
+
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
 		return
 	}
 
@@ -63,14 +66,23 @@ func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 
 // handleCollectionList processes the CmdCollectionList command.
 func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
-	collectionNames := h.CollectionManager.ListCollections()
-	jsonNames, err := json.Marshal(collectionNames)
+	allCollectionNames := h.CollectionManager.ListCollections()
+	accessibleCollections := []string{}
+
+	// Filter collections based on read permission
+	for _, name := range allCollectionNames {
+		if h.hasPermission(name, "read") {
+			accessibleCollections = append(accessibleCollections, name)
+		}
+	}
+
+	jsonNames, err := json.Marshal(accessibleCollections)
 	if err != nil {
 		log.Printf("Error marshalling collection names to JSON: %v", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection names", nil)
 		return
 	}
-	if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Collections listed", jsonNames); err != nil {
+	if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Accessible collections listed", jsonNames); err != nil {
 		log.Printf("Error writing collection list response to %s: %v", conn.RemoteAddr(), err)
 	}
 }
@@ -87,13 +99,18 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name and field name cannot be empty", nil)
 		return
 	}
+
+	// Authorization check: Requires write permission to modify collection structure
+	if !h.hasPermission(collectionName, "write") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		return
+	}
+
 	if !h.CollectionManager.CollectionExists(collectionName) {
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		return
 	}
 
-	// This operation can be long, in a real-world scenario, you might do this in the background.
-	// For now, we do it synchronously.
 	log.Printf("User '%s' requested to create index on '%s' for collection '%s'", h.AuthenticatedUser, fieldName, collectionName)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.CreateIndex(fieldName)
@@ -101,7 +118,7 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index creation process for field '%s' on collection '%s' completed.", fieldName, collectionName), nil)
 }
 
-// NEW: handleCollectionIndexDelete processes the CmdCollectionIndexDelete command.
+// handleCollectionIndexDelete processes the CmdCollectionIndexDelete command.
 func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 	collectionName, fieldName, err := protocol.ReadCollectionIndexDeleteCommand(conn)
 	if err != nil {
@@ -113,6 +130,13 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name and field name cannot be empty", nil)
 		return
 	}
+
+	// Authorization check: Requires write permission
+	if !h.hasPermission(collectionName, "write") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		return
+	}
+
 	if !h.CollectionManager.CollectionExists(collectionName) {
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		return
@@ -125,7 +149,7 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index for field '%s' on collection '%s' deleted.", fieldName, collectionName), nil)
 }
 
-// NEW: handleCollectionIndexList processes the CmdCollectionIndexList command.
+// handleCollectionIndexList processes the CmdCollectionIndexList command.
 func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionIndexListCommand(conn)
 	if err != nil {
@@ -137,6 +161,13 @@ func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
 		return
 	}
+
+	// Authorization check: Requires read permission
+	if !h.hasPermission(collectionName, "read") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
+		return
+	}
+
 	if !h.CollectionManager.CollectionExists(collectionName) {
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		return

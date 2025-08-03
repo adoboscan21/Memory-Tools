@@ -25,10 +25,12 @@ type ActivityUpdater interface {
 type ConnectionHandler struct {
 	MainStore         store.DataStore
 	CollectionManager *store.CollectionManager
-	ActivityUpdater   ActivityUpdater // Dependency for updating activity
-	IsAuthenticated   bool            // Tracks authentication status for this connection
-	AuthenticatedUser string          // Stores the authenticated username
-	IsLocalhostConn   bool            // True if connection is from localhost
+	ActivityUpdater   ActivityUpdater   // Dependency for updating activity
+	IsAuthenticated   bool              // Tracks authentication status for this connection
+	AuthenticatedUser string            // Stores the authenticated username
+	IsLocalhostConn   bool              // True if connection is from localhost
+	IsRoot            bool              // Cache if the user is root
+	Permissions       map[string]string // Cache user permissions for quick lookups
 }
 
 // NewConnectionHandler creates a new instance of ConnectionHandler.
@@ -46,7 +48,8 @@ func NewConnectionHandler(mainStore store.DataStore, colManager *store.Collectio
 		ActivityUpdater:   updater,
 		IsAuthenticated:   false, // Initially not authenticated
 		AuthenticatedUser: "",
-		IsLocalhostConn:   isLocal, // Set based on connection origin
+		IsLocalhostConn:   isLocal,                 // Set based on connection origin
+		Permissions:       make(map[string]string), // Initialize empty map
 	}
 }
 
@@ -68,74 +71,77 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 
 		h.ActivityUpdater.UpdateActivity()
 
-		// --- MAIN COMMAND DISPATCH ---
-		switch cmdType {
-		case protocol.CmdAuthenticate:
+		// Authentication command can be run by anyone.
+		if cmdType == protocol.CmdAuthenticate {
 			h.handleAuthenticate(conn)
 			continue
+		}
 
+		// All other commands require authentication.
+		if !h.IsAuthenticated {
+			log.Printf("Unauthorized access attempt from %s for command %d. Connection not authenticated.", conn.RemoteAddr(), cmdType)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
+			continue
+		}
+
+		// If we reach here, the client is authenticated. Now, dispatch the command.
+		switch cmdType {
+		// Main Store Commands.
+		case protocol.CmdSet:
+			h.handleMainStoreSet(conn)
+		case protocol.CmdGet:
+			h.handleMainStoreGet(conn)
+
+		// Collection Management Commands.
+		case protocol.CmdCollectionCreate:
+			h.handleCollectionCreate(conn)
+		case protocol.CmdCollectionDelete:
+			h.handleCollectionDelete(conn)
+		case protocol.CmdCollectionList:
+			h.handleCollectionList(conn)
+		case protocol.CmdCollectionIndexCreate:
+			h.handleCollectionIndexCreate(conn)
+		case protocol.CmdCollectionIndexDelete:
+			h.handleCollectionIndexDelete(conn)
+		case protocol.CmdCollectionIndexList:
+			h.handleCollectionIndexList(conn)
+
+		// Collection Item Commands.
+		case protocol.CmdCollectionItemSet:
+			h.handleCollectionItemSet(conn)
+		case protocol.CmdCollectionItemSetMany:
+			h.handleCollectionItemSetMany(conn)
+		case protocol.CmdCollectionItemDeleteMany:
+			h.handleCollectionItemDeleteMany(conn)
+		case protocol.CmdCollectionItemGet:
+			h.handleCollectionItemGet(conn)
+		case protocol.CmdCollectionItemDelete:
+			h.handleCollectionItemDelete(conn)
+		case protocol.CmdCollectionItemList:
+			h.handleCollectionItemList(conn)
+		case protocol.CmdCollectionItemUpdate:
+			h.handleCollectionItemUpdate(conn)
+		case protocol.CmdCollectionItemUpdateMany:
+			h.handleCollectionItemUpdateMany(conn)
+
+		// Collection Query Command
+		case protocol.CmdCollectionQuery:
+			h.handleCollectionQuery(conn)
+
+		// User Management Commands
 		case protocol.CmdChangeUserPassword:
 			h.handleChangeUserPassword(conn)
-			continue
+		case protocol.CmdUserCreate:
+			h.handleUserCreate(conn)
+		case protocol.CmdUserUpdate:
+			h.handleUserUpdate(conn)
+		case protocol.CmdUserDelete:
+			h.handleUserDelete(conn)
 
 		default:
-			if !h.IsAuthenticated {
-				log.Printf("Unauthorized access attempt from %s for command %d. Connection not authenticated.", conn.RemoteAddr(), cmdType)
-				protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
-				continue
-			}
-
-			// If we reach here, the client is authenticated. Now, dispatch the command.
-			switch cmdType {
-			// Main Store Commands.
-			case protocol.CmdSet:
-				h.handleMainStoreSet(conn)
-			case protocol.CmdGet:
-				h.handleMainStoreGet(conn)
-
-			// Collection Management Commands.
-			case protocol.CmdCollectionCreate:
-				h.handleCollectionCreate(conn)
-			case protocol.CmdCollectionDelete:
-				h.handleCollectionDelete(conn)
-			case protocol.CmdCollectionList:
-				h.handleCollectionList(conn)
-			case protocol.CmdCollectionIndexCreate:
-				h.handleCollectionIndexCreate(conn)
-			case protocol.CmdCollectionIndexDelete:
-				h.handleCollectionIndexDelete(conn)
-			case protocol.CmdCollectionIndexList:
-				h.handleCollectionIndexList(conn)
-
-			// Collection Item Commands.
-			case protocol.CmdCollectionItemSet:
-				h.handleCollectionItemSet(conn)
-			case protocol.CmdCollectionItemSetMany:
-				h.handleCollectionItemSetMany(conn)
-			case protocol.CmdCollectionItemDeleteMany:
-				h.handleCollectionItemDeleteMany(conn)
-			case protocol.CmdCollectionItemGet:
-				h.handleCollectionItemGet(conn)
-			case protocol.CmdCollectionItemDelete:
-				h.handleCollectionItemDelete(conn)
-			case protocol.CmdCollectionItemList:
-				h.handleCollectionItemList(conn)
-			case protocol.CmdCollectionItemUpdate:
-				h.handleCollectionItemUpdate(conn)
-			// === INICIO MEJORA: AÑADIR UPDATE MANY AL SWITCH ===
-			case protocol.CmdCollectionItemUpdateMany:
-				h.handleCollectionItemUpdateMany(conn)
-			// === FIN MEJORA ===
-
-			// Collection Query Command
-			case protocol.CmdCollectionQuery:
-				h.handleCollectionQuery(conn)
-
-			default:
-				log.Printf("Received unhandled or unknown authenticated command type %d from client %s.", cmdType, conn.RemoteAddr())
-				if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil); err != nil {
-					log.Printf("Error writing bad command response to %s: %v", conn.RemoteAddr(), err)
-				}
+			log.Printf("Received unhandled or unknown authenticated command type %d from client %s.", cmdType, conn.RemoteAddr())
+			if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil); err != nil {
+				log.Printf("Error writing bad command response to %s: %v", conn.RemoteAddr(), err)
 			}
 		}
 	}

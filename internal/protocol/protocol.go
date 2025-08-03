@@ -19,24 +19,29 @@ const (
 	CmdCollectionCreate      // CREATE_COLLECTION collectionName
 	CmdCollectionDelete      // DELETE_COLLECTION collectionName
 	CmdCollectionList        // LIST_COLLECTIONS
-	CmdCollectionIndexCreate // NEW: CREATE_COLLECTION_INDEX collectionName, fieldName
-	CmdCollectionIndexDelete // NEW: DELETE_COLLECTION_INDEX collectionName, fieldName
-	CmdCollectionIndexList   // NEW: LIST_COLLECTION_INDEXES collectionName
+	CmdCollectionIndexCreate // CREATE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexDelete // DELETE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexList   // LIST_COLLECTION_INDEXES collectionName
 
 	// Collection Item Commands
 	CmdCollectionItemSet        // SET_COLLECTION_ITEM collectionName, key, value, ttl
-	CmdCollectionItemSetMany    // NEW: SET_COLLECTION_ITEMS_MANY collectionName, json_array
+	CmdCollectionItemSetMany    // SET_COLLECTION_ITEMS_MANY collectionName, json_array
 	CmdCollectionItemGet        // GET_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemDelete     // DELETE_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemList       // LIST_COLLECTION_ITEMS collectionName
-	CmdCollectionQuery          // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
-	CmdCollectionItemDeleteMany // NEW: DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
+	CmdCollectionQuery          // QUERY_COLLECTION collectionName, query_json
+	CmdCollectionItemDeleteMany // DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
 	CmdCollectionItemUpdate     // UPDATE_COLLECTION_ITEM collectionName, key, patch_value
-	CmdCollectionItemUpdateMany // ++NUEVO: UPDATE_COLLECTION_ITEMS_MANY collectionName, json_array
+	CmdCollectionItemUpdateMany // UPDATE_COLLECTION_ITEMS_MANY collectionName, json_array
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
-	CmdChangeUserPassword // CHANGE_USER_PASSWORD target_username, new_password (formerly CmdUpdatePassword)
+	CmdChangeUserPassword // CHANGE_USER_PASSWORD target_username, new_password
+
+	// User Management Commands
+	CmdUserCreate // USER_CREATE username, password, permissions_json
+	CmdUserUpdate // USER_UPDATE username, permissions_json
+	CmdUserDelete // USER_DELETE username
 )
 
 // ResponseStatus defines the status of a server response.
@@ -52,6 +57,86 @@ const (
 )
 
 var ByteOrder = binary.LittleEndian
+
+func WriteUserCreateCommand(w io.Writer, username, password string, permissionsJSON []byte) error {
+	if _, err := w.Write([]byte{byte(CmdUserCreate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	if err := WriteString(w, password); err != nil {
+		return fmt.Errorf("failed to write password: %w", err)
+	}
+	if err := WriteBytes(w, permissionsJSON); err != nil {
+		return fmt.Errorf("failed to write permissions: %w", err)
+	}
+	return nil
+}
+
+// ReadUserCreateCommand reads a USER_CREATE command.
+func ReadUserCreateCommand(r io.Reader) (username, password string, permissionsJSON []byte, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read username: %w", err)
+	}
+	password, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read password: %w", err)
+	}
+	permissionsJSON, err = ReadBytes(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read permissions: %w", err)
+	}
+	return username, password, permissionsJSON, nil
+}
+
+// WriteUserUpdateCommand writes a USER_UPDATE command.
+func WriteUserUpdateCommand(w io.Writer, username string, permissionsJSON []byte) error {
+	if _, err := w.Write([]byte{byte(CmdUserUpdate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	if err := WriteBytes(w, permissionsJSON); err != nil {
+		return fmt.Errorf("failed to write permissions: %w", err)
+	}
+	return nil
+}
+
+// ReadUserUpdateCommand reads a USER_UPDATE command.
+func ReadUserUpdateCommand(r io.Reader) (username string, permissionsJSON []byte, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read username: %w", err)
+	}
+	permissionsJSON, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read permissions: %w", err)
+	}
+	return username, permissionsJSON, nil
+}
+
+// WriteUserDeleteCommand writes a USER_DELETE command.
+func WriteUserDeleteCommand(w io.Writer, username string) error {
+	if _, err := w.Write([]byte{byte(CmdUserDelete)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	return nil
+}
+
+// ReadUserDeleteCommand reads a USER_DELETE command.
+func ReadUserDeleteCommand(r io.Reader) (username string, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read username: %w", err)
+	}
+	return username, nil
+}
 
 // WriteResponse sends a structured binary response over the connection.
 func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) error {

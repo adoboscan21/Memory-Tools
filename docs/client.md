@@ -4,7 +4,7 @@ The `memory-tools-client` is an interactive command-line interface (CLI) for dir
 
 ---
 
-### How to Run
+### ## How to Run
 
 To start the client, you must provide the address of the `memory-tools-server`. You can also include credentials for automatic login using flags.
 
@@ -12,279 +12,233 @@ To start the client, you must provide the address of the `memory-tools-server`. 
 
 ```bash
 ./bin/memory-tools-client
-./bin/memory-tools-client -u myuser -p mypassword localhost:5876
+./bin/memory-tools-client -u admin -p adminpass localhost:5876
 ```
 
 **Via Docker Compose:**
 
 ```bash
-docker exec -it containerid memory-tools-client localhost:5876
-docker exec -it containerid memory-tools-client -u myuser -p mypassword localhost:5876
+docker exec -it <container_id> ./memory-tools-client -u root -p rootpass localhost:5876
 ```
 
-Once connected, you will see the message: `Connected securely to Memory Tools server at <address>. Type 'help' for commands, 'exit' to quit.`
+Once connected, you will see the message: `Connected securely to Memory Tools server at <address>.`
 
 ---
 
-### Authentication
+### ## User and Permission Management (Admins)
 
-The client supports both automatic login via command-line flags and manual login via a command.
+Authentication is required to execute most commands. User and permission management requires special privileges.
 
-- **Automatic Login**: Use the `-u <username>` and `-p <password>` flags when starting the client. If provided, the client will attempt to authenticate immediately upon connection.
-- **Manual Login**: If you don't use the flags, or if automatic login fails, you can log in manually after connecting using the **`login`** command.
-  ```bash
-  login admin adminpass
-  ```
+- **`login <username> <password>`**
+  - **Description**: Authenticates the connection with the server.
   - **Example**:
     ```bash
     login root rootpass
     ```
-
----
-
-### Available Commands
-
-Here is a full list of all the commands you can use with the CLI client.
-
-#### General Commands
-
-- **`help`**: Displays a list of all available commands and their syntax, including detailed examples for collection queries.
-- **`clear`**: Clears the terminal screen.
-- **`exit`**: Disconnects from the server and quits the client.
-
-#### User Management Commands
-
-- **`login <username> <password>`**
-  - **Description**: Authenticates the connection with the server. This is necessary to execute most commands.
+- **`user create <username> <password> <permissions_json>`**
+  - **Description**: Creates a new user with a password and a set of permissions defined in a JSON object.
+  - **Permissions Required**: Write access (`"write"`) to the `_system` collection (typically `root` user only).
+  - **Example**: Create a user who can write to the `sales` collection and read from the `products` collection.
+    ```bash
+    user create salesuser strongpass123 {"sales":"write", "products":"read"}
+    ```
+- **`user update <username> <permissions_json>`**
+  - **Description**: Completely replaces an existing user's permissions with the new set provided.
+  - **Permissions Required**: Write access to the `_system` collection.
+  - **Example**: Update the `salesuser` to have read-only access to all collections.
+    ```bash
+    user update salesuser {"*":"read"}
+    ```
+- **`user delete <username>`**
+  - **Description**: Permanently deletes a user from the system.
+  - **Permissions Required**: Write access to the `_system` collection.
   - **Example**:
     ```bash
-    login admin adminpass
+    user delete salesuser
     ```
 - **`update password <target_username> <new_password>`**
-  - **Description**: Updates the password for a specified user.
-  - **Important**: This command can only be executed by the `root` user and requires the client to be connected from `localhost`.
+  - **Description**: Updates a user's password. A regular user can only change their own password. The `root` user can change anyone's password.
+  - **Permissions Required**: Must be authenticated. To change _another_ user's password, you must be `root`.
   - **Example**:
     ```bash
-    update password user1 newSecurePassword
-    ```
-
-#### Main Data Store Commands (Key-Value)
-
-These commands operate on the primary, default key-value store.
-
-- **`set <key> <value_json> [ttl_seconds]`**
-  - **Description**: Sets a key-value pair. The `value_json` must be valid JSON. `ttl_seconds` (optional) is the Time-To-Live in seconds; `0` means no expiration.
-  - **Examples**:
-    ```bash
-    set mykey "a simple string"
-    set product:123 {"name": "Laptop", "price": 1200} 3600
-    ```
-- **`get <key>`**
-  - **Description**: Retrieves the value associated with a given key.
-  - **Example**:
-    ```bash
-    get product:123
+    update password salesuser newSecurePass456
     ```
 
 ---
 
-### Collections
+### ## Main Store Commands (Root Only)
 
-A collection is an independent data store that allows for grouping items and performing more advanced operations like queries and bulk deletions.
+These commands operate on the primary key-value store and are **available only to the `root` user**.
 
-#### Collection Management Commands
-
-- **`collection create <collection_name>`**
-  - **Description**: Creates a new collection. If it already exists, it simply ensures its presence.
+- **`set <key> <value_json> [ttl_seconds]`**
+  - **Description**: Sets a key-value pair. `ttl_seconds` (optional) is the time-to-live in seconds.
   - **Example**:
     ```bash
-    collection create users
+    set server:config {"version": "2.1", "active": true} 3600
+    ```
+- **`get <key>`**
+  - **Description**: Retrieves the value associated with a key.
+  - **Example**:
+    ```bash
+    get server:config
+    ```
+
+---
+
+### ## Collection Commands
+
+#### Collection Management
+
+- **`collection create <collection_name>`**
+  - **Description**: Creates a new collection.
+  - **Example**:
+    ```bash
+    collection create products
     ```
 - **`collection delete <collection_name>`**
-  - **Description**: Deletes an entire collection and all its data, both from memory and disk.
+  - **Description**: Deletes an entire collection and all its data.
   - **Example**:
     ```bash
     collection delete old_logs
     ```
 - **`collection list`**
-  - **Description**: Lists the names of all existing collections.
+  - **Description**: Lists the names of all collections you have permission to read.
   - **Example**:
     ```bash
     collection list
     ```
 
-#### Collection Item Commands
+#### Collection Item Operations
 
-These commands allow you to manipulate key-value pairs within a specific collection.
-
-- **`collection item set <collection_name> [<key>] <value_json> [ttl_seconds]`**
-  - **Description**: Sets a key-value pair within the specified collection. `value_json` must be valid JSON. **If `<key>` is omitted, a unique UUID will be generated and used as the key, and it will also be injected into the JSON as an `_id` field.**
-  - **Examples**:
-    - With an explicit key:
-      ```bash
-      collection item set users user:123 {"email": "a@b.com", "name": "User A"} 3600
-      ```
-    - Without an explicit key (a UUID is generated for the key and the `_id` field):
-      ```bash
-      collection item set products {"name": "New Gadget", "price": 99.99} 180
-      ```
-- **`collection item set many <collection_name> <value_json_array>`**
-  - **Description**: Inserts multiple items at once into a collection. The `value_json_array` must be an array of JSON objects. **If a JSON object does not contain the `_id` field, a UUID will be generated for it.**
+- **`collection item set <collection> [<key>] <value_json> [ttl]`**
+  - **Description**: Saves an item in a collection. If `<key>` is omitted, a unique UUID is generated and also injected into the JSON as the `_id` field.
+  - **Example (with key)**:
+    ```bash
+    collection item set products laptop-01 {"name": "Laptop Pro", "price": 1500}
+    ```
+  - **Example (without key)**:
+    ```bash
+    collection item set products {"name": "RGB Keyboard", "price": 120}
+    ```
+- **`collection item get <collection> <key>`**
+  - **Description**: Gets an item from a collection by its key.
   - **Example**:
     ```bash
-    collection item set many products [{"name": "New Product", "price": 199.99},{"name": "Another Product", "price": 50}]
+    collection item get products laptop-01
     ```
-- **`collection item get <collection_name> <key>`**
-  - **Description**: Retrieves the value for a key from the specified collection.
+- **`collection item update <collection> <key> <patch_json>`**
+  - **Description**: Partially updates an existing item by applying the fields from the `patch_json`.
   - **Example**:
     ```bash
-    collection item get users user:123
+    collection item update products laptop-01 {"price": 1450, "stock": 45}
     ```
-- **`collection item delete <collection_name> <key>`**
-  - **Description**: Deletes a key-value pair from the specified collection.
+- **`collection item delete <collection> <key>`**
+  - **Description**: Deletes an item from a collection.
   - **Example**:
     ```bash
-    collection item delete users user:123
+    collection item delete products laptop-01
     ```
-- **`collection item delete many <collection_name> <value_json_array>`**
-  - **Description**: Deletes multiple items from a collection at once, based on the `_id` field of the objects in the `value_json_array`.
-  - **Example**:
-    ```bash
-    collection item delete many products [ {"_id": "27cb8c82-3cb0-43fc-b93c-399b6aac22f3"}, {"_id": "85c337b2-e05a-4691-97a7-2e58f582145a"} ]
-    ```
-- **`collection item list <collection_name>`**
-  - **Description**: Lists all non-expired key-value pairs (items) within the specified collection.
+- **`collection item list <collection>`**
+  - **Description**: Lists all items in a collection.
   - **Example**:
     ```bash
     collection item list products
     ```
 
----
+#### Batch Operations
 
-### Index Management Commands
-
-Indexes dramatically improve query performance by avoiding full scans of a collection's data.
-
-- **`collection index create <collection_name> <field_name>`**
-  - **Description**: Creates an index on a specific field within a collection. The server will scan all existing items to build the index.
+- **`collection item set many <collection> <json_array>`**
+  - **Description**: Inserts multiple items at once.
   - **Example**:
     ```bash
-    collection index create users city
+    collection item set many sales [{"salesperson": "ana", "amount": 200}, {"salesperson": "luis", "amount": 350}]
     ```
-- **`collection index list <collection_name>`**
-  - **Description**: Lists all the fields that are currently indexed for a given collection.
+- **`collection item update many <collection> <patch_json_array>`**
+  - **Description**: Updates multiple items at once. The array must contain objects with an `_id` and the `patch` to apply.
   - **Example**:
     ```bash
-    collection index list users
+    collection item update many sales [{"_id": "sale-uuid-1", "patch": {"status": "shipped"}}, {"_id": "sale-uuid-2", "patch": {"status": "shipped"}}]
     ```
-- **`collection index delete <collection_name> <field_name>`**
-  - **Description**: Deletes an existing index. Subsequent queries on this field will revert to performing a full collection scan.
+- **`collection item delete many <collection> <keys_json_array>`**
+
+  - **Description**: Deletes multiple items at once by providing a JSON array of their key strings.
   - **Example**:
+
     ```bash
-    collection index delete users city
+    collection item delete many products ["product-uuid-1", "product-uuid-2"]
     ```
 
 ---
 
-### Collection Query Command (`collection query`)
+### ## Index Commands
 
-This powerful command lets you perform complex queries to filter, sort, paginate, and aggregate data from a collection, similar to operations in a relational database.
+- **`collection index create <collection> <field_name>`**
 
-- **`collection query <collection_name> <query_json>`**
-  - **Description**: Executes a query against a specified collection. The `query_json` must be a valid JSON object defining your query criteria.
+  - **Description**: Creates an index on a field to accelerate queries.
   - **Example**:
+
+    ```bash
+    collection index create products category
+    ```
+
+- **`collection index list <collection>`**
+  - **Description**: Lists indexed fields in a collection.
+  - **Example**:
+    ```bash
+    collection index list products
+    ```
+- **`collection index delete <collection> <field_name>`**
+  - **Description**: Deletes an index.
+  - **Example**:
+
+    ```bash
+    collection index delete products category
+    ```
+
+---
+
+### ## Collection Query Command (`collection query`)
+
+This powerful command lets you filter, sort, paginate, and aggregate data.
+
+- **`collection query <collection> <query_json>`**
+  - **Description**: Executes a complex query defined in the `query_json`.
+  - **Example**: Find up to 5 products in the "Electronics" category.
     ```bash
     collection query products {"filter": {"field": "category", "op": "=", "value": "Electronics"}, "limit": 5}
     ```
 
----
+### ### Deep Query Examples
 
-### Query JSON Examples
+Here are advanced examples showcasing the depth of the query engine. Assume a `sales` collection with fields like `region`, `salesperson`, `amount`, `status`, and `date`.
 
-The `query_json` parameter supports a variety of operations:
-
-- **Filter (`filter` - WHERE clauses):**
-
-  - Equality:
-    ```json
-    { "filter": { "field": "status", "op": "=", "value": "active" } }
-    ```
-  - `AND` combined conditions:
-    ```json
-    {
-      "filter": {
-        "and": [
-          { "field": "age", "op": ">", "value": 30 },
-          { "field": "city", "op": "like", "value": "New%" }
-        ]
-      }
-    }
-    ```
-  - `OR` combined conditions:
-    ```json
-    {
-      "filter": {
-        "or": [
-          { "field": "category", "op": "=", "value": "Books" },
-          { "field": "stock", "op": "<", "value": 10 }
-        ]
-      }
-    }
-    ```
-  - `IN` operator (value is an array):
-    ```json
-    { "filter": { "field": "tags", "op": "in", "value": ["A", "B"] } }
-    ```
-  - `LIKE` operator (use `%` as a wildcard):
-    ```json
-    { "filter": { "field": "name", "op": "like", "value": "%Book%" } }
-    ```
-  - `BETWEEN` operator (value is a two-element array `[min, max]`):
-    ```json
-    { "filter": { "field": "price", "op": "between", "value": [100, 200] } }
-    ```
-  - `IS NULL` / `IS NOT NULL`:
-
-    ```json
-    { "filter": { "field": "description", "op": "is null" } }
-    { "filter": { "field": "description", "op": "is not null" } }
-    ```
-
-- **Ordering (`order_by`):**
-  - Sort results by one or more fields.
-  ```json
-  {
-    "order_by": [
-      { "field": "name", "direction": "asc" },
-      { "field": "age", "direction": "desc" }
-    ]
-  }
+- **Complex Nested Filtering**
+  - Find sales in the 'North' region that are either 'pending' OR have an amount greater than 1000.
   ```
-- **Limit/Offset (`limit`/`offset`):**
-  - Limit the number of results and/or skip a certain number of results.
-  ```json
-  { "limit": 5, "offset": 10 }
+  collection query sales {"filter":{"and":[{"field":"region","op":"=","value":"North"},{"or":[{"field":"status","op":"=","value":"pending"},{"field":"amount","op":">","value":1000}]}]}}
   ```
-- **Count (`count`):**
-  - Get a count of items matching the filter. If no other fields are in the query, an object with the key `count` is returned.
-  ```json
-  { "count": true, "filter": { "field": "active", "op": "=", "value": true } }
+- **Filtering with `NOT`**
+  - Find all sales that are NOT in the 'North' region.
   ```
-- **Aggregations (`aggregations`):**
-  - Perform aggregate functions on numeric fields. You can optionally group the results by one or more fields (`group_by`).
-  - Supported functions: `"sum"`, `"avg"`, `"min"`, `"max"`, `"count"`.
-  ```json
-  {
-    "aggregations": { "total_sales": { "func": "sum", "field": "sales" } },
-    "group_by": ["category"]
-  }
+  collection query sales {"filter":{"not":{"field":"region","op":"=","value":"North"}}}
   ```
-- **Distinct (`distinct`):**
-  - Get unique values for a specified field. This is a terminal operation and excludes other clauses like `limit` or `order_by`.
-  ```json
-  { "distinct": "city" }
+- **Multi-Field Sorting**
+  - List sales ordered first by region (A-Z), then by amount (highest to lowest).
+  ```bash
+  collection query sales {"order_by":[{"field":"region","direction":"asc"},{"field":"amount","direction":"desc"}]}
   ```
-
----
-
-**Tip**: When entering JSON values, especially for `set` or `collection item set`, make sure they are properly formatted and escaped if necessary for your shell. For `collection query`, the entire query object must be valid JSON.
+- **Multi-Aggregation Query**
+  - For each salesperson, calculate their total sales (`SUM`), average sale amount (`AVG`), and number of sales (`COUNT`).
+  ```bash
+  collection query sales {"aggregations":{"total_sold":{"func":"sum","field":"amount"},"average_sale":{"func":"avg","field":"amount"},"deal_count":{"func":"count","field":"_id"}},"group_by":["salesperson"]}
+  ```
+- **Aggregation with `HAVING` Clause**
+  - Find the total sales for each region, but **only show regions where the total is greater than 5000**.
+  ```bash
+  collection query sales {"aggregations":{"total_regional_sales":{"func":"sum","field":"amount"}},"group_by":["region"],"having":{"field":"total_regional_sales","op":">","value":5000}}
+  ```
+- **Putting It All Together: A Deep, Combined Query**
+  - **Goal**: From sales in the 'East' or 'West' regions, find the top 5 salespersons by their total sales amount, but only include salespersons whose average sale is over $200.
+  ```bash
+  collection query sales {"filter":{"field":"region","op":"in","value":["East","West"]},"aggregations":{"total_sales":{"func":"sum","field":"amount"},"average_sale":{"func":"avg","field":"amount"}},"group_by":["salesperson"],"having":{"field":"average_sale","op":">","value":200},"order_by":[{"field":"total_sales","direction":"desc"}],"limit":5}
+  ```

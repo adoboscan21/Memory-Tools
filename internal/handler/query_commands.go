@@ -27,12 +27,13 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty", nil)
 		return
 	}
-	// Specific authorization check for _system collection (even if authenticated)
-	if collectionName == SystemCollectionName && !(h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-		log.Printf("Unauthorized attempt to QUERY _system collection by user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: Only 'root' from localhost can query collection '%s'", SystemCollectionName), nil)
+
+	// Authorization check
+	if !h.hasPermission(collectionName, "read") {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
 	}
+
 	if !h.CollectionManager.CollectionExists(collectionName) {
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for query", collectionName), nil)
 		return

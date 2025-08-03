@@ -9,6 +9,35 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// hasPermission checks if the authenticated user has the required permission level for a collection.
+func (h *ConnectionHandler) hasPermission(collectionName string, requiredLevel string) bool {
+	// Root user bypasses all permission checks.
+	if h.IsRoot {
+		return true
+	}
+
+	// Get the specific permission for the collection.
+	level, specificFound := h.Permissions[collectionName]
+
+	// If not found, check for wildcard permission.
+	if !specificFound {
+		level, specificFound = h.Permissions["*"]
+	}
+
+	// If still no permission is found, access is denied.
+	if !specificFound {
+		return false
+	}
+
+	// "write" permission implies "read" permission.
+	if requiredLevel == "read" && level == "write" {
+		return true
+	}
+
+	// Direct match.
+	return level == requiredLevel
+}
+
 // handleAuthenticate processes the CmdAuthenticate command.
 func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 	username, password, err := protocol.ReadAuthenticateCommand(conn)
@@ -55,6 +84,9 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 	// Authentication successful!
 	h.IsAuthenticated = true
 	h.AuthenticatedUser = username
+	h.IsRoot = storedUserInfo.IsRoot           // Cache IsRoot status
+	h.Permissions = storedUserInfo.Permissions // Cache permissions
+
 	log.Printf("User '%s' authenticated successfully from %s.", username, conn.RemoteAddr())
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Authenticated as '%s'.", username), nil)
 }
@@ -73,10 +105,17 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 		return
 	}
 
-	if !(h.IsAuthenticated && h.AuthenticatedUser == "root" && h.IsLocalhostConn) {
-		log.Printf("Unauthorized attempt to change password for '%s' by user '%s' from %s (IsLocalhost: %t).",
-			targetUsername, h.AuthenticatedUser, conn.RemoteAddr(), h.IsLocalhostConn)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: This command can only be executed by 'root' from localhost.", nil)
+	// Authorization: Only users with write access to the system collection can change passwords.
+	if !h.hasPermission(SystemCollectionName, "write") {
+		log.Printf("Unauthorized attempt to change password for '%s' by user '%s' from %s.",
+			targetUsername, h.AuthenticatedUser, conn.RemoteAddr())
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: You do not have permission to change user passwords.", nil)
+		return
+	}
+
+	// But you can only change your own password, unless you are root.
+	if h.AuthenticatedUser != targetUsername && !h.IsRoot {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: You can only change your own password.", nil)
 		return
 	}
 
@@ -113,13 +152,11 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 	}
 
 	sysCol.Set(targetUserKey, updatedUserInfoBytes, 0)
-	if err := h.CollectionManager.SaveCollectionToDisk(SystemCollectionName, sysCol); err != nil {
-		log.Printf("Error saving system collection after password change for '%s': %v", targetUsername, err)
-		protocol.WriteResponse(conn, protocol.StatusError, "Failed to persist password change.", nil)
-	} else {
-		log.Printf("Password for user '%s' changed successfully by 'root' from %s.", targetUsername, conn.RemoteAddr())
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Password for user '%s' updated successfully.", targetUsername), nil)
-	}
+	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
+
+	log.Printf("Password for user '%s' changed successfully by '%s' from %s.", targetUsername, h.AuthenticatedUser, conn.RemoteAddr())
+	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Password for user '%s' updated successfully.", targetUsername), nil)
+
 }
 
 // HashPassword hashes a password using bcrypt.

@@ -26,7 +26,7 @@ import (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-// --- NEW: Define two separate completers for pre and post-login states ---
+// --- Completers for different authentication states ---
 
 var preLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("login"),
@@ -36,6 +36,11 @@ var preLoginCompleter = readline.NewPrefixCompleter(
 )
 
 var postLoginCompleter = readline.NewPrefixCompleter(
+	readline.PcItem("user",
+		readline.PcItem("create"),
+		readline.PcItem("update"),
+		readline.PcItem("delete"),
+	),
 	readline.PcItem("update password"),
 	readline.PcItem("set"),
 	readline.PcItem("get"),
@@ -51,6 +56,8 @@ var postLoginCompleter = readline.NewPrefixCompleter(
 		readline.PcItem("item",
 			readline.PcItem("set"),
 			readline.PcItem("set many"),
+			readline.PcItem("update"),
+			readline.PcItem("update many"),
 			readline.PcItem("get"),
 			readline.PcItem("delete"),
 			readline.PcItem("delete many"),
@@ -66,17 +73,17 @@ var postLoginCompleter = readline.NewPrefixCompleter(
 func main() {
 	log.SetFlags(0)
 
-	// Command-line arguments using flags.
+	// Command-line arguments
 	usernamePtr := flag.String("u", "", "Username for authentication")
 	passwordPtr := flag.String("p", "", "Password for authentication")
 	flag.Parse()
 
-	addr := "localhost:5876" // Default address.
+	addr := "localhost:5876" // Default address
 	if flag.NArg() > 0 {
-		addr = flag.Arg(0) // Use positional argument as address if provided.
+		addr = flag.Arg(0)
 	}
 
-	// TLS Configuration for Client.
+	// TLS Configuration
 	caCert, err := os.ReadFile("certificates/server.crt")
 	if err != nil {
 		log.Fatalf("Failed to read server certificate 'certificates/server.crt': %v", err)
@@ -85,12 +92,11 @@ func main() {
 	caCertPool.AppendCertsFromPEM(caCert)
 
 	tlsConfig := &tls.Config{
-		RootCAs:            caCertPool,
-		ServerName:         strings.Split(addr, ":")[0],
-		InsecureSkipVerify: false,
+		RootCAs:    caCertPool,
+		ServerName: strings.Split(addr, ":")[0],
 	}
 
-	// Connect using TLS.
+	// Connect using TLS
 	conn, err := tls.Dial("tcp", addr, tlsConfig)
 	if err != nil {
 		log.Fatalf("Failed to connect via TLS to %s: %v", addr, err)
@@ -99,38 +105,34 @@ func main() {
 
 	fmt.Printf("Connected securely to Memory Tools server at %s.\n", addr)
 
-	// Authentication state tracking
 	var isAuthenticated bool
 
-	// Initialize readline with the limited completer first.
+	// Initialize readline
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "> ",
 		HistoryFile:     "/tmp/readline_history.tmp",
-		AutoComplete:    preLoginCompleter, // MODIFIED
+		AutoComplete:    preLoginCompleter,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
-		VimMode:         false,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize readline: %v", err)
 	}
 	defer rl.Close()
 
-	// Automatic authentication if credentials are provided.
+	// Automatic authentication if credentials are provided
 	if *usernamePtr != "" && *passwordPtr != "" {
 		log.Printf("Attempting automatic login for user '%s'...", *usernamePtr)
 		var cmdBuf bytes.Buffer
-		writeErr := protocol.WriteAuthenticateCommand(&cmdBuf, *usernamePtr, *passwordPtr)
-		if writeErr != nil {
-			fmt.Printf("Error encoding login command: %v\n", writeErr)
-		} else {
+		if err := protocol.WriteAuthenticateCommand(&cmdBuf, *usernamePtr, *passwordPtr); err == nil {
 			if _, err := conn.Write(cmdBuf.Bytes()); err != nil {
 				log.Fatalf("Failed to send login command to server: %v", err)
 			}
-			status := readResponse(conn, "login")
-			if status == protocol.StatusOk {
+			if status := readResponse(conn, "login"); status == protocol.StatusOk {
 				isAuthenticated = true
-				rl.Config.AutoComplete = postLoginCompleter // MODIFIED: Update completer on success
+				rl.Config.AutoComplete = postLoginCompleter
+			} else {
+				os.Exit(1) // Exit if auto-login fails
 			}
 		}
 	}
@@ -139,18 +141,17 @@ func main() {
 		fmt.Println("Please login using: login <username> <password>")
 	}
 
+	// Main command loop
 	for {
 		input, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			if len(input) == 0 {
-				fmt.Println("Exiting client.")
-				return
+				break
 			} else {
 				continue
 			}
 		} else if err == io.EOF {
-			fmt.Println("Exiting client.")
-			return
+			break
 		}
 
 		input = strings.TrimSpace(input)
@@ -158,10 +159,9 @@ func main() {
 			continue
 		}
 
-		// Utility commands that should always work.
+		// Client-side utility commands
 		if input == "exit" {
-			fmt.Println("Exiting client.")
-			return
+			break
 		}
 		if input == "help" {
 			printHelp()
@@ -174,226 +174,201 @@ func main() {
 
 		cmd, rawArgs := getCommandAndRawArgs(input)
 
-		// Client-side authentication check
-		if !isAuthenticated {
-			if cmd != "login" {
-				fmt.Println("Error: You must log in first. Use: login <username> <password>")
-				continue // Skip to the next command input.
-			}
+		if !isAuthenticated && cmd != "login" {
+			fmt.Println("Error: You must log in first. Use: login <username> <password>")
+			continue
 		}
 
 		var cmdBuf bytes.Buffer
 		var writeErr error
 
+		// --- Command Processing ---
 		if cmd == "login" {
 			argsList := strings.Fields(rawArgs)
 			if len(argsList) != 2 {
-				fmt.Println("Error: login command requires username and password.")
 				fmt.Println("Usage: login <username> <password>")
 				continue
 			}
-			username := argsList[0]
-			password := argsList[1]
-			writeErr = protocol.WriteAuthenticateCommand(&cmdBuf, username, password)
-		} else if cmd == "update password" {
+			writeErr = protocol.WriteAuthenticateCommand(&cmdBuf, argsList[0], argsList[1])
+		} else if cmd == "user create" {
+			parts := strings.SplitN(rawArgs, " ", 3)
+			if len(parts) < 3 {
+				fmt.Println("Usage: user create <username> <password> <permissions_json>")
+				continue
+			}
+			username, password, permissionsJSON := parts[0], parts[1], parts[2]
+			if !json.Valid([]byte(permissionsJSON)) {
+				fmt.Println("Error: Invalid permissions JSON format.")
+				continue
+			}
+			writeErr = protocol.WriteUserCreateCommand(&cmdBuf, username, password, []byte(permissionsJSON))
+		} else if cmd == "user update" {
+			parts := strings.SplitN(rawArgs, " ", 2)
+			if len(parts) < 2 {
+				fmt.Println("Usage: user update <username> <permissions_json>")
+				continue
+			}
+			username, permissionsJSON := parts[0], parts[1]
+			if !json.Valid([]byte(permissionsJSON)) {
+				fmt.Println("Error: Invalid permissions JSON format.")
+				continue
+			}
+			writeErr = protocol.WriteUserUpdateCommand(&cmdBuf, username, []byte(permissionsJSON))
+		} else if cmd == "user delete" {
 			argsList := strings.Fields(rawArgs)
-			if len(argsList) != 2 {
-				fmt.Println("Error: 'update password' command requires <target_username> and <new_password>.")
-				fmt.Println("Usage: update password <target_username> <new_password>")
-				fmt.Println("Note: This command can only be executed by the 'root' user from localhost.")
+			if len(argsList) < 1 {
+				fmt.Println("Usage: user delete <username>")
 				continue
 			}
-			targetUsername := argsList[0]
-			newPassword := argsList[1]
-			writeErr = protocol.WriteChangeUserPasswordCommand(&cmdBuf, targetUsername, newPassword)
-		} else if cmd == "collection item set many" {
-			parts := strings.SplitN(rawArgs, " ", 2)
-			if len(parts) < 2 {
-				fmt.Println("Error: 'collection item set many' requires a collection name and a JSON array.")
-				fmt.Println("Usage: collection item set many <collection_name> <json_array>")
-				printHelp()
-				continue
-			}
-			collectionName := parts[0]
-			jsonArray := strings.TrimSpace(parts[1])
-
-			if !json.Valid([]byte(jsonArray)) {
-				fmt.Printf("Error: Invalid JSON array: '%s'\n", jsonArray)
-				continue
-			}
-			writeErr = protocol.WriteCollectionItemSetManyCommand(&cmdBuf, collectionName, []byte(jsonArray))
-
-		} else if cmd == "collection item delete many" {
-			parts := strings.SplitN(rawArgs, " ", 2)
-			if len(parts) < 2 {
-				fmt.Println("Error: 'collection item delete many' requires a collection name and a JSON array of objects.")
-				fmt.Println("Usage: collection item delete many <collection_name> <json_array_of_objects>")
-				printHelp()
-				continue
-			}
-
-			collectionName := parts[0]
-			jsonArray := strings.TrimSpace(parts[1])
-
-			if !json.Valid([]byte(jsonArray)) {
-				fmt.Printf("Error: Invalid JSON array: '%s'\n", jsonArray)
-				continue
-			}
-
-			var records []map[string]any
-			if err := json.Unmarshal([]byte(jsonArray), &records); err != nil {
-				fmt.Printf("Error parsing the JSON array: %v\n", err)
-				continue
-			}
-
-			var keysToDelete []string
-			for _, record := range records {
-				if id, ok := record["_id"].(string); ok && id != "" {
-					keysToDelete = append(keysToDelete, id)
-				} else {
-					fmt.Printf("Warning: Found an object without a valid '_id' field. Object omitted: %+v\n", record)
-				}
-			}
-
-			if len(keysToDelete) == 0 {
-				fmt.Println("Error: No valid keys ('_id') found in the JSON array to delete.")
-				continue
-			}
-
-			writeErr = protocol.WriteCollectionItemDeleteManyCommand(&cmdBuf, collectionName, keysToDelete)
+			writeErr = protocol.WriteUserDeleteCommand(&cmdBuf, argsList[0])
 		} else {
+			// Fallback to the large switch for all other commands
 			switch cmd {
-			case "set":
-				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 1)
-				if parseErr != nil {
-					fmt.Printf("Error parsing 'set' command: %v\n", parseErr)
-					printHelp()
+			case "update password":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) != 2 {
+					fmt.Println("Usage: update password <target_username> <new_password>")
 					continue
 				}
-				key := parsedArgs[0]
-				writeErr = protocol.WriteSetCommand(&cmdBuf, key, []byte(jsonVal), time.Duration(ttlSeconds)*time.Second)
+				writeErr = protocol.WriteChangeUserPasswordCommand(&cmdBuf, argsList[0], argsList[1])
+			case "set":
+				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 1, false)
+				if parseErr != nil {
+					fmt.Printf("Error parsing 'set' command: %v\n", parseErr)
+					continue
+				}
+				writeErr = protocol.WriteSetCommand(&cmdBuf, parsedArgs[0], []byte(jsonVal), time.Duration(ttlSeconds)*time.Second)
 
 			case "get":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: get command requires a key.")
-					printHelp()
+					fmt.Println("Usage: get <key>")
 					continue
 				}
-				key := argsList[0]
-				writeErr = protocol.WriteGetCommand(&cmdBuf, key)
+				writeErr = protocol.WriteGetCommand(&cmdBuf, argsList[0])
 
 			case "collection create":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection create command requires a collection name.")
-					printHelp()
+					fmt.Println("Usage: collection create <collection_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				writeErr = protocol.WriteCollectionCreateCommand(&cmdBuf, collectionName)
+				writeErr = protocol.WriteCollectionCreateCommand(&cmdBuf, argsList[0])
 			case "collection delete":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection delete command requires a collection name.")
-					printHelp()
+					fmt.Println("Usage: collection delete <collection_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				writeErr = protocol.WriteCollectionDeleteCommand(&cmdBuf, collectionName)
+				writeErr = protocol.WriteCollectionDeleteCommand(&cmdBuf, argsList[0])
 			case "collection list":
 				writeErr = protocol.WriteCollectionListCommand(&cmdBuf)
 
 			case "collection index create":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection index create requires a collection name and a field name.")
-					printHelp()
+					fmt.Println("Usage: collection index create <collection_name> <field_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				fieldName := argsList[1]
-				writeErr = protocol.WriteCollectionIndexCreateCommand(&cmdBuf, collectionName, fieldName)
+				writeErr = protocol.WriteCollectionIndexCreateCommand(&cmdBuf, argsList[0], argsList[1])
 
 			case "collection index delete":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection index delete requires a collection name and a field name.")
-					printHelp()
+					fmt.Println("Usage: collection index delete <collection_name> <field_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				fieldName := argsList[1]
-				writeErr = protocol.WriteCollectionIndexDeleteCommand(&cmdBuf, collectionName, fieldName)
+				writeErr = protocol.WriteCollectionIndexDeleteCommand(&cmdBuf, argsList[0], argsList[1])
 
 			case "collection index list":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection index list requires a collection name.")
-					printHelp()
+					fmt.Println("Usage: collection index list <collection_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				writeErr = protocol.WriteCollectionIndexListCommand(&cmdBuf, collectionName)
+				writeErr = protocol.WriteCollectionIndexListCommand(&cmdBuf, argsList[0])
 
 			case "collection item set":
-				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 2)
+				parsedArgs, jsonVal, ttlSeconds, parseErr := parseArgsForJSON(rawArgs, 2, true)
 				if parseErr != nil {
 					fmt.Printf("Error parsing 'collection item set' command: %v\n", parseErr)
-					printHelp()
 					continue
 				}
-				collectionName := parsedArgs[0]
-				key := parsedArgs[1]
-				writeErr = protocol.WriteCollectionItemSetCommand(&cmdBuf, collectionName, key, []byte(jsonVal), time.Duration(ttlSeconds)*time.Second)
+				writeErr = protocol.WriteCollectionItemSetCommand(&cmdBuf, parsedArgs[0], parsedArgs[1], []byte(jsonVal), time.Duration(ttlSeconds)*time.Second)
 
+			case "collection item update":
+				parsedArgs, jsonVal, _, parseErr := parseArgsForJSON(rawArgs, 2, false)
+				if parseErr != nil {
+					fmt.Printf("Error parsing 'collection item update' command: %v\n", parseErr)
+					continue
+				}
+				writeErr = protocol.WriteCollectionItemUpdateCommand(&cmdBuf, parsedArgs[0], parsedArgs[1], []byte(jsonVal))
 			case "collection item get":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection item get requires a collection name and a key.")
-					printHelp()
+					fmt.Println("Usage: collection item get <collection_name> <key>")
 					continue
 				}
-				collectionName := argsList[0]
-				key := argsList[1]
-				writeErr = protocol.WriteCollectionItemGetCommand(&cmdBuf, collectionName, key)
+				writeErr = protocol.WriteCollectionItemGetCommand(&cmdBuf, argsList[0], argsList[1])
 			case "collection item delete":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 2 {
-					fmt.Println("Error: collection item delete requires a collection name and a key.")
-					printHelp()
+					fmt.Println("Usage: collection item delete <collection_name> <key>")
 					continue
 				}
-				collectionName := argsList[0]
-				key := argsList[1]
-				writeErr = protocol.WriteCollectionItemDeleteCommand(&cmdBuf, collectionName, key)
+				writeErr = protocol.WriteCollectionItemDeleteCommand(&cmdBuf, argsList[0], argsList[1])
 			case "collection item list":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) < 1 {
-					fmt.Println("Error: collection item list requires a collection name.")
-					printHelp()
+					fmt.Println("Usage: collection item list <collection_name>")
 					continue
 				}
-				collectionName := argsList[0]
-				writeErr = protocol.WriteCollectionItemListCommand(&cmdBuf, collectionName)
-
+				writeErr = protocol.WriteCollectionItemListCommand(&cmdBuf, argsList[0])
+			case "collection item set many":
+				parts := strings.SplitN(rawArgs, " ", 2)
+				if len(parts) < 2 {
+					fmt.Println("Usage: collection item set many <collection_name> <json_array>")
+					continue
+				}
+				if !json.Valid([]byte(parts[1])) {
+					fmt.Println("Error: Invalid JSON array format.")
+					continue
+				}
+				writeErr = protocol.WriteCollectionItemSetManyCommand(&cmdBuf, parts[0], []byte(parts[1]))
+			case "collection item update many":
+				parts := strings.SplitN(rawArgs, " ", 2)
+				if len(parts) < 2 {
+					fmt.Println("Usage: collection item update many <collection_name> <patch_json_array>")
+					continue
+				}
+				if !json.Valid([]byte(parts[1])) {
+					fmt.Println("Error: Invalid patch JSON array format.")
+					continue
+				}
+				writeErr = protocol.WriteCollectionItemUpdateManyCommand(&cmdBuf, parts[0], []byte(parts[1]))
+			case "collection item delete many":
+				parts := strings.SplitN(rawArgs, " ", 2)
+				if len(parts) < 2 {
+					fmt.Println("Usage: collection item delete many <collection_name> <keys_json_array>")
+					continue
+				}
+				var keysToDelete []string
+				if err := json.Unmarshal([]byte(parts[1]), &keysToDelete); err != nil {
+					fmt.Printf("Error parsing keys JSON array: %v\n", err)
+					continue
+				}
+				writeErr = protocol.WriteCollectionItemDeleteManyCommand(&cmdBuf, parts[0], keysToDelete)
 			case "collection query":
 				parts := strings.SplitN(rawArgs, " ", 2)
 				if len(parts) < 2 {
-					fmt.Println("Error: collection query command requires a collection name and a query JSON.")
 					fmt.Println("Usage: collection query <collection_name> <query_json>")
-					printHelp()
 					continue
 				}
-				collectionName := parts[0]
-				queryJSON := strings.TrimSpace(parts[1])
-
-				if !json.Valid([]byte(queryJSON)) {
-					fmt.Printf("Error: Invalid JSON query: '%s'\n", queryJSON)
+				if !json.Valid([]byte(parts[1])) {
+					fmt.Println("Error: Invalid query JSON format.")
 					continue
 				}
-				writeErr = protocol.WriteCollectionQueryCommand(&cmdBuf, collectionName, []byte(queryJSON))
-
+				writeErr = protocol.WriteCollectionQueryCommand(&cmdBuf, parts[0], []byte(parts[1]))
 			default:
 				fmt.Printf("Error: Unknown command '%s'. Type 'help' for commands.\n", cmd)
 				continue
@@ -409,20 +384,26 @@ func main() {
 			log.Fatalf("Failed to send command to server: %v", err)
 		}
 
-		// Update authentication status on successful login.
 		status := readResponse(conn, cmd)
 		if cmd == "login" && status == protocol.StatusOk {
 			isAuthenticated = true
-			rl.Config.AutoComplete = postLoginCompleter // MODIFIED: Update completer on success
+			rl.Config.AutoComplete = postLoginCompleter
 		}
 	}
+	fmt.Println("Exiting client.")
 }
 
 // getCommandAndRawArgs parses the input string into a command and its raw arguments.
-func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
+func getCommandAndRawArgs(input string) (string, string) {
 	multiWordCommands := []string{
+		"user create",
+		"user update",
+		"user delete",
+		"update password",
+		"collection item update many",
 		"collection item set many",
 		"collection item delete many",
+		"collection item update",
 		"collection item set",
 		"collection item get",
 		"collection item delete",
@@ -434,78 +415,62 @@ func getCommandAndRawArgs(input string) (cmd string, rawArgs string) {
 		"collection delete",
 		"collection list",
 		"collection query",
-		"update password",
 	}
 
 	for _, mwCmd := range multiWordCommands {
 		if strings.HasPrefix(input, mwCmd) {
-			remaining := strings.TrimSpace(input[len(mwCmd):])
-			return mwCmd, remaining
+			return mwCmd, strings.TrimSpace(input[len(mwCmd):])
 		}
 	}
 
-	firstSpace := strings.Index(input, " ")
-	if firstSpace == -1 {
-		return input, ""
+	parts := strings.SplitN(input, " ", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
 	}
-	cmd = input[:firstSpace]
-	rawArgs = strings.TrimSpace(input[firstSpace:])
-	return cmd, rawArgs
+	return parts[0], parts[1]
 }
 
-// parseArgsForJSON parses arguments that include a JSON string and an optional TTL.
-func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
+// parseArgsForJSON parses arguments for commands that include a JSON string.
+func parseArgsForJSON(rawArgs string, fixedArgCount int, isKeyOptionalInSet bool) (leadingArgs []string, jsonString string, ttlSeconds int64, err error) {
 	parts := strings.Fields(rawArgs)
-
-	isKeyOptional := (fixedArgCount == 2)
-
-	if !isKeyOptional {
+	if isKeyOptionalInSet {
+		if len(parts) < 1 {
+			return nil, "", 0, fmt.Errorf("not enough arguments, need at least collection name and JSON value")
+		}
+	} else {
 		if len(parts) < fixedArgCount+1 {
 			return nil, "", 0, fmt.Errorf("not enough arguments provided (need %d leading args + JSON value)", fixedArgCount)
 		}
-	} else {
-		if len(parts) < 1 {
-			return nil, "", 0, fmt.Errorf("not enough arguments for collection item set (need collection name and JSON, or collection name, key, and JSON)")
-		}
 	}
 
+	jsonPartStartIndex := 0
 	leadingArgs = make([]string, fixedArgCount)
-	var actualJsonStart int
-	var hasExplicitKey = true
 
-	if isKeyOptional {
-		collectionName := parts[0]
-		leadingArgs[0] = collectionName
-
-		if len(parts) >= fixedArgCount {
-			potentialKeyCandidate := parts[fixedArgCount-1]
-			if strings.HasPrefix(potentialKeyCandidate, "{") || strings.HasPrefix(potentialKeyCandidate, "[") {
-				hasExplicitKey = false
-				leadingArgs[1] = uuid.New().String()
-				actualJsonStart = fixedArgCount - 1
-			} else {
-				leadingArgs[1] = potentialKeyCandidate
-				actualJsonStart = fixedArgCount
-			}
+	if isKeyOptionalInSet {
+		leadingArgs[0] = parts[0] // collection name
+		if len(parts) > 1 && (strings.HasPrefix(parts[1], "{") || strings.HasPrefix(parts[1], "[")) {
+			leadingArgs[1] = uuid.New().String() // Generate key
+			jsonPartStartIndex = 1
+			fmt.Printf("Note: Key not provided. Generated key: '%s'\n", leadingArgs[1])
+		} else if len(parts) > 2 {
+			leadingArgs[1] = parts[1] // key is provided
+			jsonPartStartIndex = 2
 		} else {
-			return nil, "", 0, fmt.Errorf("missing key and/or JSON value for collection item set")
+			return nil, "", 0, fmt.Errorf("missing JSON value for 'collection item set'")
 		}
 	} else {
 		for i := 0; i < fixedArgCount; i++ {
 			leadingArgs[i] = parts[i]
 		}
-		actualJsonStart = fixedArgCount
+		jsonPartStartIndex = fixedArgCount
 	}
 
-	jsonPartStartIndex := actualJsonStart
 	potentialTTLStr := parts[len(parts)-1]
-	ttlSeconds = 0
 	isLastPartTTL := false
-
-	if len(parts) > jsonPartStartIndex {
+	if len(parts) > jsonPartStartIndex+1 {
 		if val, err := strconv.ParseInt(potentialTTLStr, 10, 64); err == nil {
-			isLastPartTTL = true
 			ttlSeconds = val
+			isLastPartTTL = true
 		}
 	}
 
@@ -519,26 +484,6 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 	}
 
 	jsonString = strings.Join(parts[jsonPartStartIndex:jsonPartEndIndex], " ")
-	jsonString = strings.TrimSpace(jsonString)
-
-	if len(jsonString) == 0 {
-		return nil, "", 0, fmt.Errorf("JSON value cannot be empty (use {} or [])")
-	}
-
-	if isKeyOptional && !hasExplicitKey {
-		var jsonData map[string]any
-		if err := json.Unmarshal([]byte(jsonString), &jsonData); err != nil {
-			return nil, "", 0, fmt.Errorf("invalid initial JSON for _id injection: %w", err)
-		}
-		jsonData["_id"] = leadingArgs[fixedArgCount-1]
-		updatedJSONBytes, err := json.Marshal(jsonData)
-		if err != nil {
-			return nil, "", 0, fmt.Errorf("failed to marshal JSON after _id injection: %w", err)
-		}
-		jsonString = string(updatedJSONBytes)
-		fmt.Printf("Note: Key not provided. Generated key: '%s' and injected '_id' into JSON.\n", leadingArgs[fixedArgCount-1])
-	}
-
 	if !json.Valid([]byte(jsonString)) {
 		return nil, "", 0, fmt.Errorf("invalid JSON value: '%s'", jsonString)
 	}
@@ -546,97 +491,62 @@ func parseArgsForJSON(rawArgs string, fixedArgCount int) (leadingArgs []string, 
 	return leadingArgs, jsonString, ttlSeconds, nil
 }
 
-// readResponse now returns the status code from the server.
+// readResponse reads and displays the structured response from the server.
 func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 	statusByte := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusByte); err != nil {
-		fmt.Printf("Error: Failed to read response status: %v\n", err)
+		fmt.Printf("\nError: Failed to read response status from server: %v\n", err)
 		return protocol.StatusError
 	}
 	status := protocol.ResponseStatus(statusByte[0])
 
-	msgLenBytes := make([]byte, 4)
-	if _, err := io.ReadFull(conn, msgLenBytes); err != nil {
-		fmt.Printf("Error: Failed to read message length: %v\n", err)
+	msg, err := protocol.ReadString(conn)
+	if err != nil {
+		fmt.Printf("\nError: Failed to read response message from server: %v\n", err)
 		return protocol.StatusError
 	}
-	msgLen := protocol.ByteOrder.Uint32(msgLenBytes)
-	msgBytes := make([]byte, msgLen)
-	if _, err := io.ReadFull(conn, msgBytes); err != nil {
-		fmt.Printf("Error: Failed to read message: %v\n", err)
-		return protocol.StatusError
-	}
-	message := string(msgBytes)
 
-	dataLenBytes := make([]byte, 4)
-	if _, err := io.ReadFull(conn, dataLenBytes); err != nil {
-		fmt.Printf("Error: Failed to read data length: %v\n", err)
+	dataBytes, err := protocol.ReadBytes(conn)
+	if err != nil {
+		fmt.Printf("\nError: Failed to read response data from server: %v\n", err)
 		return protocol.StatusError
-	}
-	dataLen := protocol.ByteOrder.Uint32(dataLenBytes)
-	dataBytes := make([]byte, dataLen)
-	if dataLen > 0 {
-		if _, err := io.ReadFull(conn, dataBytes); err != nil {
-			fmt.Printf("Error: Failed to read data: %v\n", err)
-			return protocol.StatusError
-		}
 	}
 
 	fmt.Printf("    Status: %s (%d)\n", getStatusString(status), status)
-	fmt.Printf("    Message: %s\n", message)
-	if dataLen > 0 {
-		var decodedData []byte
-		var decodeErr error
+	fmt.Printf("    Message: %s\n", msg)
 
-		isCollectionItemListSystemCmd := (lastCmd == "collection item list" && strings.Contains(message, "from collection '_system' retrieved"))
+	if len(dataBytes) > 0 {
+		var finalDataForPrint []byte = dataBytes
 
-		if isCollectionItemListSystemCmd || lastCmd == "collection query" || lastCmd == "collection index list" {
-			decodedData = dataBytes
-		} else if lastCmd == "get" || lastCmd == "collection item get" {
-			decodedData = dataBytes
-		} else if lastCmd == "collection item list" {
+		// --- INICIO DE LA CORRECCIÓN ---
+		// Special handling for 'collection item list' to decode Base64 values
+		if lastCmd == "collection item list" && status == protocol.StatusOk {
 			var rawMap map[string]string
-			if err := json.Unmarshal(dataBytes, &rawMap); err != nil {
-				decodeErr = fmt.Errorf("failed to unmarshal raw map for item list: %w", err)
-			} else {
+			if err := json.Unmarshal(dataBytes, &rawMap); err == nil {
 				decodedMap := make(map[string]any)
-				for k, v := range rawMap {
-					decodedVal, err := base64.StdEncoding.DecodeString(v)
+				for key, b64Value := range rawMap {
+					decodedValue, err := base64.StdEncoding.DecodeString(b64Value)
 					if err != nil {
-						log.Printf("Warning: Failed to Base64 decode value for key '%s' in collection list: %v", k, err)
-						decodedMap[k] = v
+						decodedMap[key] = b64Value
+						continue
+					}
+					var jsonValue any
+					if err := json.Unmarshal(decodedValue, &jsonValue); err != nil {
+						decodedMap[key] = string(decodedValue)
 					} else {
-						var jsonVal any
-						if err := json.Unmarshal(decodedVal, &jsonVal); err != nil {
-							log.Printf("Warning: Failed to unmarshal decoded JSON for key '%s' in collection list: %v", k, err)
-							decodedMap[k] = string(decodedVal)
-						} else {
-							decodedMap[k] = jsonVal
-						}
+						decodedMap[key] = jsonValue
 					}
 				}
-				dataBytes, decodeErr = json.Marshal(decodedMap)
-				if decodeErr != nil {
-					decodeErr = fmt.Errorf("failed to marshal decoded map for item list: %w", decodeErr)
-				}
-				decodedData = dataBytes
+				finalDataForPrint, _ = json.Marshal(decodedMap)
 			}
-		} else {
-			decodedData = dataBytes
 		}
+		// --- FIN DE LA CORRECCIÓN ---
 
-		if decodeErr != nil || !json.Valid(decodedData) {
-			if decodeErr != nil {
-				fmt.Printf("    Warning: Failed to decode/process data: %v\n", decodeErr)
-			}
-			fmt.Printf("    Data (Raw):\n%s\n", string(dataBytes))
+		var prettyJSON bytes.Buffer
+		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "    "); err == nil {
+			fmt.Printf("    Data (JSON):\n%s\n", prettyJSON.String())
 		} else {
-			var prettyJSON bytes.Buffer
-			if err := stdjson.Indent(&prettyJSON, decodedData, "    ", "    "); err == nil {
-				fmt.Printf("    Data (JSON):\n%s\n", prettyJSON.String())
-			} else {
-				fmt.Printf("    Data (Raw - not valid JSON for pretty print):\n%s\n", string(decodedData))
-			}
+			fmt.Printf("    Data (Raw):\n%s\n", string(finalDataForPrint))
 		}
 	}
 	fmt.Println("---")
@@ -663,7 +573,7 @@ func getStatusString(s protocol.ResponseStatus) string {
 	}
 }
 
-// clearScreen clears the terminal screen based on the operating system.
+// clearScreen clears the terminal screen.
 func clearScreen() {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -672,8 +582,7 @@ func clearScreen() {
 	case "linux", "darwin":
 		cmd = exec.Command("clear")
 	default:
-		fmt.Println("Cannot clear screen: Unsupported operating system.")
-		return
+		return // Unsupported OS
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Run()
@@ -682,41 +591,37 @@ func clearScreen() {
 // printHelp displays the available commands and their usage.
 func printHelp() {
 	fmt.Println("\nAvailable Commands:")
+	fmt.Println("--- Auth ---")
 	fmt.Println("    login <username> <password>")
 	fmt.Println("    update password <target_username> <new_password>")
+	fmt.Println("\n--- User Management (Requires write access to _system) ---")
+	fmt.Println(`    user create <username> <password> '{"<collection>":"<perm>", "*":"read"}'`)
+	fmt.Println(`    user update <username> '{"<collection>":"<perm>"}'`)
+	fmt.Println("    user delete <username>")
+	fmt.Println("\n--- Main Store ---")
 	fmt.Println("    set <key> <value_json> [ttl_seconds]")
 	fmt.Println("    get <key>")
-	fmt.Println("    collection create <collection_name>")
-	fmt.Println("    collection delete <collection_name>")
+	fmt.Println("\n--- Collections ---")
+	fmt.Println("    collection create <name>")
+	fmt.Println("    collection delete <name>")
 	fmt.Println("    collection list")
-	fmt.Println("    collection index create <collection_name> <field_name>")
-	fmt.Println("    collection index delete <collection_name> <field_name>")
-	fmt.Println("    collection index list <collection_name>")
-	fmt.Println("    collection item set <collection_name> [<key>] <value_json> [ttl_seconds] (Key is optional, UUID generated if omitted)")
-	fmt.Println("    collection item set many <collection_name> <value_json_array>")
-	fmt.Println("    collection item get <collection_name> <key>")
-	fmt.Println("    collection item delete <collection_name> <key>")
-	fmt.Println("    collection item delete many <collection_name> <value_json_array>")
-	fmt.Println("    collection item list <collection_name>")
-	fmt.Println("    collection query <collection_name> <query_json>")
-	fmt.Println("    clear")
-	fmt.Println("    exit")
-	fmt.Println("---")
-	fmt.Println("Query JSON Examples:")
-	fmt.Println("    Filter (WHERE):")
-	fmt.Println(`        {"filter": {"field": "status", "op": "=", "value": "active"}}`)
-	fmt.Println(`        {"filter": {"and": [{"field": "age", "op": ">", "value": 30}, {"field": "city", "op": "like", "value": "New%"}]}}`)
-	fmt.Println(`        {"filter": {"field": "tags", "op": "in", "value": ["A", "B"]}}`)
-	fmt.Println(`        {"filter": {"field": "description", "op": "is not null"}}`)
-	fmt.Println("    Order By:")
-	fmt.Println(`        {"order_by": [{"field": "name", "direction": "asc"}, {"field": "age", "direction": "desc"}]}`)
-	fmt.Println("    Limit/Offset:")
-	fmt.Println(`        {"limit": 5, "offset": 10}`)
-	fmt.Println("    Count:")
-	fmt.Println(`        {"count": true, "filter": {"field": "active", "op": "=", "value": true}}`)
-	fmt.Println("    Aggregations (SUM, AVG, MIN, MAX):")
-	fmt.Println(`        {"aggregations": {"total_sales": {"func": "sum", "field": "sales"}}, "group_by": ["category"]}`)
-	fmt.Println("    Distinct:")
-	fmt.Println(`        {"distinct": "city"}`)
-	fmt.Println("---")
+	fmt.Println("\n--- Collection Indexes ---")
+	fmt.Println("    collection index create <coll_name> <field_name>")
+	fmt.Println("    collection index delete <coll_name> <field_name>")
+	fmt.Println("    collection index list <coll_name>")
+	fmt.Println("\n--- Collection Items ---")
+	fmt.Println("    collection item set <coll_name> [<key>] <value_json> [ttl]")
+	fmt.Println("    collection item get <coll_name> <key>")
+	fmt.Println("    collection item delete <coll_name> <key>")
+	fmt.Println("    collection item update <coll_name> <key> <patch_json>")
+	fmt.Println("    collection item list <coll_name>")
+	fmt.Println("\n--- Batch & Query ---")
+	fmt.Println("    collection item set many <coll_name> <json_array>")
+	fmt.Println("    collection item update many <coll_name> <patch_json_array>")
+	fmt.Println("    collection item delete many <coll_name> <keys_json_array_of_strings>")
+	fmt.Println("    collection query <coll_name> <query_json>")
+	fmt.Println("\n--- Client ---")
+	fmt.Println("    clear, help, exit")
+	fmt.Println("-----------------------------------------------------------------")
+	fmt.Println("Permissions can be 'read' or 'write'. Use '*' as a wildcard for collections.")
 }

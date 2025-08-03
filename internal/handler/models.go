@@ -2,9 +2,10 @@ package handler
 
 // UserInfo structure
 type UserInfo struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
-	IsRoot       bool   `json:"is_root,omitempty"`
+	Username     string            `json:"username"`
+	PasswordHash string            `json:"password_hash"`
+	IsRoot       bool              `json:"is_root,omitempty"`
+	Permissions  map[string]string `json:"permissions,omitempty"` // Key: collection name, Value: "read" or "write". "*" for all collections.
 }
 
 // Query defines the structure for a collection query command,

@@ -19,22 +19,29 @@ const (
 	CmdCollectionCreate      // CREATE_COLLECTION collectionName
 	CmdCollectionDelete      // DELETE_COLLECTION collectionName
 	CmdCollectionList        // LIST_COLLECTIONS
-	CmdCollectionIndexCreate // NEW: CREATE_COLLECTION_INDEX collectionName, fieldName
-	CmdCollectionIndexDelete // NEW: DELETE_COLLECTION_INDEX collectionName, fieldName
-	CmdCollectionIndexList   // NEW: LIST_COLLECTION_INDEXES collectionName
+	CmdCollectionIndexCreate // CREATE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexDelete // DELETE_COLLECTION_INDEX collectionName, fieldName
+	CmdCollectionIndexList   // LIST_COLLECTION_INDEXES collectionName
 
 	// Collection Item Commands
 	CmdCollectionItemSet        // SET_COLLECTION_ITEM collectionName, key, value, ttl
-	CmdCollectionItemSetMany    // NEW: SET_COLLECTION_ITEMS_MANY collectionName, json_array
+	CmdCollectionItemSetMany    // SET_COLLECTION_ITEMS_MANY collectionName, json_array
 	CmdCollectionItemGet        // GET_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemDelete     // DELETE_COLLECTION_ITEM collectionName, key
 	CmdCollectionItemList       // LIST_COLLECTION_ITEMS collectionName
-	CmdCollectionQuery          // NEW: QUERY_COLLECTION collectionName, query_json (for SQL-like operations)
-	CmdCollectionItemDeleteMany // NEW: DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
+	CmdCollectionQuery          // QUERY_COLLECTION collectionName, query_json
+	CmdCollectionItemDeleteMany // DELETE_COLLECTION_ITEMS_MANY collectionName, keys_array
+	CmdCollectionItemUpdate     // UPDATE_COLLECTION_ITEM collectionName, key, patch_value
+	CmdCollectionItemUpdateMany // UPDATE_COLLECTION_ITEMS_MANY collectionName, json_array
 
 	// Authentication Commands
 	CmdAuthenticate       // AUTH username, password
-	CmdChangeUserPassword // CHANGE_USER_PASSWORD target_username, new_password (formerly CmdUpdatePassword)
+	CmdChangeUserPassword // CHANGE_USER_PASSWORD target_username, new_password
+
+	// User Management Commands
+	CmdUserCreate // USER_CREATE username, password, permissions_json
+	CmdUserUpdate // USER_UPDATE username, permissions_json
+	CmdUserDelete // USER_DELETE username
 )
 
 // ResponseStatus defines the status of a server response.
@@ -50,6 +57,86 @@ const (
 )
 
 var ByteOrder = binary.LittleEndian
+
+func WriteUserCreateCommand(w io.Writer, username, password string, permissionsJSON []byte) error {
+	if _, err := w.Write([]byte{byte(CmdUserCreate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	if err := WriteString(w, password); err != nil {
+		return fmt.Errorf("failed to write password: %w", err)
+	}
+	if err := WriteBytes(w, permissionsJSON); err != nil {
+		return fmt.Errorf("failed to write permissions: %w", err)
+	}
+	return nil
+}
+
+// ReadUserCreateCommand reads a USER_CREATE command.
+func ReadUserCreateCommand(r io.Reader) (username, password string, permissionsJSON []byte, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read username: %w", err)
+	}
+	password, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read password: %w", err)
+	}
+	permissionsJSON, err = ReadBytes(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read permissions: %w", err)
+	}
+	return username, password, permissionsJSON, nil
+}
+
+// WriteUserUpdateCommand writes a USER_UPDATE command.
+func WriteUserUpdateCommand(w io.Writer, username string, permissionsJSON []byte) error {
+	if _, err := w.Write([]byte{byte(CmdUserUpdate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	if err := WriteBytes(w, permissionsJSON); err != nil {
+		return fmt.Errorf("failed to write permissions: %w", err)
+	}
+	return nil
+}
+
+// ReadUserUpdateCommand reads a USER_UPDATE command.
+func ReadUserUpdateCommand(r io.Reader) (username string, permissionsJSON []byte, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read username: %w", err)
+	}
+	permissionsJSON, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read permissions: %w", err)
+	}
+	return username, permissionsJSON, nil
+}
+
+// WriteUserDeleteCommand writes a USER_DELETE command.
+func WriteUserDeleteCommand(w io.Writer, username string) error {
+	if _, err := w.Write([]byte{byte(CmdUserDelete)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, username); err != nil {
+		return fmt.Errorf("failed to write username: %w", err)
+	}
+	return nil
+}
+
+// ReadUserDeleteCommand reads a USER_DELETE command.
+func ReadUserDeleteCommand(r io.Reader) (username string, err error) {
+	username, err = ReadString(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read username: %w", err)
+	}
+	return username, nil
+}
 
 // WriteResponse sends a structured binary response over the connection.
 func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) error {
@@ -284,6 +371,41 @@ func ReadCollectionItemSetCommand(r io.Reader) (collectionName, key string, valu
 	return collectionName, key, value, ttl, nil
 }
 
+// WriteCollectionItemUpdateCommand escribe un comando UPDATE_COLLECTION_ITEM a la conexión.
+// Formato: [CmdCollectionItemUpdate (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key] [PatchValueLength] [PatchValue]
+func WriteCollectionItemUpdateCommand(w io.Writer, collectionName, key string, patchValue []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdate)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteString(w, key); err != nil {
+		return fmt.Errorf("failed to write key: %w", err)
+	}
+	if err := WriteBytes(w, patchValue); err != nil {
+		return fmt.Errorf("failed to write patch value: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionItemUpdateCommand lee un comando UPDATE_COLLECTION_ITEM desde la conexión.
+func ReadCollectionItemUpdateCommand(r io.Reader) (collectionName, key string, patchValue []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+	key, err = ReadString(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read key: %w", err)
+	}
+	patchValue, err = ReadBytes(r)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to read patch value: %w", err)
+	}
+	return collectionName, key, patchValue, nil
+}
+
 // WriteCollectionItemGetCommand writes a GET_COLLECTION_ITEM command to the connection.
 // Format: [CmdCollectionItemGet (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key]
 func WriteCollectionItemGetCommand(w io.Writer, collectionName, key string) error {
@@ -472,6 +594,38 @@ func ReadCollectionItemSetManyCommand(r io.Reader) (collectionName string, value
 	}
 	return collectionName, value, nil
 }
+
+// === INICIO MEJORA: COMANDO UPDATE MANY ===
+
+// WriteCollectionItemUpdateManyCommand escribe un comando UPDATE_COLLECTION_ITEMS_MANY a la conexión.
+// Formato: [CmdCollectionItemUpdateMany (1 byte)] [ColNameLength] [ColName] [ValueLength] [Value_JSON_Array]
+func WriteCollectionItemUpdateManyCommand(w io.Writer, collectionName string, value []byte) error {
+	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdateMany)}); err != nil {
+		return fmt.Errorf("failed to write command type: %w", err)
+	}
+	if err := WriteString(w, collectionName); err != nil {
+		return fmt.Errorf("failed to write collection name: %w", err)
+	}
+	if err := WriteBytes(w, value); err != nil {
+		return fmt.Errorf("failed to write value: %w", err)
+	}
+	return nil
+}
+
+// ReadCollectionItemUpdateManyCommand lee un comando UPDATE_COLLECTION_ITEMS_MANY desde la conexión.
+func ReadCollectionItemUpdateManyCommand(r io.Reader) (collectionName string, value []byte, err error) {
+	collectionName, err = ReadString(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read collection name: %w", err)
+	}
+	value, err = ReadBytes(r)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read value: %w", err)
+	}
+	return collectionName, value, nil
+}
+
+// === FIN MEJORA ===
 
 // WriteCollectionItemDeleteManyCommand writes a DELETE_COLLECTION_ITEMS_MANY command to the connection.
 // Format: [CmdCollectionItemDeleteMany (1 byte)] [ColNameLength] [ColName] [KeysArrayLength] [Key1Length] [Key1] [Key2Length] [Key2] ...

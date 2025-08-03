@@ -214,12 +214,12 @@ Here are advanced examples showcasing the depth of the query engine. Assume a `s
 
 - **Complex Nested Filtering**
   - Find sales in the 'North' region that are either 'pending' OR have an amount greater than 1000.
-  ```
+  ```bash
   collection query sales {"filter":{"and":[{"field":"region","op":"=","value":"North"},{"or":[{"field":"status","op":"=","value":"pending"},{"field":"amount","op":">","value":1000}]}]}}
   ```
 - **Filtering with `NOT`**
   - Find all sales that are NOT in the 'North' region.
-  ```
+  ```bash
   collection query sales {"filter":{"not":{"field":"region","op":"=","value":"North"}}}
   ```
 - **Multi-Field Sorting**

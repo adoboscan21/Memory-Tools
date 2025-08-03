@@ -598,7 +598,7 @@ func printHelp() {
 	fmt.Println(`    user create <username> <password> '{"<collection>":"<perm>", "*":"read"}'`)
 	fmt.Println(`    user update <username> '{"<collection>":"<perm>"}'`)
 	fmt.Println("    user delete <username>")
-	fmt.Println("\n--- Main Store (Root only) ---")
+	fmt.Println("\n--- Main Store ---")
 	fmt.Println("    set <key> <value_json> [ttl_seconds]")
 	fmt.Println("    get <key>")
 	fmt.Println("\n--- Collections ---")

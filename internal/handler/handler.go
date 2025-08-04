@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
 	"net"
@@ -25,6 +26,7 @@ type ActivityUpdater interface {
 type ConnectionHandler struct {
 	MainStore         store.DataStore
 	CollectionManager *store.CollectionManager
+	BackupManager     *persistence.BackupManager
 	ActivityUpdater   ActivityUpdater   // Dependency for updating activity
 	IsAuthenticated   bool              // Tracks authentication status for this connection
 	AuthenticatedUser string            // Stores the authenticated username
@@ -34,7 +36,7 @@ type ConnectionHandler struct {
 }
 
 // NewConnectionHandler creates a new instance of ConnectionHandler.
-func NewConnectionHandler(mainStore store.DataStore, colManager *store.CollectionManager, updater ActivityUpdater, conn net.Conn) *ConnectionHandler {
+func NewConnectionHandler(mainStore store.DataStore, colManager *store.CollectionManager, backupManager *persistence.BackupManager, updater ActivityUpdater, conn net.Conn) *ConnectionHandler {
 	isLocal := false
 	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
 		if host == "127.0.0.1" || host == "::1" || host == "localhost" {
@@ -45,11 +47,12 @@ func NewConnectionHandler(mainStore store.DataStore, colManager *store.Collectio
 	return &ConnectionHandler{
 		MainStore:         mainStore,
 		CollectionManager: colManager,
+		BackupManager:     backupManager,
 		ActivityUpdater:   updater,
-		IsAuthenticated:   false, // Initially not authenticated
+		IsAuthenticated:   false,
 		AuthenticatedUser: "",
-		IsLocalhostConn:   isLocal,                 // Set based on connection origin
-		Permissions:       make(map[string]string), // Initialize empty map
+		IsLocalhostConn:   isLocal,
+		Permissions:       make(map[string]string),
 	}
 }
 
@@ -137,6 +140,11 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			h.handleUserUpdate(conn)
 		case protocol.CmdUserDelete:
 			h.handleUserDelete(conn)
+
+		case protocol.CmdBackup:
+			h.handleBackup(conn)
+		case protocol.CmdRestore:
+			h.handleRestore(conn)
 
 		default:
 			log.Printf("Received unhandled or unknown authenticated command type %d from client %s.", cmdType, conn.RemoteAddr())

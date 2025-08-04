@@ -28,6 +28,7 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // --- Completers for different authentication states ---
 
+// preLoginCompleter provides command suggestions before a user logs in.
 var preLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("login"),
 	readline.PcItem("help"),
@@ -35,6 +36,7 @@ var preLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("clear"),
 )
 
+// postLoginCompleter provides command suggestions after a user logs in.
 var postLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("user",
 		readline.PcItem("create"),
@@ -42,6 +44,8 @@ var postLoginCompleter = readline.NewPrefixCompleter(
 		readline.PcItem("delete"),
 	),
 	readline.PcItem("update password"),
+	readline.PcItem("backup"),
+	readline.PcItem("restore"),
 	readline.PcItem("set"),
 	readline.PcItem("get"),
 	readline.PcItem("collection",
@@ -184,6 +188,10 @@ func main() {
 
 		// --- Command Processing ---
 		if cmd == "login" {
+			if isAuthenticated {
+				fmt.Println("Error: You are already logged in.")
+				continue
+			}
 			argsList := strings.Fields(rawArgs)
 			if len(argsList) != 2 {
 				fmt.Println("Usage: login <username> <password>")
@@ -224,6 +232,15 @@ func main() {
 		} else {
 			// Fallback to the large switch for all other commands
 			switch cmd {
+			case "backup":
+				writeErr = protocol.WriteBackupCommand(&cmdBuf)
+			case "restore":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) < 1 {
+					fmt.Println("Usage: restore <backup_directory_name>")
+					continue
+				}
+				writeErr = protocol.WriteRestoreCommand(&cmdBuf, argsList[0])
 			case "update password":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) != 2 {
@@ -518,7 +535,6 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 	if len(dataBytes) > 0 {
 		var finalDataForPrint []byte = dataBytes
 
-		// --- INICIO DE LA CORRECCIÓN ---
 		// Special handling for 'collection item list' to decode Base64 values
 		if lastCmd == "collection item list" && status == protocol.StatusOk {
 			var rawMap map[string]string
@@ -540,10 +556,9 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 				finalDataForPrint, _ = json.Marshal(decodedMap)
 			}
 		}
-		// --- FIN DE LA CORRECCIÓN ---
 
 		var prettyJSON bytes.Buffer
-		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "    "); err == nil {
+		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "  "); err == nil {
 			fmt.Printf("    Data (JSON):\n%s\n", prettyJSON.String())
 		} else {
 			fmt.Printf("    Data (Raw):\n%s\n", string(finalDataForPrint))
@@ -594,11 +609,14 @@ func printHelp() {
 	fmt.Println("--- Auth ---")
 	fmt.Println("    login <username> <password>")
 	fmt.Println("    update password <target_username> <new_password>")
+	fmt.Println("\n--- Admin (Root Only) ---")
+	fmt.Println("  backup")
+	fmt.Println("  restore <backup_directory_name>")
 	fmt.Println("\n--- User Management (Requires write access to _system) ---")
 	fmt.Println(`    user create <username> <password> '{"<collection>":"<perm>", "*":"read"}'`)
 	fmt.Println(`    user update <username> '{"<collection>":"<perm>"}'`)
 	fmt.Println("    user delete <username>")
-	fmt.Println("\n--- Main Store ---")
+	fmt.Println("\n--- Main Store (Root Only) ---")
 	fmt.Println("    set <key> <value_json> [ttl_seconds]")
 	fmt.Println("    get <key>")
 	fmt.Println("\n--- Collections ---")

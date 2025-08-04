@@ -6,17 +6,27 @@ Memory Tools is a high-performance, sharded in-memory key-value **and document**
 
 ## ✨ Features
 
-- **Sharded In-Memory Storage:** Utilizes an efficient sharding design to distribute data and ensure fast, concurrent access across multiple CPU cores.
-- **Data Persistence:** Atomically saves data to disk in an optimized binary format and reloads on startup, ensuring durability and preventing data corruption.
-- **Secure TLS Encryption:** All communications over the TCP interface are encrypted with TLS 1.2+, guaranteeing the security of your data in transit.
-- **Time-to-Live (TTL):** Assigns a time-to-live to keys so they expire automatically, ideal for cache data, sessions, or temporary records.
-- **Collections:** Organizes your data into named collections, acting as independent, sharded data stores within the same engine.
-- **Granular User Permissions:** A robust user management system allows for creating users and assigning specific read/write permissions per collection. Features a superuser (`root`) for administrative tasks.
-- **Persistent Field Indexing:** Create indexes on any field within your JSON documents to dramatically accelerate query performance by avoiding full collection scans. Indexes are persisted to disk and rebuilt on startup.
-- **Advanced Query Engine:** Performs complex, SQL-like queries on JSON data with filters (`WHERE`, `AND`, `OR`, `NOT`, `LIKE`, `IN`), ordering (`ORDER BY`), pagination (`LIMIT`/`OFFSET`), aggregations (`COUNT`, `SUM`, `AVG` with `GROUP BY`), post-aggregation filtering (`HAVING`), and unique value retrieval (`DISTINCT`).
-- **Batch Operations:** Execute commands on multiple items at once, such as `set many`, `update many`, and `delete many`, for greater efficiency and reduced network latency.
-- **Graceful Shutdown:** The engine handles a clean application shutdown, ensuring all pending writes are completed and data is safely saved before exiting.
-- **Docker-Ready:** Easily deploy and manage the server with Docker and Docker Compose.
+- 🚀 **High-Performance Concurrent Architecture:** At its core, Memory Tools uses an efficient **sharding design** to distribute data and minimize lock contention, allowing for massive concurrency across CPU cores. Collection writes are handled by an **asynchronous persistence queue**, resulting in non-blocking, lightning-fast write operations for the client.
+- 💾 **Robust Data Persistence:** Data is atomically saved to disk in an optimized binary format. The use of temporary files for writes which are then renamed ensures that your data is never corrupted, even in the event of a crash. The system reloads all data on startup for complete durability.
+- 🛡️ **Automated Backup & Restore System:** Go beyond simple persistence with a full-featured backup system. It performs **periodic, verifiable backups** to timestamped directories, manages a **retention policy** to clean up old files, and allows for a full manual **restore** from any backup point, ensuring your data is always safe.
+- 🧠 **Advanced Query Engine:** Don't just get keys; query your JSON documents like a relational database. The engine supports complex, SQL-like queries with:
+  - **Rich Filtering**: `WHERE`, `AND`, `OR`, `NOT`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`.
+  - **Data Shaping**: `ORDER BY`, `LIMIT`, `OFFSET`, and `DISTINCT`.
+  - **Powerful Aggregations**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY`.
+  - **Post-Aggregation Filtering**: A full `HAVING` clause to filter your grouped results.
+- 📈 **Persistent Field Indexing:** Drastically accelerate query performance by creating indexes on any field within your JSON documents. This avoids costly full-collection scans for filtered queries. Indexes are persisted to disk and efficiently rebuilt on startup.
+- 🔐 **Full Security Suite:** Security is built-in, not an afterthought.
+  - **TLS Encryption:** All communication is encrypted with TLS 1.2+, protecting data in transit.
+  - **Strong Authentication:** Passwords are never stored in plain text, using `bcrypt` hashing.
+  - **Granular Permissions:** A robust user management system allows for creating users and assigning specific `read`/`write` permissions per collection, with wildcard support.
+  - **Restricted Superuser**: A `root` user with administrative privileges is restricted to **localhost connections only**, preventing remote admin access.
+- ⚡ **Efficient Batch Operations:** Execute commands on multiple items at once for greater efficiency and reduced network latency. `set many`, `update many`, and `delete many` commands are fully supported.
+- 🧹 **Automatic Data & Memory Management:** The engine works for you in the background.
+  - **TTL (Time-to-Live):** Assign a time-to-live to keys so they expire automatically. A background cleaner periodically purges them from memory.
+  - **Idle Memory Release:** The server monitors for periods of inactivity and automatically releases unused memory back to the operating system.
+- ⚙️ **Reliable Operations:** Built for stability and ease of use.
+  - **Graceful Shutdown:** The engine handles a clean shutdown, ensuring all pending writes and background tasks are safely completed before exiting.
+  - **Docker-Ready:** Easily deploy, manage, and scale the server with the provided Docker and Docker Compose configuration.
 
 ---
 

@@ -204,13 +204,6 @@ type InMemStore struct {
 	indexes   *IndexManager // NEW: Index manager for the store.
 }
 
-const defaultNumShards = 16
-
-// NewInMemStore creates a new InMemStore with default sharding.
-func NewInMemStore() *InMemStore {
-	return NewInMemStoreWithShards(defaultNumShards)
-}
-
 // NewInMemStoreWithShards creates a new InMemStore with a specified number of shards.
 func NewInMemStoreWithShards(numShards int) *InMemStore {
 	s := &InMemStore{
@@ -290,8 +283,6 @@ func (s *InMemStore) Get(key string) ([]byte, bool) {
 	return item.Value, true
 }
 
-// === INICIO DE LA MEJORA: GetMany en Paralelo ===
-
 // GetMany retrieves multiple keys concurrently by grouping them by shard.
 func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 	if len(keys) == 0 {
@@ -355,8 +346,6 @@ func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 
 	return finalResults
 }
-
-// === FIN DE LA MEJORA ===
 
 // Delete removes a key-value pair and updates any relevant indexes.
 func (s *InMemStore) Delete(key string) {
@@ -543,16 +532,18 @@ type CollectionManager struct {
 	deleteQueue chan deleteTask // Channel to send delete tasks.
 	quit        chan struct{}   // Channel to signal the goroutines to stop.
 	wg          sync.WaitGroup  // WaitGroup to wait for goroutines to finish.
+	numShards   int
 }
 
 // NewCollectionManager creates a new instance of CollectionManager.
-func NewCollectionManager(persister CollectionPersister) *CollectionManager {
+func NewCollectionManager(persister CollectionPersister, numShards int) *CollectionManager {
 	cm := &CollectionManager{
 		collections: make(map[string]DataStore),
 		persister:   persister,
 		saveQueue:   make(chan saveTask, 100),
 		deleteQueue: make(chan deleteTask, 10),
 		quit:        make(chan struct{}),
+		numShards:   numShards,
 	}
 	cm.StartAsyncWorker()
 	return cm
@@ -619,7 +610,7 @@ func (cm *CollectionManager) Wait() {
 // EnqueueSaveTask adds a collection save request to the asynchronous queue.
 func (cm *CollectionManager) EnqueueSaveTask(collectionName string, col DataStore) {
 	// Use a temporary `InMemStore` to get a consistent `GetAll()` snapshot.
-	tempStore := NewInMemStore()
+	tempStore := NewInMemStoreWithShards(cm.numShards)
 	tempStore.LoadData(col.GetAll())
 
 	task := saveTask{
@@ -669,9 +660,9 @@ func (cm *CollectionManager) GetCollection(name string) DataStore {
 	}
 
 	// Create new collection.
-	newCol := NewInMemStore() // Each collection gets its own sharded in-memory store.
+	newCol := NewInMemStoreWithShards(cm.numShards)
 	cm.collections[name] = newCol
-	log.Printf("Collection '%s' created and added to CollectionManager.", name)
+	log.Printf("Collection '%s' created with %d shards and added to CollectionManager.", name, cm.numShards)
 	return newCol
 }
 
@@ -717,9 +708,9 @@ func (cm *CollectionManager) LoadAllCollectionData(allCollectionsData map[string
 
 	for colName, data := range allCollectionsData {
 		// Directly create and load the new InMemStore for this collection.
-		newCol := NewInMemStore()        // Create a new InMemStore for this collection.
-		newCol.LoadData(data)            // Load data into this specific InMemStore.
-		cm.collections[colName] = newCol // Directly assign to the map.
+		newCol := NewInMemStoreWithShards(cm.numShards) // Create a new InMemStore for this collection.
+		newCol.LoadData(data)                           // Load data into this specific InMemStore.
+		cm.collections[colName] = newCol                // Directly assign to the map.
 		log.Printf("Loaded collection '%s' with %d items into CollectionManager from persistence.", colName, newCol.Size())
 	}
 	log.Printf("CollectionManager: Successfully loaded/updated %d collections from persistence.", len(allCollectionsData))

@@ -9,6 +9,7 @@ import (
 	"memory-tools/internal/handler"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/store"
+	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -148,15 +149,26 @@ func main() {
 	// Accept connections in a goroutine.
 	go func() {
 		for {
-			conn, _ := listener.Accept()
-			// ... (código de manejo de error)
+			// Capturamos tanto la conexión como el posible error
+			conn, err := listener.Accept()
+			if err != nil {
+				// Si el error es por "conexión cerrada", es porque estamos apagando el servidor.
+				// Salimos de la goroutine de forma limpia.
+				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" {
+					log.Println("Listener de red cerrado. Deteniendo la aceptación de conexiones.")
+					return
+				}
 
-			// Crear una nueva instancia del handler para cada conexión.
-			// ¡Asegúrate de pasar el backupManager aquí!
+				// Si es otro tipo de error, lo registramos y continuamos.
+				log.Printf("Error al aceptar conexión: %v", err)
+				continue
+			}
+
+			// Si no hubo error, procedemos a manejar la conexión
 			go handler.NewConnectionHandler(
 				mainInMemStore,
 				collectionManager,
-				backupManager, // PASAR LA INSTANCIA AQUÍ
+				backupManager,
 				updateActivityFunc(func() { lastActivity.Store(time.Now()) }),
 				conn,
 			).HandleConnection(conn)

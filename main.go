@@ -39,21 +39,25 @@ func (f updateActivityFunc) UpdateActivity() {
 }
 
 func main() {
+	// Configure logging to include date, time, and file information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
+	// Define a command-line flag for the configuration file path.
 	configPath := flag.String("config", "config.json", "Path to the JSON configuration file")
 	flag.Parse()
 
+	// Load the application configuration from the specified path.
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Fatal error loading configuration: %v", err)
 	}
 
+	// Initialize the main in-memory store and the collection manager.
 	mainInMemStore := store.NewInMemStore()
 	collectionPersister := &persistence.CollectionPersisterImpl{}
 	collectionManager := store.NewCollectionManager(collectionPersister)
 
-	// Load persistent data for main store and all collections.
+	// Load persistent data for the main store and all collections.
 	if err := persistence.LoadData(mainInMemStore); err != nil {
 		log.Fatalf("Fatal error loading main persistent data: %v", err)
 	}
@@ -61,7 +65,7 @@ func main() {
 		log.Fatalf("Fatal error loading persistent collections data: %v", err)
 	}
 
-	// Ensure system collection and default users.
+	// Ensure the system collection and default users exist.
 	systemCollection := collectionManager.GetCollection(handler.SystemCollectionName)
 
 	// Ensure default admin user
@@ -116,19 +120,19 @@ func main() {
 		log.Println("Default root user 'root' found. Using existing credentials.")
 	}
 
-	// Load server certificate and key.
+	// Load server certificate and key for TLS.
 	cert, err := tls.LoadX509KeyPair("certificates/server.crt", "certificates/server.key")
 	if err != nil {
 		log.Fatalf("Failed to load server certificate or key: %v", err)
 	}
 
-	// Configure TLS settings.
+	// Configure TLS settings, including the loaded certificate.
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	// Start TLS TCP server.
+	// Start the TLS TCP server.
 	listener, err := tls.Listen("tcp", cfg.Port, tlsConfig)
 	if err != nil {
 		log.Fatalf("Fatal error starting TLS TCP server: %v", err)
@@ -136,35 +140,28 @@ func main() {
 	defer listener.Close()
 	log.Printf("TLS TCP server listening securely on %s", cfg.Port)
 
-	// ... (en la función main, dentro del bucle de aceptar conexiones)
-	// Crear el backup manager
+	// create backup manager
 	backupManager := persistence.NewBackupManager(mainInMemStore, collectionManager)
-	// Iniciar el servicio de backups
+	// start backups
 	backupManager.Start()
-	// Asegurarse de detenerlo al cerrar la aplicación
+	// sure close on exit.
 	defer backupManager.Stop()
-
-	// ...
 
 	// Accept connections in a goroutine.
 	go func() {
 		for {
-			// Capturamos tanto la conexión como el posible error
 			conn, err := listener.Accept()
 			if err != nil {
-				// Si el error es por "conexión cerrada", es porque estamos apagando el servidor.
-				// Salimos de la goroutine de forma limpia.
 				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" {
 					log.Println("Listener de red cerrado. Deteniendo la aceptación de conexiones.")
 					return
 				}
 
-				// Si es otro tipo de error, lo registramos y continuamos.
 				log.Printf("Error al aceptar conexión: %v", err)
 				continue
 			}
 
-			// Si no hubo error, procedemos a manejar la conexión
+			// Handle each new connection in a separate goroutine.
 			go handler.NewConnectionHandler(
 				mainInMemStore,
 				collectionManager,
@@ -175,11 +172,11 @@ func main() {
 		}
 	}()
 
-	// Initialize and start snapshot manager.
+	// Initialize and start the snapshot manager.
 	snapshotManager := persistence.NewSnapshotManager(mainInMemStore, cfg.SnapshotInterval, cfg.EnableSnapshots)
 	go snapshotManager.Start()
 
-	// Start TTL cleaner goroutine.
+	// Start the TTL cleaner goroutine.
 	ttlCleanStopChan := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
@@ -223,21 +220,21 @@ func main() {
 		}
 	}()
 
-	// Set up graceful shutdown.
+	// Set up a channel to listen for termination signals.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
 	log.Println("Termination signal received. Attempting graceful shutdown...")
 
-	// Stop TCP listener.
+	// Stop the TCP listener to prevent new connections.
 	if err := listener.Close(); err != nil {
 		log.Printf("Error closing TCP listener: %v", err)
 	} else {
 		log.Println("TCP listener closed.")
 	}
 
-	// Stop background tasks.
+	// Stop all background tasks.
 	snapshotManager.Stop()
 	close(ttlCleanStopChan)
 	close(idleMemoryCleanerStopChan)
@@ -251,7 +248,7 @@ func main() {
 	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancelShutdown()
 
-	// Save final data to disk.
+	// Save final data for the main store to disk.
 	log.Println("Saving final data for main store before application exit...")
 	if err := persistence.SaveData(mainInMemStore); err != nil {
 		log.Printf("Error saving final data for main store during shutdown: %v", err)
@@ -259,6 +256,7 @@ func main() {
 		log.Println("Final main store data saved.")
 	}
 
+	// Save final data for all collections to disk.
 	log.Println("Saving final data for all collections before application exit...")
 	if err := persistence.SaveAllCollectionsFromManager(collectionManager); err != nil {
 		log.Printf("Error saving final data for collections during shutdown: %v", err)

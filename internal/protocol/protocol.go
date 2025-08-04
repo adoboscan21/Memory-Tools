@@ -62,7 +62,7 @@ const (
 
 var ByteOrder = binary.LittleEndian
 
-// WriteBackupCommand escribe un comando BACKUP.
+// WriteBackupCommand writes a BACKUP command.
 func WriteBackupCommand(w io.Writer) error {
 	if _, err := w.Write([]byte{byte(CmdBackup)}); err != nil {
 		return fmt.Errorf("failed to write command type (backup): %w", err)
@@ -70,7 +70,7 @@ func WriteBackupCommand(w io.Writer) error {
 	return nil
 }
 
-// WriteRestoreCommand escribe un comando RESTORE.
+// WriteRestoreCommand writes a RESTORE command.
 func WriteRestoreCommand(w io.Writer, backupName string) error {
 	if _, err := w.Write([]byte{byte(CmdRestore)}); err != nil {
 		return fmt.Errorf("failed to write command type (restore): %w", err)
@@ -81,7 +81,7 @@ func WriteRestoreCommand(w io.Writer, backupName string) error {
 	return nil
 }
 
-// ReadRestoreCommand lee un comando RESTORE.
+// ReadRestoreCommand reads a RESTORE command.
 func ReadRestoreCommand(r io.Reader) (string, error) {
 	backupName, err := ReadString(r)
 	if err != nil {
@@ -90,6 +90,7 @@ func ReadRestoreCommand(r io.Reader) (string, error) {
 	return backupName, nil
 }
 
+// WriteUserCreateCommand writes a USER_CREATE command.
 func WriteUserCreateCommand(w io.Writer, username, password string, permissionsJSON []byte) error {
 	if _, err := w.Write([]byte{byte(CmdUserCreate)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -403,8 +404,8 @@ func ReadCollectionItemSetCommand(r io.Reader) (collectionName, key string, valu
 	return collectionName, key, value, ttl, nil
 }
 
-// WriteCollectionItemUpdateCommand escribe un comando UPDATE_COLLECTION_ITEM a la conexión.
-// Formato: [CmdCollectionItemUpdate (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key] [PatchValueLength] [PatchValue]
+// WriteCollectionItemUpdateCommand writes a UPDATE_COLLECTION_ITEM command to the connection.
+// Format: [CmdCollectionItemUpdate (1 byte)] [ColNameLength] [ColName] [KeyLength] [Key] [PatchValueLength] [PatchValue]
 func WriteCollectionItemUpdateCommand(w io.Writer, collectionName, key string, patchValue []byte) error {
 	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdate)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -421,7 +422,7 @@ func WriteCollectionItemUpdateCommand(w io.Writer, collectionName, key string, p
 	return nil
 }
 
-// ReadCollectionItemUpdateCommand lee un comando UPDATE_COLLECTION_ITEM desde la conexión.
+// ReadCollectionItemUpdateCommand reads a UPDATE_COLLECTION_ITEM command from the connection.
 func ReadCollectionItemUpdateCommand(r io.Reader) (collectionName, key string, patchValue []byte, err error) {
 	collectionName, err = ReadString(r)
 	if err != nil {
@@ -627,10 +628,8 @@ func ReadCollectionItemSetManyCommand(r io.Reader) (collectionName string, value
 	return collectionName, value, nil
 }
 
-// === INICIO MEJORA: COMANDO UPDATE MANY ===
-
-// WriteCollectionItemUpdateManyCommand escribe un comando UPDATE_COLLECTION_ITEMS_MANY a la conexión.
-// Formato: [CmdCollectionItemUpdateMany (1 byte)] [ColNameLength] [ColName] [ValueLength] [Value_JSON_Array]
+// WriteCollectionItemUpdateManyCommand writes a UPDATE_COLLECTION_ITEMS_MANY command to the connection.
+// Format: [CmdCollectionItemUpdateMany (1 byte)] [ColNameLength] [ColName] [ValueLength] [Value_JSON_Array]
 func WriteCollectionItemUpdateManyCommand(w io.Writer, collectionName string, value []byte) error {
 	if _, err := w.Write([]byte{byte(CmdCollectionItemUpdateMany)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -644,7 +643,7 @@ func WriteCollectionItemUpdateManyCommand(w io.Writer, collectionName string, va
 	return nil
 }
 
-// ReadCollectionItemUpdateManyCommand lee un comando UPDATE_COLLECTION_ITEMS_MANY desde la conexión.
+// ReadCollectionItemUpdateManyCommand reads a UPDATE_COLLECTION_ITEMS_MANY command from the connection.
 func ReadCollectionItemUpdateManyCommand(r io.Reader) (collectionName string, value []byte, err error) {
 	collectionName, err = ReadString(r)
 	if err != nil {
@@ -656,8 +655,6 @@ func ReadCollectionItemUpdateManyCommand(r io.Reader) (collectionName string, va
 	}
 	return collectionName, value, nil
 }
-
-// === FIN MEJORA ===
 
 // WriteCollectionItemDeleteManyCommand writes a DELETE_COLLECTION_ITEMS_MANY command to the connection.
 // Format: [CmdCollectionItemDeleteMany (1 byte)] [ColNameLength] [ColName] [KeysArrayLength] [Key1Length] [Key1] [Key2Length] [Key2] ...

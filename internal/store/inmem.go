@@ -290,8 +290,6 @@ func (s *InMemStore) Get(key string) ([]byte, bool) {
 	return item.Value, true
 }
 
-// === INICIO DE LA MEJORA: GetMany en Paralelo ===
-
 // GetMany retrieves multiple keys concurrently by grouping them by shard.
 func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 	if len(keys) == 0 {
@@ -355,8 +353,6 @@ func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 
 	return finalResults
 }
-
-// === FIN DE LA MEJORA ===
 
 // Delete removes a key-value pair and updates any relevant indexes.
 func (s *InMemStore) Delete(key string) {

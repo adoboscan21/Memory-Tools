@@ -47,7 +47,7 @@ func NewConnectionHandler(mainStore store.DataStore, colManager *store.Collectio
 	return &ConnectionHandler{
 		MainStore:         mainStore,
 		CollectionManager: colManager,
-		BackupManager:     backupManager, // <<< AGREGA ESTA LÍNEA
+		BackupManager:     backupManager,
 		ActivityUpdater:   updater,
 		IsAuthenticated:   false,
 		AuthenticatedUser: "",

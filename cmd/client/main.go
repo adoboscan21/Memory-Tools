@@ -28,6 +28,7 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // --- Completers for different authentication states ---
 
+// preLoginCompleter provides command suggestions before a user logs in.
 var preLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("login"),
 	readline.PcItem("help"),
@@ -35,6 +36,7 @@ var preLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("clear"),
 )
 
+// postLoginCompleter provides command suggestions after a user logs in.
 var postLoginCompleter = readline.NewPrefixCompleter(
 	readline.PcItem("user",
 		readline.PcItem("create"),
@@ -529,7 +531,6 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 	if len(dataBytes) > 0 {
 		var finalDataForPrint []byte = dataBytes
 
-		// --- INICIO DE LA CORRECCIÓN ---
 		// Special handling for 'collection item list' to decode Base64 values
 		if lastCmd == "collection item list" && status == protocol.StatusOk {
 			var rawMap map[string]string
@@ -551,7 +552,6 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 				finalDataForPrint, _ = json.Marshal(decodedMap)
 			}
 		}
-		// --- FIN DE LA CORRECCIÓN ---
 
 		var prettyJSON bytes.Buffer
 		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "    "); err == nil {

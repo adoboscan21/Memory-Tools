@@ -15,7 +15,7 @@ import (
 const (
 	backupDir       = "backups"
 	backupRetention = 7 * 24 * time.Hour // 7 days retention
-	backupInterval  = 1 * time.Minute    // Backup frequency
+	backupInterval  = 1 * time.Hour      // Backup frequency
 )
 
 // BackupManager handles backup operations

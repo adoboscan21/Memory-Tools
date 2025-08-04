@@ -8,7 +8,7 @@ import (
 	"net"
 )
 
-// handleBackup maneja el comando para un backup manual.
+// handleBackup handles the command for a manual backup.
 func (h *ConnectionHandler) handleBackup(conn net.Conn) {
 	if !h.IsRoot {
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a manual backup.", nil)
@@ -25,7 +25,7 @@ func (h *ConnectionHandler) handleBackup(conn net.Conn) {
 	protocol.WriteResponse(conn, protocol.StatusOk, "OK: Manual backup completed successfully.", nil)
 }
 
-// handleRestore maneja el comando para restaurar desde un backup.
+// handleRestore handles the command to restore from a backup.
 func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 	if !h.IsRoot {
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a restore.", nil)
@@ -44,14 +44,14 @@ func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 
 	log.Printf("!!! DESTRUCTIVE ACTION: Root user '%s' initiated a restore from '%s' !!!", h.AuthenticatedUser, backupName)
 
-	// NOTA: En un sistema de producción, aquí se debería pausar el servidor
-	// o entrar en modo de solo lectura para evitar inconsistencias.
+	// NOTE: In a production system, the server should be paused or
+	// put into read-only mode here to prevent inconsistencies.
 
 	err = persistence.PerformRestore(backupName, h.MainStore, h.CollectionManager)
 	if err != nil {
 		log.Printf("Restore from '%s' failed: %v", backupName, err)
-		// Es crucial no dejar el servidor en un estado inconsistente.
-		// La mejor acción aquí sería un reinicio forzado o una alerta severa.
+		// It is crucial not to leave the server in an inconsistent state.
+		// The best action here would be a forced restart or a severe alert.
 		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Restore failed: %v. Server might be in an inconsistent state.", err), nil)
 		return
 	}

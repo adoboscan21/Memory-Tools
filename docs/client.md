@@ -65,7 +65,7 @@ Authentication is required to execute most commands. User and permission managem
     update password salesuser newSecurePass456
     ```
 
-### 👑 Main Store Commands (Root Only)
+### 👑 Main Store Commands
 
 These commands operate on the primary key-value store and are **available only to the `root` user**.
 

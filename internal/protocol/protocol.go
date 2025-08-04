@@ -42,6 +42,10 @@ const (
 	CmdUserCreate // USER_CREATE username, password, permissions_json
 	CmdUserUpdate // USER_UPDATE username, permissions_json
 	CmdUserDelete // USER_DELETE username
+
+	// --- NEW: Admin Commands ---
+	CmdBackup  // BACKUP
+	CmdRestore // RESTORE backup_name
 )
 
 // ResponseStatus defines the status of a server response.
@@ -57,6 +61,34 @@ const (
 )
 
 var ByteOrder = binary.LittleEndian
+
+// WriteBackupCommand escribe un comando BACKUP.
+func WriteBackupCommand(w io.Writer) error {
+	if _, err := w.Write([]byte{byte(CmdBackup)}); err != nil {
+		return fmt.Errorf("failed to write command type (backup): %w", err)
+	}
+	return nil
+}
+
+// WriteRestoreCommand escribe un comando RESTORE.
+func WriteRestoreCommand(w io.Writer, backupName string) error {
+	if _, err := w.Write([]byte{byte(CmdRestore)}); err != nil {
+		return fmt.Errorf("failed to write command type (restore): %w", err)
+	}
+	if err := WriteString(w, backupName); err != nil {
+		return fmt.Errorf("failed to write backup name (restore): %w", err)
+	}
+	return nil
+}
+
+// ReadRestoreCommand lee un comando RESTORE.
+func ReadRestoreCommand(r io.Reader) (string, error) {
+	backupName, err := ReadString(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read backup name (restore): %w", err)
+	}
+	return backupName, nil
+}
 
 func WriteUserCreateCommand(w io.Writer, username, password string, permissionsJSON []byte) error {
 	if _, err := w.Write([]byte{byte(CmdUserCreate)}); err != nil {

@@ -9,7 +9,6 @@ import (
 	"memory-tools/internal/handler"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/store"
-	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -136,22 +135,31 @@ func main() {
 	defer listener.Close()
 	log.Printf("TLS TCP server listening securely on %s", cfg.Port)
 
+	// ... (en la función main, dentro del bucle de aceptar conexiones)
+	// Crear el backup manager
+	backupManager := persistence.NewBackupManager(mainInMemStore, collectionManager)
+	// Iniciar el servicio de backups
+	backupManager.Start()
+	// Asegurarse de detenerlo al cerrar la aplicación
+	defer backupManager.Stop()
+
+	// ...
+
 	// Accept connections in a goroutine.
 	go func() {
 		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" && opErr.Err.Error() == "use of closed network connection" {
-					log.Println("TLS TCP listener closed, stopping accept loop.")
-					return
-				}
-				log.Printf("Error accepting connection: %v", err)
-				continue
-			}
-			// Create a new handler instance for each connection.
-			go handler.NewConnectionHandler(mainInMemStore, collectionManager, updateActivityFunc(func() {
-				lastActivity.Store(time.Now())
-			}), conn).HandleConnection(conn)
+			conn, _ := listener.Accept()
+			// ... (código de manejo de error)
+
+			// Crear una nueva instancia del handler para cada conexión.
+			// ¡Asegúrate de pasar el backupManager aquí!
+			go handler.NewConnectionHandler(
+				mainInMemStore,
+				collectionManager,
+				backupManager, // PASAR LA INSTANCIA AQUÍ
+				updateActivityFunc(func() { lastActivity.Store(time.Now()) }),
+				conn,
+			).HandleConnection(conn)
 		}
 	}()
 

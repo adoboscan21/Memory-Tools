@@ -42,6 +42,8 @@ var postLoginCompleter = readline.NewPrefixCompleter(
 		readline.PcItem("delete"),
 	),
 	readline.PcItem("update password"),
+	readline.PcItem("backup"),
+	readline.PcItem("restore"),
 	readline.PcItem("set"),
 	readline.PcItem("get"),
 	readline.PcItem("collection",
@@ -224,6 +226,15 @@ func main() {
 		} else {
 			// Fallback to the large switch for all other commands
 			switch cmd {
+			case "backup":
+				writeErr = protocol.WriteBackupCommand(&cmdBuf)
+			case "restore":
+				argsList := strings.Fields(rawArgs)
+				if len(argsList) < 1 {
+					fmt.Println("Usage: restore <backup_directory_name>")
+					continue
+				}
+				writeErr = protocol.WriteRestoreCommand(&cmdBuf, argsList[0])
 			case "update password":
 				argsList := strings.Fields(rawArgs)
 				if len(argsList) != 2 {
@@ -594,6 +605,9 @@ func printHelp() {
 	fmt.Println("--- Auth ---")
 	fmt.Println("    login <username> <password>")
 	fmt.Println("    update password <target_username> <new_password>")
+	fmt.Println("\n--- Admin (Root Only) ---")
+	fmt.Println("  backup")
+	fmt.Println("  restore <backup_directory_name>")
 	fmt.Println("\n--- User Management (Requires write access to _system) ---")
 	fmt.Println(`    user create <username> <password> '{"<collection>":"<perm>", "*":"read"}'`)
 	fmt.Println(`    user update <username> '{"<collection>":"<perm>"}'`)

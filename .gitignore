@@ -17,6 +17,8 @@ certificates
 # Test binary, built with `go test -c`
 *.test
 backups
+cat.log
+cat_command.sh
 
 # Code coverage profiles and other test artifacts
 *.out

@@ -105,17 +105,10 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 		return
 	}
 
-	// Authorization: Only users with write access to the system collection can change passwords.
-	if !h.hasPermission(SystemCollectionName, "write") {
-		log.Printf("Unauthorized attempt to change password for '%s' by user '%s' from %s.",
-			targetUsername, h.AuthenticatedUser, conn.RemoteAddr())
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: You do not have permission to change user passwords.", nil)
-		return
-	}
-
-	// But you can only change your own password, unless you are root.
-	if h.AuthenticatedUser != targetUsername && !h.IsRoot {
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: You can only change your own password.", nil)
+	// Authorization: Only the root user can change passwords.
+	if !h.IsRoot {
+		log.Printf("Unauthorized password change attempt by non-root user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can change passwords.", nil)
 		return
 	}
 

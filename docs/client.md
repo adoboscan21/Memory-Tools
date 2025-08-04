@@ -1,10 +1,10 @@
-## Memory Tools CLI Client Documentation
+# 🚀 Memory Tools CLI Client Documentation 🚀
 
 The `memory-tools-client` is an interactive command-line interface (CLI) for direct, secure interaction with the `memory-tools-server` via its custom TLS-encrypted TCP protocol.
 
 ---
 
-### ## How to Run
+### ▶️ How to Run
 
 To start the client, you must provide the address of the `memory-tools-server`. You can also include credentials for automatic login using flags.
 
@@ -15,7 +15,7 @@ To start the client, you must provide the address of the `memory-tools-server`. 
 ./bin/memory-tools-client -u admin -p adminpass localhost:5876
 ```
 
-**Via Docker Compose:**
+**Docker 🐳:**
 
 ```bash
 docker exec -it <container_id> ./memory-tools-client -u root -p rootpass localhost:5876
@@ -23,40 +23,41 @@ docker exec -it <container_id> ./memory-tools-client -u root -p rootpass localho
 
 Once connected, you will see the message: `Connected securely to Memory Tools server at <address>.`
 
----
-
-### ## User and Permission Management (Admins)
+### 👥 User and Permission Management (Admins)
 
 Authentication is required to execute most commands. User and permission management requires special privileges.
 
-- **`login <username> <password>`**
+- 🔐 **`login <username> <password>`**
   - **Description**: Authenticates the connection with the server.
   - **Example**:
     ```bash
     login root rootpass
     ```
-- **`user create <username> <password> <permissions_json>`**
+- ➕ **`user create <username> <password> <permissions_json>`**
+
   - **Description**: Creates a new user with a password and a set of permissions defined in a JSON object.
   - **Permissions Required**: Write access (`"write"`) to the `_system` collection (typically `root` user only).
   - **Example**: Create a user who can write to the `sales` collection and read from the `products` collection.
+
     ```bash
     user create salesuser strongpass123 {"sales":"write", "products":"read"}
     ```
-- **`user update <username> <permissions_json>`**
+
+- 🔄 **`user update <username> <permissions_json>`**
   - **Description**: Completely replaces an existing user's permissions with the new set provided.
   - **Permissions Required**: Write access to the `_system` collection.
   - **Example**: Update the `salesuser` to have read-only access to all collections.
     ```bash
     user update salesuser {"*":"read"}
     ```
-- **`user delete <username>`**
+- 🗑️ **`user delete <username>`**
   - **Description**: Permanently deletes a user from the system.
   - **Permissions Required**: Write access to the `_system` collection.
   - **Example**:
     ```bash
     user delete salesuser
     ```
-- **`update password <target_username> <new_password>`**
+- 🔑 **`update password <target_username> <new_password>`**
   - **Description**: Updates a user's password. A regular user can only change their own password. The `root` user can change anyone's password.
   - **Permissions Required**: Must be authenticated. To change _another_ user's password, you must be `root`.
   - **Example**:
@@ -64,94 +65,114 @@ Authentication is required to execute most commands. User and permission managem
     update password salesuser newSecurePass456
     ```
 
----
-
-### ## Main Store Commands (Root Only)
+### 👑 Main Store Commands (Root Only)
 
 These commands operate on the primary key-value store and are **available only to the `root` user**.
 
-- **`set <key> <value_json> [ttl_seconds]`**
+- 💾 **`set <key> <value_json> [ttl_seconds]`**
   - **Description**: Sets a key-value pair. `ttl_seconds` (optional) is the time-to-live in seconds.
   - **Example**:
     ```bash
     set server:config {"version": "2.1", "active": true} 3600
     ```
-- **`get <key>`**
+- 📥 **`get <key>`**
   - **Description**: Retrieves the value associated with a key.
   - **Example**:
     ```bash
     get server:config
     ```
 
----
+### 🛡️ Admin & Maintenance (Root Only)
 
-### ## Collection Commands
+These commands are for low-level administrative operations and are **available only to the `root` user**.
+
+- 📦 **`backup`**
+  - **Description**: Triggers a full, manual backup of all server data immediately.
+  - **Example**:
+    ```bash
+    backup
+    ```
+- 🔙 **`restore <backup_directory_name>`**
+  - **Description**: **Destructive Action!** Restores the entire server state from a specific backup. The `backup_directory_name` is the name of the backup folder (e.g., `2025-08-04_10-10-01`).
+  - **Example**:
+    ```bash
+    restore 2025-08-04_10-10-01
+    ```
+
+### 🗂️ Collection Commands
 
 #### Collection Management
 
-- **`collection create <collection_name>`**
+- ✨ **`collection create <collection_name>`**
   - **Description**: Creates a new collection.
   - **Example**:
     ```bash
     collection create products
     ```
-- **`collection delete <collection_name>`**
+- 🔥 **`collection delete <collection_name>`**
+
   - **Description**: Deletes an entire collection and all its data.
   - **Example**:
+
     ```bash
     collection delete old_logs
     ```
-- **`collection list`**
+
+- 📜 **`collection list`**
+
   - **Description**: Lists the names of all collections you have permission to read.
   - **Example**:
+
     ```bash
     collection list
     ```
 
-#### Collection Item Operations
+#### 📄 Collection Item Operations
 
-- **`collection item set <collection> [<key>] <value_json> [ttl]`**
+- ✅ **`collection item set <collection> [<key>] <value_json> [ttl]`**
   - **Description**: Saves an item in a collection. If `<key>` is omitted, a unique UUID is generated and also injected into the JSON as the `_id` field.
   - **Example (with key)**:
+
     ```bash
     collection item set products laptop-01 {"name": "Laptop Pro", "price": 1500}
     ```
+
   - **Example (without key)**:
     ```bash
     collection item set products {"name": "RGB Keyboard", "price": 120}
     ```
-- **`collection item get <collection> <key>`**
+- 📤 **`collection item get <collection> <key>`**
   - **Description**: Gets an item from a collection by its key.
   - **Example**:
     ```bash
     collection item get products laptop-01
     ```
-- **`collection item update <collection> <key> <patch_json>`**
+- ✍️ **`collection item update <collection> <key> <patch_json>`**
   - **Description**: Partially updates an existing item by applying the fields from the `patch_json`.
   - **Example**:
     ```bash
     collection item update products laptop-01 {"price": 1450, "stock": 45}
     ```
-- **`collection item delete <collection> <key>`**
+- 🗑️ **`collection item delete <collection> <key>`**
   - **Description**: Deletes an item from a collection.
   - **Example**:
     ```bash
     collection item delete products laptop-01
     ```
-- **`collection item list <collection>`**
+- 📋 **`collection item list <collection>`**
   - **Description**: Lists all items in a collection.
   - **Example**:
     ```bash
     collection item list products
     ```
 
-#### Batch Operations
+#### ⚡ Batch Operations
 
 - **`collection item set many <collection> <json_array>`**
   - **Description**: Inserts multiple items at once.
   - **Example**:
     ```bash
-    collection item set many sales [{"salesperson": "ana", "amount": 200}, {"salesperson": "luis", "amount": 350}]
+    collection item set many sales [{"salesperson": "ana", "amount": 200, "region": "North"}, {"salesperson": "luis", "amount": 350, "region": "South"}]
     ```
 - **`collection item update many <collection> <patch_json_array>`**
   - **Description**: Updates multiple items at once. The array must contain objects with an `_id` and the `patch` to apply.
@@ -160,44 +181,34 @@ These commands operate on the primary key-value store and are **available only t
     collection item update many sales [{"_id": "sale-uuid-1", "patch": {"status": "shipped"}}, {"_id": "sale-uuid-2", "patch": {"status": "shipped"}}]
     ```
 - **`collection item delete many <collection> <keys_json_array>`**
-
   - **Description**: Deletes multiple items at once by providing a JSON array of their key strings.
   - **Example**:
-
     ```bash
     collection item delete many products ["product-uuid-1", "product-uuid-2"]
     ```
 
----
+### 🔍 Index Commands
 
-### ## Index Commands
-
-- **`collection index create <collection> <field_name>`**
-
+- 📈 **`collection index create <collection> <field_name>`**
   - **Description**: Creates an index on a field to accelerate queries.
   - **Example**:
-
     ```bash
     collection index create products category
     ```
-
-- **`collection index list <collection>`**
+- 📜 **`collection index list <collection>`**
   - **Description**: Lists indexed fields in a collection.
   - **Example**:
     ```bash
     collection index list products
     ```
-- **`collection index delete <collection> <field_name>`**
+- 🔥 **`collection index delete <collection> <field_name>`**
   - **Description**: Deletes an index.
   - **Example**:
-
     ```bash
     collection index delete products category
     ```
 
----
-
-### ## Collection Query Command (`collection query`)
+### ❓ Collection Query Command (`collection query`)
 
 This powerful command lets you filter, sort, paginate, and aggregate data.
 
@@ -208,7 +219,7 @@ This powerful command lets you filter, sort, paginate, and aggregate data.
     collection query products {"filter": {"field": "category", "op": "=", "value": "Electronics"}, "limit": 5}
     ```
 
-### ### Deep Query Examples
+### 🧠 Deep Query Examples
 
 Here are advanced examples showcasing the depth of the query engine. Assume a `sales` collection with fields like `region`, `salesperson`, `amount`, `status`, and `date`.
 
@@ -242,3 +253,11 @@ Here are advanced examples showcasing the depth of the query engine. Assume a `s
   ```bash
   collection query sales {"filter":{"field":"region","op":"in","value":["East","West"]},"aggregations":{"total_sales":{"func":"sum","field":"amount"},"average_sale":{"func":"avg","field":"amount"}},"group_by":["salesperson"],"having":{"field":"average_sale","op":">","value":200},"order_by":[{"field":"total_sales","direction":"desc"}],"limit":5}
   ```
+
+### 💻 Client-Side Commands
+
+These are client utilities and are not sent to the server.
+
+- ℹ️ **`help`**: Displays the list of available commands and their usage.
+- 💨 **`clear`**: Clears the terminal screen.
+- 🚪 **`exit`**: Closes the connection and exits the client.

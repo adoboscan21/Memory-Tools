@@ -70,18 +70,19 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var itemsData map[string][]byte
 
-	// --- NEW: Index-based optimization ---
-	// Attempt to find candidate keys using an index before fetching all data.
-	candidateKeys, usedIndex := h.findCandidateKeysFromFilter(colStore, query.Filter)
+	// --- CORRECTED: Use the advanced optimizer and set remainingFilter correctly ---
+	candidateKeys, usedIndex, remainingFilter := h.findCandidateKeysFromFilter(colStore, query.Filter)
 
 	if usedIndex {
-		log.Printf("Query on collection '%s' is using an index. Candidate keys: %d", collectionName, len(candidateKeys))
+		log.Printf("Query on collection '%s' is using index(es). Candidate keys after intersection: %d", collectionName, len(candidateKeys))
 		itemsData = colStore.GetMany(candidateKeys)
 	} else {
 		log.Printf("Query on collection '%s' is NOT using an index. Falling back to full scan.", collectionName)
 		itemsData = colStore.GetAll()
+		// CRITICAL FIX: If no index is used, the remaining filter is the original filter.
+		remainingFilter = query.Filter
 	}
-	// --- END NEW ---
+	// --- END CORRECTION ---
 
 	var itemsWithKeys []struct {
 		Key string
@@ -104,22 +105,15 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		Key string
 		Val map[string]any
 	}{}
-	if usedIndex {
-		// If we used an index, the initial set is already pre-filtered.
-		// We still need to apply the full filter for complex 'and'/'or' conditions.
-		for _, item := range itemsWithKeys {
-			if h.matchFilter(item.Val, query.Filter) {
-				filteredItems = append(filteredItems, item)
-			}
-		}
-	} else {
-		// If no index was used, we filter the full set.
-		for _, item := range itemsWithKeys {
-			if h.matchFilter(item.Val, query.Filter) {
-				filteredItems = append(filteredItems, item)
-			}
+
+	// It applies the remaining filter (which contains only the non-indexed conditions, or the full filter if no index was used).
+	for _, item := range itemsWithKeys {
+		if h.matchFilter(item.Val, remainingFilter) {
+			filteredItems = append(filteredItems, item)
 		}
 	}
+
+	// CRITICAL: The old, duplicated filtering block has been REMOVED from here.
 
 	// Handle DISTINCT early if requested
 	if query.Distinct != "" {
@@ -197,27 +191,74 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	return results, nil
 }
 
-// NEW: findCandidateKeysFromFilter is a simple query optimizer that checks if an index can be used.
-func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore, filter map[string]any) (keys []string, usedIndex bool) {
+// findCandidateKeysFromFilter is the new advanced query optimizer.
+// It analyzes the filter, uses all possible indexes on AND clauses,
+// and returns the candidate keys and any remaining filters that must be applied manually.
+func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore, filter map[string]any) (keys []string, usedIndex bool, remainingFilter map[string]any) {
 	if len(filter) == 0 {
-		return nil, false
+		return nil, false, filter
 	}
 
-	// This is a simple optimizer. It only looks for a single, top-level equality condition.
-	// A more complex optimizer could analyze 'and'/'or' clauses.
+	// The main logic is triggered if we find an "and" clause.
+	if andConditions, ok := filter["and"].([]any); ok {
+		keySets := [][]string{}
+		nonIndexedConditions := []any{}
 
+		// 1. Separate indexable conditions from non-indexable ones.
+		for _, cond := range andConditions {
+			condMap, isMap := cond.(map[string]any)
+			if !isMap {
+				nonIndexedConditions = append(nonIndexedConditions, cond)
+				continue
+			}
+
+			field, fieldOk := condMap["field"].(string)
+			op, opOk := condMap["op"].(string)
+			value := condMap["value"]
+
+			// Is this an equality condition on an indexed field?
+			if fieldOk && opOk && op == "=" && colStore.HasIndex(field) {
+				// Yes, use the index.
+				lookupKeys, _ := colStore.Lookup(field, value)
+				keySets = append(keySets, lookupKeys)
+				log.Printf("Optimizer: Using index on field '%s'. Found %d candidate keys.", field, len(lookupKeys))
+			} else {
+				// No, save this condition for the manual filter pass later.
+				nonIndexedConditions = append(nonIndexedConditions, condMap)
+			}
+		}
+
+		// 2. If no indexes were used, return the original filter.
+		if len(keySets) == 0 {
+			return nil, false, filter
+		}
+
+		// 3. Calculate the intersection of all key sets found by the indexes.
+		candidateKeys := intersectKeys(keySets)
+
+		// 4. Build the remaining filter.
+		// If there are still non-indexed conditions, we'll use them. Otherwise, the filter is empty.
+		newFilter := make(map[string]any)
+		if len(nonIndexedConditions) > 0 {
+			newFilter["and"] = nonIndexedConditions
+		}
+
+		return candidateKeys, true, newFilter
+	}
+
+	// --- Fallback logic for simple filters (not using AND) ---
+	// We keep this to optimize queries that don't use AND.
 	field, fieldOk := filter["field"].(string)
 	op, opOk := filter["op"].(string)
 	value := filter["value"]
-
-	// Check for a simple equality condition: { "field": "x", "op": "=", "value": "y" }
-	if fieldOk && opOk && op == "=" {
-		if colStore.HasIndex(field) {
-			return colStore.Lookup(field, value)
-		}
+	if fieldOk && opOk && op == "=" && colStore.HasIndex(field) {
+		keys, _ := colStore.Lookup(field, value)
+		// For a simple filter, there is no remaining filter to apply.
+		return keys, true, make(map[string]any)
 	}
 
-	return nil, false // No suitable index found or used.
+	// If no index could be used, the full filter is returned.
+	return nil, false, filter
 }
 
 // matchFilter evaluates an item against a filter condition.
@@ -528,4 +569,40 @@ func min(a, b int) int {
 
 func max(a, b int) int {
 	return int(math.Max(float64(a), float64(b)))
+}
+
+// intersectKeys calculates the intersection of multiple string slices (keys).
+// It uses a map for optimal efficiency.
+func intersectKeys(keySets [][]string) []string {
+	if len(keySets) == 0 {
+		return []string{}
+	}
+
+	// Use a map for the first key set for O(1) lookups.
+	// To optimize, you could find the smallest key set and start with that.
+	intersectionMap := make(map[string]struct{})
+	for _, key := range keySets[0] {
+		intersectionMap[key] = struct{}{}
+	}
+
+	// Iterate over the other key sets, keeping only the keys present in the map.
+	for i := 1; i < len(keySets); i++ {
+		currentSetMap := make(map[string]struct{})
+		for _, key := range keySets[i] {
+			// If the key exists in our current intersection, we keep it.
+			if _, found := intersectionMap[key]; found {
+				currentSetMap[key] = struct{}{}
+			}
+		}
+		// The new intersection is the result of this step.
+		intersectionMap = currentSetMap
+	}
+
+	// Convert the final map back to a slice.
+	finalKeys := make([]string, 0, len(intersectionMap))
+	for key := range intersectionMap {
+		finalKeys = append(finalKeys, key)
+	}
+
+	return finalKeys
 }

@@ -632,7 +632,7 @@ func printHelp() {
 	fmt.Println("    collection item get <coll_name> <key>")
 	fmt.Println("    collection item delete <coll_name> <key>")
 	fmt.Println("    collection item update <coll_name> <key> <patch_json>")
-	fmt.Println("    collection item list <coll_name>")
+	fmt.Println("    collection item list <coll_name> (Root Only)")
 	fmt.Println("\n--- Batch & Query ---")
 	fmt.Println("    collection item set many <coll_name> <json_array>")
 	fmt.Println("    collection item update many <coll_name> <patch_json_array>")

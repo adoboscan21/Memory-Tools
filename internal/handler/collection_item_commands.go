@@ -277,6 +277,11 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 		return
 	}
 
+	if !h.IsRoot || !h.IsLocalhostConn {
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Listing all items is a privileged operation for root@localhost. Please use 'collection query' with limit/offset for data retrieval.", nil)
+		return
+	}
+
 	// Authorization check
 	if !h.hasPermission(collectionName, "read") {
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)

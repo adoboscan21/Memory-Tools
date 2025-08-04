@@ -12,29 +12,31 @@ import (
 	"time"
 )
 
-const (
-	backupDir       = "backups"
-	backupRetention = 7 * 24 * time.Hour // 7 days retention
-	backupInterval  = 1 * time.Hour      // Backup frequency
+var (
+	backupDir = "backups"
 )
 
 // BackupManager handles backup operations
 type BackupManager struct {
-	mainStore      store.DataStore
-	colManager     *store.CollectionManager
-	backupLock     sync.RWMutex
-	lastBackupTime time.Time
-	backupRunning  bool
-	stopChan       chan struct{}
-	wg             sync.WaitGroup
+	mainStore       store.DataStore
+	colManager      *store.CollectionManager
+	backupLock      sync.RWMutex
+	lastBackupTime  time.Time
+	backupRunning   bool
+	stopChan        chan struct{}
+	wg              sync.WaitGroup
+	backupInterval  time.Duration
+	backupRetention time.Duration
 }
 
 // NewBackupManager creates a new instance of the backup manager
-func NewBackupManager(mainStore store.DataStore, colManager *store.CollectionManager) *BackupManager {
+func NewBackupManager(mainStore store.DataStore, colManager *store.CollectionManager, interval time.Duration, retention time.Duration) *BackupManager {
 	return &BackupManager{
-		mainStore:  mainStore,
-		colManager: colManager,
-		stopChan:   make(chan struct{}),
+		mainStore:       mainStore,
+		colManager:      colManager,
+		stopChan:        make(chan struct{}),
+		backupInterval:  interval,
+		backupRetention: retention,
 	}
 }
 
@@ -64,7 +66,7 @@ func (bm *BackupManager) runPeriodicBackups() {
 		log.Printf("Error in initial backup: %v", err)
 	}
 
-	ticker := time.NewTicker(backupInterval)
+	ticker := time.NewTicker(bm.backupInterval)
 	defer ticker.Stop()
 
 	for {
@@ -307,7 +309,7 @@ func (bm *BackupManager) verifyBackup(backupPath string) error {
 
 // cleanOldBackups removes backups older than the retention period
 func (bm *BackupManager) cleanOldBackups() {
-	cutoffTime := time.Now().Add(-backupRetention)
+	cutoffTime := time.Now().Add(-bm.backupRetention)
 
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {

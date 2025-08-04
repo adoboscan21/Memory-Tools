@@ -53,9 +53,9 @@ func main() {
 	}
 
 	// Initialize the main in-memory store and the collection manager.
-	mainInMemStore := store.NewInMemStore()
+	mainInMemStore := store.NewInMemStoreWithShards(cfg.NumShards)
 	collectionPersister := &persistence.CollectionPersisterImpl{}
-	collectionManager := store.NewCollectionManager(collectionPersister)
+	collectionManager := store.NewCollectionManager(collectionPersister, cfg.NumShards)
 
 	// Load persistent data for the main store and all collections.
 	if err := persistence.LoadData(mainInMemStore); err != nil {
@@ -141,7 +141,7 @@ func main() {
 	log.Printf("TLS TCP server listening securely on %s", cfg.Port)
 
 	// create backup manager
-	backupManager := persistence.NewBackupManager(mainInMemStore, collectionManager)
+	backupManager := persistence.NewBackupManager(mainInMemStore, collectionManager, cfg.BackupInterval, cfg.BackupRetention)
 	// start backups
 	backupManager.Start()
 	// sure close on exit.

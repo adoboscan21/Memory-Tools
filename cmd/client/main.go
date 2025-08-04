@@ -188,6 +188,10 @@ func main() {
 
 		// --- Command Processing ---
 		if cmd == "login" {
+			if isAuthenticated {
+				fmt.Println("Error: You are already logged in.")
+				continue
+			}
 			argsList := strings.Fields(rawArgs)
 			if len(argsList) != 2 {
 				fmt.Println("Usage: login <username> <password>")
@@ -554,7 +558,7 @@ func readResponse(conn net.Conn, lastCmd string) protocol.ResponseStatus {
 		}
 
 		var prettyJSON bytes.Buffer
-		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "    "); err == nil {
+		if err := stdjson.Indent(&prettyJSON, finalDataForPrint, "    ", "  "); err == nil {
 			fmt.Printf("    Data (JSON):\n%s\n", prettyJSON.String())
 		} else {
 			fmt.Printf("    Data (Raw):\n%s\n", string(finalDataForPrint))

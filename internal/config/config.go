@@ -21,6 +21,9 @@ type Config struct {
 	SnapshotInterval time.Duration `json:"snapshot_interval"`  // How often to take snapshots
 	EnableSnapshots  bool          `json:"enable_snapshots"`   // Whether scheduled snapshots are enabled.
 	TtlCleanInterval time.Duration `json:"ttl_clean_interval"` // How often the TTL cleaner runs
+	BackupInterval   time.Duration `json:"backup_interval"`
+	BackupRetention  time.Duration `json:"backup_retention"`
+	NumShards        int           `json:"num_shards"`
 }
 
 // configJSON is an intermediate struct used for JSON unmarshalling.
@@ -33,6 +36,9 @@ type configJSON struct {
 	SnapshotInterval string `json:"snapshot_interval"`
 	EnableSnapshots  bool   `json:"enable_snapshots"`
 	TtlCleanInterval string `json:"ttl_clean_interval"`
+	BackupInterval   string `json:"backup_interval"`
+	BackupRetention  string `json:"backup_retention"`
+	NumShards        int    `json:"num_shards"`
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
@@ -46,6 +52,9 @@ func NewDefaultConfig() Config {
 		SnapshotInterval: 5 * time.Minute,
 		EnableSnapshots:  true,
 		TtlCleanInterval: 1 * time.Minute,
+		BackupInterval:   1 * time.Hour,
+		BackupRetention:  7 * 24 * time.Hour,
+		NumShards:        16,
 	}
 }
 
@@ -113,6 +122,24 @@ func LoadConfig(filePath string) (Config, error) {
 		if parseErr != nil {
 			return cfg, fmt.Errorf("invalid 'ttl_clean_interval' format in config file: %w", parseErr)
 		}
+
+	}
+	if jsonCfg.BackupInterval != "" {
+		cfg.BackupInterval, parseErr = time.ParseDuration(jsonCfg.BackupInterval)
+		if parseErr != nil {
+			return cfg, fmt.Errorf("invalid 'backup_interval' format in config file: %w", parseErr)
+		}
+	}
+
+	if jsonCfg.BackupRetention != "" {
+		cfg.BackupRetention, parseErr = time.ParseDuration(jsonCfg.BackupRetention)
+		if parseErr != nil {
+			return cfg, fmt.Errorf("invalid 'backup_retention' format in config file: %w", parseErr)
+		}
+	}
+
+	if jsonCfg.NumShards > 0 {
+		cfg.NumShards = jsonCfg.NumShards
 	}
 
 	log.Printf("Configuration loaded from '%s'.", filePath)

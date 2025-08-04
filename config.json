@@ -6,5 +6,8 @@
   "shutdown_timeout": "10s",
   "snapshot_interval": "5m",
   "enable_snapshots": true,
-  "ttl_clean_interval": "1m"
+  "ttl_clean_interval": "1m",
+  "backup_interval": "1h",
+  "backup_retention": "168h",
+   "num_shards": 32
 }

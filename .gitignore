@@ -17,6 +17,7 @@ certificates
 # Test binary, built with `go test -c`
 *.test
 backups
+logs
 cat.log
 cat_command.sh
 

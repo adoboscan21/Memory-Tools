@@ -370,7 +370,7 @@ func (s *InMemStore) GetAll() map[string][]byte {
 	snapshotData := make(map[string][]byte)
 	now := time.Now()
 
-	for i, shard := range s.shards {
+	for _, shard := range s.shards {
 		shard.mu.RLock()
 		for k, item := range shard.data {
 			if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
@@ -380,7 +380,7 @@ func (s *InMemStore) GetAll() map[string][]byte {
 			}
 		}
 		shard.mu.RUnlock()
-		log.Printf("GetAll: Processed Shard %d", i)
+
 	}
 	log.Printf("GetAll: Combined snapshot data from all %d shards. Total items: %d", s.numShards, len(snapshotData))
 	return snapshotData

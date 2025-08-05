@@ -6,10 +6,12 @@ import (
 	"memory-tools/internal/protocol"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
 
+// handleCollectionItemSet processes the CmdCollectionItemSet command.
 // handleCollectionItemSet processes the CmdCollectionItemSet command.
 func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(conn)
@@ -34,15 +36,54 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 		log.Printf("Warning: Empty key received for COLLECTION_ITEM_SET. Generated UUID '%s'.", key)
 	}
 
-	updatedValue, err := ensureIDField(value, key)
-	if err != nil {
-		log.Printf("Error ensuring _id field for key '%s' in collection '%s': %v", key, collectionName, err)
-		protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value for _id field", nil)
+	colStore := h.CollectionManager.GetCollection(collectionName)
+
+	// --- START OF NEW TIMESTAMP LOGIC ---
+
+	// 1. Unmarshal the incoming value into a map to modify it
+	var data map[string]any
+	if err := json.Unmarshal(value, &data); err != nil {
+		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid value. Must be a JSON object.", nil)
 		return
 	}
 
-	colStore := h.CollectionManager.GetCollection(collectionName)
-	colStore.Set(key, updatedValue, ttl)
+	// 2. Check if the item already exists to differentiate between create and update
+	existingValue, found := colStore.Get(key)
+	now := time.Now().UTC().Format(time.RFC3339) // Using UTC is a good practice
+
+	data["_id"] = key // Ensure the _id field
+	data["updated_at"] = now
+
+	if !found {
+		// --- CREATE ---
+		// The item is new, so we set created_at
+		data["created_at"] = now
+	} else {
+		// --- UPDATE ---
+		// The item exists, so we preserve the original created_at
+		var existingData map[string]any
+		if err := json.Unmarshal(existingValue, &existingData); err == nil {
+			if originalCreatedAt, ok := existingData["created_at"]; ok {
+				data["created_at"] = originalCreatedAt
+			} else {
+				// If for some reason the old data didn't have created_at, add it now
+				data["created_at"] = now
+			}
+		}
+	}
+
+	// 3. Marshal the object back to JSON with the new fields
+	finalValue, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Error marshalling final value with timestamps for key '%s': %v", key, err)
+		protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value with timestamps", nil)
+		return
+	}
+
+	// --- END OF NEW TIMESTAMP LOGIC ---
+
+	// We use finalValue instead of the original 'value'
+	colStore.Set(key, finalValue, ttl)
 
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), nil)
@@ -89,11 +130,16 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 	}
 
 	for k, v := range patchData {
-		if k == "_id" {
+		// Prevent the client from overwriting _id and created_at
+		if k == "_id" || k == "created_at" {
 			continue
 		}
 		existingData[k] = v
 	}
+
+	// --- ADD/UPDATE updated_at ---
+	existingData["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	// --- END ---
 
 	updatedValue, err := json.Marshal(existingData)
 	if err != nil {
@@ -101,6 +147,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 		return
 	}
 
+	// TTL 0 so it doesn't expire on an update
 	colStore.Set(key, updatedValue, 0)
 
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
@@ -141,6 +188,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	updatedCount := 0
 	failedKeys := []string{}
+	now := time.Now().UTC().Format(time.RFC3339) // Get current time once for the whole batch
 
 	for _, p := range payloads {
 		if p.ID == "" || p.Patch == nil {
@@ -162,11 +210,16 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 		}
 
 		for k, v := range p.Patch {
-			if k == "_id" {
+			// Prevent the client from overwriting _id and created_at
+			if k == "_id" || k == "created_at" {
 				continue
 			}
 			existingData[k] = v
 		}
+
+		// --- ADD/UPDATE updated_at ---
+		existingData["updated_at"] = now
+		// --- END ---
 
 		updatedValue, err := json.Marshal(existingData)
 		if err != nil {
@@ -175,6 +228,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 			continue
 		}
 
+		// TTL 0 so it doesn't expire on an update
 		colStore.Set(p.ID, updatedValue, 0)
 		updatedCount++
 	}
@@ -355,6 +409,7 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	insertedCount := 0
+	now := time.Now().UTC().Format(time.RFC3339) // Get current time once for the whole batch
 
 	for _, record := range records {
 		var key string
@@ -363,18 +418,26 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 		} else {
 			key = uuid.New().String()
 		}
+
+		// --- ADD TIMESTAMP LOGIC ---
 		record["_id"] = key
+		record["created_at"] = now
+		record["updated_at"] = now
+		// --- END TIMESTAMP LOGIC ---
 
 		updatedValue, err := json.Marshal(record)
 		if err != nil {
 			log.Printf("Error marshalling record for SET_MANY: %v", err)
 			continue
 		}
+		// TTL 0 so it doesn't expire
 		colStore.Set(key, updatedValue, 0)
 		insertedCount++
 	}
 
-	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	if insertedCount > 0 {
+		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	}
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence async)", insertedCount, collectionName), nil)
 }
 

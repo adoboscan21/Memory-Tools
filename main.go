@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"io"
 	"log"
+	"log/slog"
 	"memory-tools/internal/config"
 	"memory-tools/internal/handler"
 	"memory-tools/internal/persistence"
@@ -39,6 +41,31 @@ func (f updateActivityFunc) UpdateActivity() {
 }
 
 func main() {
+
+	// logs configuration //
+	// Create the logs directory if it doesn't exist
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		log.Fatalf("failed to create log directory: %v", err)
+	}
+
+	// Now, open the log file within that directory
+	logFile, err := os.OpenFile("logs/memory-tools.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("failed to open log file: %v", err)
+	}
+
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+
+	handlerLog := slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
+		AddSource: true,
+		Level:     slog.LevelDebug,
+	})
+
+	logger := slog.New(handlerLog)
+
+	slog.SetDefault(logger)
+	// logs configuration //
+
 	// Configure logging to include date, time, and file information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 

@@ -9,3 +9,5 @@ services:
       - ./collections:/data/collections
       - ./backups:/data/backups
     restart: always # Always restart the container if it stops
+    env_file:
+      - ./.env

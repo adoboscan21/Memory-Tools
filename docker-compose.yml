@@ -8,6 +8,7 @@ services:
     volumes:
       - ./collections:/data/collections
       - ./backups:/data/backups
+      - ./logs:/data/logs
     restart: always # Always restart the container if it stops
     env_file:
       - ./.env

@@ -9,27 +9,31 @@ import (
 
 // Config holds application-wide configuration.
 type Config struct {
-	Port             string
-	ShutdownTimeout  time.Duration
-	SnapshotInterval time.Duration
-	EnableSnapshots  bool
-	TtlCleanInterval time.Duration
-	BackupInterval   time.Duration
-	BackupRetention  time.Duration
-	NumShards        int
+	Port                 string
+	ShutdownTimeout      time.Duration
+	SnapshotInterval     time.Duration
+	EnableSnapshots      bool
+	TtlCleanInterval     time.Duration
+	BackupInterval       time.Duration
+	BackupRetention      time.Duration
+	NumShards            int
+	DefaultRootPassword  string
+	DefaultAdminPassword string
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
 func NewDefaultConfig() Config {
 	return Config{
-		Port:             ":5876",
-		ShutdownTimeout:  10 * time.Second,
-		SnapshotInterval: 5 * time.Minute,
-		EnableSnapshots:  true,
-		TtlCleanInterval: 1 * time.Minute,
-		BackupInterval:   1 * time.Hour,
-		BackupRetention:  7 * 24 * time.Hour,
-		NumShards:        16,
+		Port:                 ":5876",
+		ShutdownTimeout:      10 * time.Second,
+		SnapshotInterval:     5 * time.Minute,
+		EnableSnapshots:      true,
+		TtlCleanInterval:     1 * time.Minute,
+		BackupInterval:       1 * time.Hour,
+		BackupRetention:      7 * 24 * time.Hour,
+		NumShards:            16,
+		DefaultRootPassword:  "rootpass",
+		DefaultAdminPassword: "adminpass",
 	}
 }
 
@@ -72,6 +76,16 @@ func applyEnvConfig(cfg *Config) {
 		} else {
 			slog.Warn("Invalid MEMORYTOOLS_ENABLE_SNAPSHOTS env var, using default", "value", enableSnapshotsEnv)
 		}
+	}
+
+	if rootPassEnv := os.Getenv("MEMORYTOOLS_ROOT_PASSWORD"); rootPassEnv != "" {
+		cfg.DefaultRootPassword = rootPassEnv
+		slog.Info("Overriding DefaultRootPassword from environment")
+	}
+
+	if adminPassEnv := os.Getenv("MEMORYTOOLS_ADMIN_PASSWORD"); adminPassEnv != "" {
+		cfg.DefaultAdminPassword = adminPassEnv
+		slog.Info("Overriding DefaultAdminPassword from environment")
 	}
 
 	// Duration values

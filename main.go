@@ -98,7 +98,8 @@ func main() {
 	adminUserKey := handler.UserPrefix + "admin"
 	if _, found := systemCollection.Get(adminUserKey); !found {
 		slog.Info("Default admin user not found, creating...", "user", "admin")
-		hashedPassword, err := handler.HashPassword("adminpass")
+		hashedPassword, err := handler.HashPassword(cfg.DefaultAdminPassword)
+		slog.Info("Default admin user created", "user", "admin")
 		if err != nil {
 			slog.Error("Fatal error hashing default admin password", "error", err)
 			os.Exit(1)
@@ -125,7 +126,8 @@ func main() {
 	rootUserKey := handler.UserPrefix + "root"
 	if _, found := systemCollection.Get(rootUserKey); !found {
 		slog.Info("Default root user not found, creating...", "user", "root")
-		hashedPassword, err := handler.HashPassword("rootpass")
+		hashedPassword, err := handler.HashPassword(cfg.DefaultRootPassword)
+		slog.Info("Default root user created", "user", "root")
 		if err != nil {
 			slog.Error("Fatal error hashing default root password", "error", err)
 			os.Exit(1)

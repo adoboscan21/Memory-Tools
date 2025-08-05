@@ -34,16 +34,16 @@ Memory Tools is a high-performance, sharded in-memory key-value **and document**
 
 To get the Memory Tools server up and running quickly, follow these steps:
 
-1. **Build the Docker Image:**
+1. **Copy .env file:**
 
    ```bash
-   docker-compose build
+   cp .example.env .env
    ```
 
 2. **Start the Services:**
 
    ```bash
-   docker-compose up -d
+   docker compose up -d --build
    ```
 
    This starts the main database server on port `5876`.

@@ -7,4 +7,5 @@ services:
       - "5876:5876" # Map host port
     volumes:
       - ./collections:/root/collections
+      - ./backups:/root/backups
     restart: always # Always restart the container if it stops

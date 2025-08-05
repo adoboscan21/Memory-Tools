@@ -2,7 +2,7 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"memory-tools/internal/protocol"
 	"net"
 	"strings"
@@ -12,11 +12,10 @@ import (
 )
 
 // handleCollectionItemSet processes the CmdCollectionItemSet command.
-// handleCollectionItemSet processes the CmdCollectionItemSet command.
 func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_ITEM_SET command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read COLLECTION_ITEM_SET command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_SET command format", nil)
 		return
 	}
@@ -25,67 +24,56 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item set attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	if key == "" {
 		key = uuid.New().String()
-		log.Printf("Warning: Empty key received for COLLECTION_ITEM_SET. Generated UUID '%s'.", key)
+		slog.Debug("Empty key received for SET, generated new UUID", "key", key, "collection", collectionName)
 	}
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 
-	// --- START OF NEW TIMESTAMP LOGIC ---
-
-	// 1. Unmarshal the incoming value into a map to modify it
 	var data map[string]any
 	if err := json.Unmarshal(value, &data); err != nil {
+		slog.Warn("Failed to unmarshal item data for SET", "error", err, "collection", collectionName, "user", h.AuthenticatedUser)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid value. Must be a JSON object.", nil)
 		return
 	}
 
-	// 2. Check if the item already exists to differentiate between create and update
 	existingValue, found := colStore.Get(key)
-	now := time.Now().UTC().Format(time.RFC3339) // Using UTC is a good practice
+	now := time.Now().UTC().Format(time.RFC3339)
 
-	data["_id"] = key // Ensure the _id field
+	data["_id"] = key
 	data["updated_at"] = now
 
 	if !found {
-		// --- CREATE ---
-		// The item is new, so we set created_at
 		data["created_at"] = now
 	} else {
-		// --- UPDATE ---
-		// The item exists, so we preserve the original created_at
 		var existingData map[string]any
 		if err := json.Unmarshal(existingValue, &existingData); err == nil {
 			if originalCreatedAt, ok := existingData["created_at"]; ok {
 				data["created_at"] = originalCreatedAt
 			} else {
-				// If for some reason the old data didn't have created_at, add it now
 				data["created_at"] = now
 			}
 		}
 	}
 
-	// 3. Marshal the object back to JSON with the new fields
 	finalValue, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("Error marshalling final value with timestamps for key '%s': %v", key, err)
+		slog.Error("Failed to marshal final value with timestamps", "key", key, "collection", collectionName, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value with timestamps", nil)
 		return
 	}
 
-	// --- END OF NEW TIMESTAMP LOGIC ---
-
-	// We use finalValue instead of the original 'value'
 	colStore.Set(key, finalValue, ttl)
-
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+
+	slog.Info("Item set in collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "operation", boolToString(found, "update", "create"))
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), nil)
 }
 
@@ -93,18 +81,17 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 	collectionName, key, patchValue, err := protocol.ReadCollectionItemUpdateCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_ITEM_UPDATE command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read COLLECTION_ITEM_UPDATE command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_UPDATE command format", nil)
 		return
 	}
-
 	if collectionName == "" || key == "" || len(patchValue) == 0 {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name, key, or patch value cannot be empty", nil)
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item update attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -113,44 +100,45 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 
 	existingValue, found := colStore.Get(key)
 	if !found {
+		slog.Warn("Item update failed: key not found", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection '%s'", key, collectionName), nil)
 		return
 	}
 
 	var existingData map[string]any
 	if err := json.Unmarshal(existingValue, &existingData); err != nil {
+		slog.Error("Failed to unmarshal existing document for update", "key", key, "collection", collectionName, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document. Cannot apply patch.", nil)
 		return
 	}
 
 	var patchData map[string]any
 	if err := json.Unmarshal(patchValue, &patchData); err != nil {
+		slog.Warn("Failed to unmarshal patch data for update", "key", key, "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
 		return
 	}
 
 	for k, v := range patchData {
-		// Prevent the client from overwriting _id and created_at
 		if k == "_id" || k == "created_at" {
 			continue
 		}
 		existingData[k] = v
 	}
 
-	// --- ADD/UPDATE updated_at ---
 	existingData["updated_at"] = time.Now().UTC().Format(time.RFC3339)
-	// --- END ---
 
 	updatedValue, err := json.Marshal(existingData)
 	if err != nil {
+		slog.Error("Failed to marshal updated document", "key", key, "collection", collectionName, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal updated document.", nil)
 		return
 	}
 
-	// TTL 0 so it doesn't expire on an update
 	colStore.Set(key, updatedValue, 0)
-
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+
+	slog.Info("Item updated in collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' updated in collection '%s' (persistence async)", key, collectionName), updatedValue)
 }
 
@@ -163,24 +151,24 @@ type updateManyPayload struct {
 func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 	collectionName, value, err := protocol.ReadCollectionItemUpdateManyCommand(conn)
 	if err != nil {
-		log.Printf("Error reading UPDATE_COLLECTION_ITEMS_MANY command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read UPDATE_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid UPDATE_COLLECTION_ITEMS_MANY command format", nil)
 		return
 	}
-
 	if collectionName == "" || len(value) == 0 {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
 		return
 	}
 
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item update-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	var payloads []updateManyPayload
 	if err := json.Unmarshal(value, &payloads); err != nil {
-		log.Printf("Error unmarshalling JSON array for UPDATE_MANY in collection '%s': %v", collectionName, err)
+		slog.Warn("Failed to unmarshal JSON array for UPDATE_MANY", "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format. Expected an array of `{\"_id\": \"...\", \"patch\": {...}}`.", nil)
 		return
 	}
@@ -188,11 +176,11 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	updatedCount := 0
 	failedKeys := []string{}
-	now := time.Now().UTC().Format(time.RFC3339) // Get current time once for the whole batch
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	for _, p := range payloads {
 		if p.ID == "" || p.Patch == nil {
-			log.Printf("Skipping invalid payload in UPDATE_MANY batch for collection '%s': missing _id or patch.", collectionName)
+			slog.Debug("Skipping invalid payload in UPDATE_MANY batch", "collection", collectionName)
 			continue
 		}
 
@@ -204,31 +192,27 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 
 		var existingData map[string]any
 		if err := json.Unmarshal(existingValue, &existingData); err != nil {
-			log.Printf("Failed to unmarshal existing document for key '%s' in UPDATE_MANY. Skipping.", p.ID)
+			slog.Warn("Failed to unmarshal existing document in UPDATE_MANY batch", "key", p.ID, "collection", collectionName, "error", err)
 			failedKeys = append(failedKeys, p.ID)
 			continue
 		}
 
 		for k, v := range p.Patch {
-			// Prevent the client from overwriting _id and created_at
 			if k == "_id" || k == "created_at" {
 				continue
 			}
 			existingData[k] = v
 		}
 
-		// --- ADD/UPDATE updated_at ---
 		existingData["updated_at"] = now
-		// --- END ---
 
 		updatedValue, err := json.Marshal(existingData)
 		if err != nil {
-			log.Printf("Failed to marshal updated document for key '%s' in UPDATE_MANY. Skipping.", p.ID)
+			slog.Warn("Failed to marshal updated document in UPDATE_MANY batch", "key", p.ID, "collection", collectionName, "error", err)
 			failedKeys = append(failedKeys, p.ID)
 			continue
 		}
 
-		// TTL 0 so it doesn't expire on an update
 		colStore.Set(p.ID, updatedValue, 0)
 		updatedCount++
 	}
@@ -237,12 +221,12 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	}
 
+	slog.Info("Update-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "updated_count", updatedCount, "failed_count", len(failedKeys))
 	summary := fmt.Sprintf("OK: %d items updated. %d items failed or not found in collection '%s'.", updatedCount, len(failedKeys), collectionName)
 	var responseData []byte
 	if len(failedKeys) > 0 {
 		responseData, _ = json.Marshal(map[string][]string{"failed_keys": failedKeys})
 	}
-
 	protocol.WriteResponse(conn, protocol.StatusOk, summary, responseData)
 }
 
@@ -250,7 +234,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 	collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_ITEM_GET command: %v", err)
+		slog.Error("Failed to read GET_ITEM command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_GET command format", nil)
 		return
 	}
@@ -259,16 +243,17 @@ func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "read") {
+		slog.Warn("Unauthorized collection item get attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	value, found := colStore.Get(key)
+	slog.Debug("Get item from collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "found", found)
+
 	if found {
-		// Sanitize system user data before sending it over the wire
 		if collectionName == SystemCollectionName && strings.HasPrefix(key, UserPrefix) {
 			var userInfo UserInfo
 			if err := json.Unmarshal(value, &userInfo); err == nil {
@@ -292,7 +277,7 @@ func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 	collectionName, key, err := protocol.ReadCollectionItemDeleteCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_ITEM_DELETE command: %v", err)
+		slog.Error("Failed to read DELETE_ITEM command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_DELETE command format", nil)
 		return
 	}
@@ -301,8 +286,8 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -315,6 +300,7 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 	colStore.Delete(key)
 
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	slog.Info("Item deleted from collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s' (persistence async)", key, collectionName), nil)
 }
 
@@ -322,7 +308,7 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionItemListCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_ITEM_LIST command: %v", err)
+		slog.Error("Failed to read LIST_ITEMS command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_LIST command format", nil)
 		return
 	}
@@ -332,12 +318,13 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	}
 
 	if !h.IsRoot || !h.IsLocalhostConn {
+		slog.Warn("Unauthorized list-all-items attempt", "user", h.AuthenticatedUser, "collection", collectionName, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Listing all items is a privileged operation for root@localhost. Please use 'collection query' with limit/offset for data retrieval.", nil)
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "read") {
+		slog.Warn("Unauthorized collection item list attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -350,7 +337,6 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	allData := colStore.GetAll()
 
-	// Sanitize system collection data
 	if collectionName == SystemCollectionName {
 		sanitizedData := make(map[string]map[string]any)
 		for key, val := range allData {
@@ -364,7 +350,6 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 					}
 				}
 			} else {
-				// Hide non-user system data for security
 				sanitizedData[key] = map[string]any{"data": "non-user system data (omitted)"}
 			}
 		}
@@ -373,43 +358,44 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	} else {
 		jsonResponseData, err := json.Marshal(allData)
 		if err != nil {
-			log.Printf("Error marshalling collection items to JSON for '%s': %v", collectionName, err)
+			slog.Error("Failed to marshal collection items to JSON", "collection", collectionName, "error", err)
 			protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection items", nil)
 			return
 		}
 		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Items from collection '%s' retrieved", collectionName), jsonResponseData)
 	}
+	slog.Info("All items listed from collection", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", len(allData))
 }
 
 // handleCollectionItemSetMany processes the CmdCollectionItemSetMany command.
 func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 	collectionName, value, err := protocol.ReadCollectionItemSetManyCommand(conn)
 	if err != nil {
-		log.Printf("Error reading SET_COLLECTION_ITEMS_MANY command: %v", err)
+		slog.Error("Failed to read SET_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET_COLLECTION_ITEMS_MANY command format", nil)
 		return
 	}
-
 	if collectionName == "" || len(value) == 0 {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
 		return
 	}
 
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item set-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	var records []map[string]any
 	if err := json.Unmarshal(value, &records); err != nil {
-		log.Printf("Error unmarshalling JSON array for SET_MANY: %v", err)
+		slog.Warn("Failed to unmarshal JSON array for SET_MANY", "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format", nil)
 		return
 	}
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	insertedCount := 0
-	now := time.Now().UTC().Format(time.RFC3339) // Get current time once for the whole batch
+	now := time.Now().UTC().Format(time.RFC3339)
 
 	for _, record := range records {
 		var key string
@@ -419,18 +405,15 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 			key = uuid.New().String()
 		}
 
-		// --- ADD TIMESTAMP LOGIC ---
 		record["_id"] = key
 		record["created_at"] = now
 		record["updated_at"] = now
-		// --- END TIMESTAMP LOGIC ---
 
 		updatedValue, err := json.Marshal(record)
 		if err != nil {
-			log.Printf("Error marshalling record for SET_MANY: %v", err)
+			slog.Warn("Failed to marshal record in SET_MANY batch", "key", key, "collection", collectionName, "error", err)
 			continue
 		}
-		// TTL 0 so it doesn't expire
 		colStore.Set(key, updatedValue, 0)
 		insertedCount++
 	}
@@ -438,6 +421,7 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 	if insertedCount > 0 {
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	}
+	slog.Info("Set-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", insertedCount)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence async)", insertedCount, collectionName), nil)
 }
 
@@ -445,17 +429,17 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 	collectionName, keys, err := protocol.ReadCollectionItemDeleteManyCommand(conn)
 	if err != nil {
-		log.Printf("Error reading DELETE_COLLECTION_ITEMS_MANY command: %v", err)
+		slog.Error("Failed to read DELETE_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_ITEMS_MANY command format", nil)
 		return
 	}
-
 	if collectionName == "" || len(keys) == 0 {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty and keys must be provided", nil)
 		return
 	}
 
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection item delete-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -471,5 +455,14 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 	}
 
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+	slog.Info("Delete-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "key_count", len(keys))
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys deleted from collection '%s' (persistence async)", len(keys), collectionName), nil)
+}
+
+// boolToString is a small helper for clearer logs.
+func boolToString(b bool, trueStr, falseStr string) string {
+	if b {
+		return trueStr
+	}
+	return falseStr
 }

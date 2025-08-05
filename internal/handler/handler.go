@@ -3,7 +3,7 @@ package handler
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
@@ -59,15 +59,15 @@ func NewConnectionHandler(mainStore store.DataStore, colManager *store.Collectio
 // HandleConnection processes incoming commands from a TCP client.
 func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 	defer conn.Close()
-	log.Printf("New client connected: %s (Is Localhost: %t)", conn.RemoteAddr(), h.IsLocalhostConn)
+	slog.Info("New client connected", "remote_addr", conn.RemoteAddr().String(), "is_localhost", h.IsLocalhostConn)
 
 	for {
 		cmdType, err := protocol.ReadCommandType(conn)
 		if err != nil {
 			if err == io.EOF {
-				log.Printf("Client disconnected: %s", conn.RemoteAddr())
+				slog.Info("Client disconnected", "remote_addr", conn.RemoteAddr().String())
 			} else {
-				log.Printf("Error reading command type from %s: %v", conn.RemoteAddr(), err)
+				slog.Error("Failed to read command type", "remote_addr", conn.RemoteAddr().String(), "error", err)
 			}
 			return // Exit goroutine on read error
 		}
@@ -82,7 +82,10 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 
 		// All other commands require authentication.
 		if !h.IsAuthenticated {
-			log.Printf("Unauthorized access attempt from %s for command %d. Connection not authenticated.", conn.RemoteAddr(), cmdType)
+			slog.Warn("Unauthorized access attempt",
+				"remote_addr", conn.RemoteAddr().String(),
+				"command_type", cmdType,
+			)
 			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
 			continue
 		}
@@ -147,9 +150,12 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			h.handleRestore(conn)
 
 		default:
-			log.Printf("Received unhandled or unknown authenticated command type %d from client %s.", cmdType, conn.RemoteAddr())
+			slog.Warn("Received unhandled command type",
+				"command_type", cmdType,
+				"remote_addr", conn.RemoteAddr().String(),
+			)
 			if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil); err != nil {
-				log.Printf("Error writing bad command response to %s: %v", conn.RemoteAddr(), err)
+				slog.Error("Failed to write bad command response", "remote_addr", conn.RemoteAddr().String(), "error", err)
 			}
 		}
 	}

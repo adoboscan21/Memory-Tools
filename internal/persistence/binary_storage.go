@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
@@ -60,7 +60,7 @@ func SaveData(s store.DataStore) error {
 		return fmt.Errorf("failed to rename temporary main snapshot file to '%s': %w", mainDataFile, err)
 	}
 
-	log.Printf("Main data successfully saved to %s", mainDataFile)
+	slog.Info("Main data successfully saved", "path", mainDataFile, "item_count", len(data))
 	return nil
 }
 
@@ -69,7 +69,7 @@ func LoadData(s store.DataStore) error {
 	file, err := os.Open(mainDataFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Main data file '%s' not found, initializing with empty data.", mainDataFile)
+			slog.Info("Main data file not found, initializing with empty data", "path", mainDataFile)
 			return nil
 		}
 		return fmt.Errorf("failed to open main data file '%s': %w", mainDataFile, err)
@@ -102,18 +102,17 @@ func LoadData(s store.DataStore) error {
 			return fmt.Errorf("failed to read value for key '%s' in main store: %w", key, err)
 		}
 		value := valBytes
-
 		loadedData[key] = value
 	}
 
 	s.LoadData(loadedData)
-	log.Printf("Main data successfully loaded from %s. Total keys: %d", mainDataFile, len(loadedData))
+	slog.Info("Main data successfully loaded", "path", mainDataFile, "total_keys", len(loadedData))
 	return nil
 }
 
 // SnapshotManager manages the scheduling and execution of data snapshots for the main InMemStore.
 type SnapshotManager struct {
-	Store            store.DataStore // Refers to the main DataStore.
+	Store            store.DataStore
 	Interval         time.Duration
 	Quit             chan struct{}
 	SnapshotsEnabled bool
@@ -132,23 +131,23 @@ func NewSnapshotManager(s store.DataStore, interval time.Duration, enabled bool)
 // Start begins the scheduled snapshot process for the main store.
 func (sm *SnapshotManager) Start() {
 	if !sm.SnapshotsEnabled || sm.Interval <= 0 {
-		log.Println("Main store snapshots are disabled or interval is invalid. Skipping scheduled snapshots.")
+		slog.Info("Main store snapshots are disabled.")
 		return
 	}
 
-	log.Printf("Scheduled main store snapshots enabled every %s.", sm.Interval)
+	slog.Info("Scheduled main store snapshots enabled", "interval", sm.Interval.String())
 	ticker := time.NewTicker(sm.Interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			log.Println("Performing scheduled main store snapshot...")
+			slog.Info("Performing scheduled main store snapshot...")
 			if err := SaveData(sm.Store); err != nil {
-				log.Printf("Error performing scheduled main store snapshot: %v", err)
+				slog.Error("Error performing scheduled main store snapshot", "error", err)
 			}
 		case <-sm.Quit:
-			log.Println("Main store snapshot manager received quit signal. Stopping.")
+			slog.Info("Main store snapshot manager received quit signal. Stopping.")
 			return
 		}
 	}
@@ -169,15 +168,13 @@ const collectionFileExtension = ".mtdb"
 type CollectionPersisterImpl struct{}
 
 // SaveCollectionData saves all non-expired data from a single collection (DataStore) to a file.
-// MODIFIED: Now also saves index metadata.
 func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s store.DataStore) error {
-	// Ensure the collections directory exists.
 	if err := os.MkdirAll(collectionsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create collections directory '%s': %w", collectionsDir, err)
 	}
 
 	data := s.GetAll()
-	indexedFields := s.ListIndexes() // Get the list of indexed fields.
+	indexedFields := s.ListIndexes()
 
 	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
 	tempFilePath := filePath + ".tmp"
@@ -188,13 +185,11 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 	}
 	defer file.Close()
 
-	// --- NEW: Write index metadata header ---
-	// 1. Write number of indexes.
+	// Write index metadata header
 	if err := binary.Write(file, binary.LittleEndian, uint32(len(indexedFields))); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to write index count for collection '%s': %w", collectionName, err)
 	}
-	// 2. Write each indexed field name.
 	for _, field := range indexedFields {
 		if err := binary.Write(file, binary.LittleEndian, uint32(len(field))); err != nil {
 			os.Remove(tempFilePath)
@@ -205,9 +200,8 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 			return fmt.Errorf("failed to write index field name '%s': %w", field, err)
 		}
 	}
-	// --- END NEW ---
 
-	// Write data (as before).
+	// Write data
 	if err := binary.Write(file, binary.LittleEndian, uint32(len(data))); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to write data count for collection '%s': %w", collectionName, err)
@@ -248,7 +242,7 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 		return fmt.Errorf("failed to rename temporary file to '%s' for collection '%s': %w", filePath, collectionName, err)
 	}
 
-	log.Printf("Collection '%s' with %d indexes successfully saved to %s", collectionName, len(indexedFields), filePath)
+	slog.Info("Collection data saved", "collection", collectionName, "path", filePath, "indexes", len(indexedFields), "items", len(data))
 	return nil
 }
 
@@ -257,39 +251,35 @@ func (p *CollectionPersisterImpl) DeleteCollectionFile(collectionName string) er
 	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
 	if err := os.Remove(filePath); err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Collection file '%s' does not exist, no need to delete.", filePath)
+			slog.Debug("Collection file does not exist, no need to delete", "path", filePath)
 			return nil
 		}
 		return fmt.Errorf("failed to delete collection file '%s': %w", filePath, err)
 	}
-	log.Printf("Collection file '%s' successfully deleted from disk.", filePath)
+	slog.Info("Collection file deleted from disk", "path", filePath)
 	return nil
 }
 
 // LoadCollectionData loads data for a single collection from its file.
-// MODIFIED: Now also loads index metadata and rebuilds indexes.
 func LoadCollectionData(collectionName string, s store.DataStore) error {
 	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Collection file '%s' for '%s' not found, initializing with empty data.", filePath, collectionName)
+			slog.Info("Collection file not found, initializing empty collection", "collection", collectionName, "path", filePath)
 			return nil
 		}
 		return fmt.Errorf("failed to open collection file '%s': %w", filePath, err)
 	}
 	defer file.Close()
 
-	// --- NEW: Read index metadata header ---
 	var numIndexes uint32
 	if err := binary.Read(file, binary.LittleEndian, &numIndexes); err != nil {
-		// For backward compatibility, if this read fails, assume old format with no indexes.
-		log.Printf("Warning: could not read index header for collection '%s'. Assuming old file format. Error: %v", collectionName, err)
-		// Reset file pointer to the beginning.
+		slog.Warn("Could not read index header, assuming old file format", "collection", collectionName, "error", err)
 		if _, seekErr := file.Seek(0, 0); seekErr != nil {
 			return fmt.Errorf("failed to seek back to start of file for '%s': %w", collectionName, seekErr)
 		}
-		numIndexes = 0 // Proceed as if there were no indexes.
+		numIndexes = 0
 	}
 
 	indexedFields := make([]string, numIndexes)
@@ -304,9 +294,7 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 		}
 		indexedFields[i] = string(fieldBytes)
 	}
-	// --- END NEW ---
 
-	// Read data (as before).
 	var numEntries uint32
 	if err := binary.Read(file, binary.LittleEndian, &numEntries); err != nil {
 		return fmt.Errorf("failed to read number of entries from collection '%s': %w", collectionName, err)
@@ -332,22 +320,19 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 		if _, err := io.ReadFull(file, valBytes); err != nil {
 			return fmt.Errorf("failed to read value for key '%s' in collection '%s': %w", key, collectionName, err)
 		}
-		value := valBytes
-		collectionData[key] = value
+		collectionData[key] = valBytes
 	}
 
 	s.LoadData(collectionData)
-	log.Printf("Collection '%s' successfully loaded from %s. Total keys: %d", collectionName, filePath, len(collectionData))
+	slog.Info("Collection data loaded", "collection", collectionName, "path", filePath, "total_keys", len(collectionData))
 
-	// --- NEW: Rebuild indexes based on loaded metadata ---
 	if len(indexedFields) > 0 {
-		log.Printf("Rebuilding %d indexes for collection '%s'...", len(indexedFields), collectionName)
+		slog.Info("Rebuilding indexes for collection", "collection", collectionName, "index_count", len(indexedFields))
 		for _, field := range indexedFields {
 			s.CreateIndex(field)
 		}
-		log.Printf("Finished rebuilding indexes for collection '%s'.", collectionName)
+		slog.Info("Finished rebuilding indexes", "collection", collectionName)
 	}
-	// --- END NEW ---
 
 	return nil
 }
@@ -355,7 +340,7 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 // ListCollectionFiles returns a list of all collection names found on disk.
 func ListCollectionFiles() ([]string, error) {
 	if _, err := os.Stat(collectionsDir); os.IsNotExist(err) {
-		return []string{}, nil // Directory doesn't exist, no collections.
+		return []string{}, nil
 	}
 
 	files, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
@@ -369,7 +354,7 @@ func ListCollectionFiles() ([]string, error) {
 		colName := baseName[:len(baseName)-len(collectionFileExtension)]
 		names = append(names, colName)
 	}
-	log.Printf("Found %d collection files on disk.", len(names))
+	slog.Info("Found collection files on disk", "count", len(names))
 	return names, nil
 }
 
@@ -381,59 +366,49 @@ func LoadAllCollectionsIntoManager(cm *store.CollectionManager) error {
 	}
 
 	for _, colName := range collectionNames {
-		// GetCollection will create a new, empty InMemStore instance.
 		colStore := cm.GetCollection(colName)
-		// LoadCollectionData will populate it with data AND rebuild its indexes.
 		if err := LoadCollectionData(colName, colStore); err != nil {
-			log.Printf("Warning: Failed to load data for collection '%s': %v", colName, err)
-			continue // Continue with the next collection even if this one fails.
+			slog.Warn("Failed to load data for collection, skipping", "collection", colName, "error", err)
+			continue
 		}
 	}
 
-	log.Printf("Finished attempting to load all collections into CollectionManager.")
+	slog.Info("Finished loading all collections into manager.")
 	return nil
 }
 
 // SaveAllCollectionsFromManager saves all currently active collections from the CollectionManager to disk.
 func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
-	cm.GetAllCollectionsDataForPersistence() // This is map[string]map[string][]byte
-
-	persister := &CollectionPersisterImpl{}
-
-	// We need to get the store object itself to access the indexes, not just the data.
-	// This approach is a bit tricky. A better way would be for the collection manager
-	// to expose the stores directly. For now, we'll iterate through the known collections.
-
 	activeCollections := cm.ListCollections()
+	persister := &CollectionPersisterImpl{}
 
 	for _, colName := range activeCollections {
 		colStore := cm.GetCollection(colName)
 		if err := persister.SaveCollectionData(colName, colStore); err != nil {
-			log.Printf("Error saving collection '%s': %v", colName, err)
+			slog.Error("Error saving collection during shutdown", "collection", colName, "error", err)
 		}
 	}
 
-	// This logic might need adjustment for deleting collections that are no longer active.
-	// We'll rely on the existing logic that gets all collections from the manager.
 	existingFiles, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
 	if err != nil {
-		log.Printf("Warning: Failed to list existing collection files for cleanup: %v", err)
-	}
-	activeFileMap := make(map[string]bool)
-	for _, f := range activeCollections {
-		activeFileMap[f] = true
-	}
+		slog.Warn("Failed to list existing collection files for cleanup during shutdown", "error", err)
+	} else {
+		activeFileMap := make(map[string]bool)
+		for _, name := range activeCollections {
+			activeFileMap[name] = true
+		}
 
-	for _, f := range existingFiles {
-		baseName := filepath.Base(f)
-		colName := baseName[:len(baseName)-len(collectionFileExtension)]
-		if !activeFileMap[colName] {
-			if err := persister.DeleteCollectionFile(colName); err != nil {
-				log.Printf("Warning: Failed to remove old collection file for '%s': %v", colName, err)
+		for _, f := range existingFiles {
+			baseName := filepath.Base(f)
+			colName := baseName[:len(baseName)-len(collectionFileExtension)]
+			if !activeFileMap[colName] {
+				if err := persister.DeleteCollectionFile(colName); err != nil {
+					slog.Warn("Failed to remove old collection file during shutdown", "collection", colName, "error", err)
+				}
 			}
 		}
 	}
 
-	log.Printf("All active collections from manager successfully saved to disk.")
+	slog.Info("All active collections from manager successfully saved to disk.")
 	return nil
 }

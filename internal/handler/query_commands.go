@@ -2,7 +2,7 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
@@ -19,7 +19,7 @@ import (
 func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 	collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
 	if err != nil {
-		log.Printf("Error reading COLLECTION_QUERY command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read COLLECTION_QUERY command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_QUERY command format", nil)
 		return
 	}
@@ -30,6 +30,11 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 
 	// Authorization check
 	if !h.hasPermission(collectionName, "read") {
+		slog.Warn("Unauthorized query attempt",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+			"remote_addr", conn.RemoteAddr().String(),
+		)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -41,27 +46,40 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 
 	var query Query
 	if err := json.Unmarshal(queryJSONBytes, &query); err != nil {
-		log.Printf("Error unmarshalling query JSON for collection '%s': %v", collectionName, err)
+		slog.Warn("Failed to unmarshal query JSON",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+			"error", err,
+		)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid query JSON format", nil)
 		return
 	}
 
+	slog.Debug("Processing collection query", "user", h.AuthenticatedUser, "collection", collectionName, "query", string(queryJSONBytes))
 	results, err := h.processCollectionQuery(collectionName, query)
 	if err != nil {
-		log.Printf("Error processing query for collection '%s': %v", collectionName, err)
+		slog.Error("Error processing collection query",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+			"error", err,
+		)
 		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("Failed to execute query: %v", err), nil)
 		return
 	}
 
 	responseBytes, err := json.Marshal(results)
 	if err != nil {
-		log.Printf("Error marshalling query results for collection '%s': %v", collectionName, err)
+		slog.Error("Error marshalling query results",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+			"error", err,
+		)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal query results", nil)
 		return
 	}
 
 	if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Query executed on collection '%s'", collectionName), responseBytes); err != nil {
-		log.Printf("Error writing COLLECTION_QUERY response to %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to write COLLECTION_QUERY response", "error", err, "remote_addr", conn.RemoteAddr().String())
 	}
 }
 
@@ -70,19 +88,16 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var itemsData map[string][]byte
 
-	// --- CORRECTED: Use the advanced optimizer and set remainingFilter correctly ---
 	candidateKeys, usedIndex, remainingFilter := h.findCandidateKeysFromFilter(colStore, query.Filter)
 
 	if usedIndex {
-		log.Printf("Query on collection '%s' is using index(es). Candidate keys after intersection: %d", collectionName, len(candidateKeys))
+		slog.Debug("Query optimizer is using index(es)", "collection", collectionName, "candidate_keys", len(candidateKeys))
 		itemsData = colStore.GetMany(candidateKeys)
 	} else {
-		log.Printf("Query on collection '%s' is NOT using an index. Falling back to full scan.", collectionName)
+		slog.Debug("Query optimizer is NOT using an index, falling back to full scan", "collection", collectionName)
 		itemsData = colStore.GetAll()
-		// CRITICAL FIX: If no index is used, the remaining filter is the original filter.
 		remainingFilter = query.Filter
 	}
-	// --- END CORRECTION ---
 
 	var itemsWithKeys []struct {
 		Key string
@@ -91,7 +106,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	for k, vBytes := range itemsData {
 		var val map[string]any
 		if err := json.Unmarshal(vBytes, &val); err != nil {
-			log.Printf("Warning: Failed to unmarshal JSON for key '%s' in collection '%s': %v", k, collectionName, err)
+			slog.Warn("Failed to unmarshal JSON for key during query processing", "key", k, "collection", collectionName, "error", err)
 			continue
 		}
 		itemsWithKeys = append(itemsWithKeys, struct {
@@ -106,14 +121,11 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		Val map[string]any
 	}{}
 
-	// It applies the remaining filter (which contains only the non-indexed conditions, or the full filter if no index was used).
 	for _, item := range itemsWithKeys {
 		if h.matchFilter(item.Val, remainingFilter) {
 			filteredItems = append(filteredItems, item)
 		}
 	}
-
-	// CRITICAL: The old, duplicated filtering block has been REMOVED from here.
 
 	// Handle DISTINCT early if requested
 	if query.Distinct != "" {
@@ -150,7 +162,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 			for _, ob := range query.OrderBy {
 				valA, okA := results[i][ob.Field]
 				valB, okB := results[j][ob.Field]
-
 				if !okA && !okB {
 					continue
 				}
@@ -160,7 +171,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 				if !okB {
 					return false
 				}
-
 				cmp := compare(valA, valB)
 				if cmp != 0 {
 					if ob.Direction == "desc" {
@@ -191,20 +201,19 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	return results, nil
 }
 
-// findCandidateKeysFromFilter is the new advanced query optimizer.
-// It analyzes the filter, uses all possible indexes on AND clauses,
-// and returns the candidate keys and any remaining filters that must be applied manually.
+// findCandidateKeysFromFilter is the advanced query optimizer.
+// It tries to use indexes for '=', 'in', and range operators ('>', '<', 'between', etc.)
+// to reduce the number of documents that need a full scan.
 func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore, filter map[string]any) (keys []string, usedIndex bool, remainingFilter map[string]any) {
 	if len(filter) == 0 {
 		return nil, false, filter
 	}
 
-	// The main logic is triggered if we find an "and" clause.
+	// --- LOGIC FOR COMPOUND FILTERS WITH "AND" ---
 	if andConditions, ok := filter["and"].([]any); ok {
 		keySets := [][]string{}
 		nonIndexedConditions := []any{}
 
-		// 1. Separate indexable conditions from non-indexable ones.
 		for _, cond := range andConditions {
 			condMap, isMap := cond.(map[string]any)
 			if !isMap {
@@ -216,28 +225,79 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 			op, opOk := condMap["op"].(string)
 			value := condMap["value"]
 
-			// Is this an equality condition on an indexed field?
-			if fieldOk && opOk && op == "=" && colStore.HasIndex(field) {
-				// Yes, use the index.
-				lookupKeys, _ := colStore.Lookup(field, value)
-				keySets = append(keySets, lookupKeys)
-				log.Printf("Optimizer: Using index on field '%s'. Found %d candidate keys.", field, len(lookupKeys))
+			if fieldOk && opOk && colStore.HasIndex(field) {
+				var usedIndexInCond bool
+				switch op {
+				case "=":
+					lookupKeys, _ := colStore.Lookup(field, value)
+					keySets = append(keySets, lookupKeys)
+					slog.Debug("Query optimizer: using index for '='", "field", field, "found_keys", len(lookupKeys))
+					usedIndexInCond = true
+
+				case "in":
+					if values, isSlice := value.([]any); isSlice {
+						unionKeys := make(map[string]struct{})
+						for _, v := range values {
+							lookupKeys, _ := colStore.Lookup(field, v)
+							for _, key := range lookupKeys {
+								unionKeys[key] = struct{}{}
+							}
+						}
+
+						finalKeys := make([]string, 0, len(unionKeys))
+						for k := range unionKeys {
+							finalKeys = append(finalKeys, k)
+						}
+						keySets = append(keySets, finalKeys)
+						slog.Debug("Query optimizer: using index for 'in'", "field", field, "found_keys", len(finalKeys))
+						usedIndexInCond = true
+					}
+
+				// --- NEW: Logic for range operators using B-Trees ---
+				case ">", ">=", "<", "<=", "between":
+					var keys []string
+					var used bool
+
+					// NOTE: For production use, ensure values are converted to float64 if possible before passing.
+					switch op {
+					case ">":
+						keys, used = colStore.LookupRange(field, value, nil, false, false)
+					case ">=":
+						keys, used = colStore.LookupRange(field, value, nil, true, false)
+					case "<":
+						keys, used = colStore.LookupRange(field, nil, value, false, false)
+					case "<=":
+						keys, used = colStore.LookupRange(field, nil, value, false, true)
+					case "between":
+						if bounds, ok := value.([]any); ok && len(bounds) == 2 {
+							keys, used = colStore.LookupRange(field, bounds[0], bounds[1], true, true)
+						}
+					}
+
+					if used {
+						keySets = append(keySets, keys)
+						slog.Debug("Query optimizer: using B-Tree index for range op", "field", field, "op", op, "found_keys", len(keys))
+						usedIndexInCond = true
+					}
+				}
+
+				if !usedIndexInCond {
+					nonIndexedConditions = append(nonIndexedConditions, condMap)
+				}
 			} else {
-				// No, save this condition for the manual filter pass later.
 				nonIndexedConditions = append(nonIndexedConditions, condMap)
 			}
 		}
 
-		// 2. If no indexes were used, return the original filter.
 		if len(keySets) == 0 {
+			// No index was used for any of the 'and' conditions.
 			return nil, false, filter
 		}
 
-		// 3. Calculate the intersection of all key sets found by the indexes.
+		// Intersect the results of all conditions that used an index.
 		candidateKeys := intersectKeys(keySets)
 
-		// 4. Build the remaining filter.
-		// If there are still non-indexed conditions, we'll use them. Otherwise, the filter is empty.
+		// Return a new filter containing only the conditions that did not use an index.
 		newFilter := make(map[string]any)
 		if len(nonIndexedConditions) > 0 {
 			newFilter["and"] = nonIndexedConditions
@@ -246,18 +306,57 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		return candidateKeys, true, newFilter
 	}
 
-	// --- Fallback logic for simple filters (not using AND) ---
-	// We keep this to optimize queries that don't use AND.
+	// --- LOGIC FOR SIMPLE FILTERS (NOT WRAPPED IN "AND") ---
+	// This part must also be updated to support all operators.
 	field, fieldOk := filter["field"].(string)
 	op, opOk := filter["op"].(string)
 	value := filter["value"]
-	if fieldOk && opOk && op == "=" && colStore.HasIndex(field) {
-		keys, _ := colStore.Lookup(field, value)
-		// For a simple filter, there is no remaining filter to apply.
-		return keys, true, make(map[string]any)
+
+	if fieldOk && opOk && colStore.HasIndex(field) {
+		var keys []string
+		var used bool
+
+		switch op {
+		case "=":
+			keys, used = colStore.Lookup(field, value)
+		case "in":
+			if values, isSlice := value.([]any); isSlice {
+				unionKeys := make(map[string]struct{})
+				for _, v := range values {
+					lookupKeys, _ := colStore.Lookup(field, v)
+					for _, key := range lookupKeys {
+						unionKeys[key] = struct{}{}
+					}
+				}
+				finalKeys := make([]string, 0, len(unionKeys))
+				for k := range unionKeys {
+					finalKeys = append(finalKeys, k)
+				}
+				keys = finalKeys
+				used = true
+			}
+		case ">":
+			keys, used = colStore.LookupRange(field, value, nil, false, false)
+		case ">=":
+			keys, used = colStore.LookupRange(field, value, nil, true, false)
+		case "<":
+			keys, used = colStore.LookupRange(field, nil, value, false, false)
+		case "<=":
+			keys, used = colStore.LookupRange(field, nil, value, false, true)
+		case "between":
+			if bounds, ok := value.([]any); ok && len(bounds) == 2 {
+				keys, used = colStore.LookupRange(field, bounds[0], bounds[1], true, true)
+			}
+		}
+
+		if used {
+			slog.Debug("Query optimizer: using index for simple filter", "field", field, "op", op, "found_keys", len(keys))
+			// Since this was the only condition, the remaining filter is empty.
+			return keys, true, make(map[string]any)
+		}
 	}
 
-	// If no index could be used, the full filter is returned.
+	// If no index could be used, return the original filter for a full scan.
 	return nil, false, filter
 }
 
@@ -267,7 +366,6 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		return true
 	}
 
-	// AND condition
 	if andConditions, ok := filter["and"].([]any); ok {
 		for _, cond := range andConditions {
 			if condMap, isMap := cond.(map[string]any); isMap {
@@ -275,14 +373,13 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 					return false
 				}
 			} else {
-				log.Printf("Warning: Invalid 'and' condition format: %+v", cond)
+				slog.Warn("Invalid 'and' condition format in query filter", "condition", cond)
 				return false
 			}
 		}
 		return true
 	}
 
-	// OR condition
 	if orConditions, ok := filter["or"].([]any); ok {
 		for _, cond := range orConditions {
 			if condMap, isMap := cond.(map[string]any); isMap {
@@ -290,25 +387,23 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 					return true
 				}
 			} else {
-				log.Printf("Warning: Invalid 'or' condition format: %+v", cond)
+				slog.Warn("Invalid 'or' condition format in query filter", "condition", cond)
 				return false
 			}
 		}
 		return false
 	}
 
-	// NOT condition
 	if notCondition, ok := filter["not"].(map[string]any); ok {
 		return !h.matchFilter(item, notCondition)
 	}
 
-	// Single field condition
 	field, fieldOk := filter["field"].(string)
 	op, opOk := filter["op"].(string)
 	value := filter["value"]
 
 	if !fieldOk || !opOk {
-		log.Printf("Warning: Invalid filter condition (missing field/op): %+v", filter)
+		slog.Warn("Invalid filter condition (missing field/op)", "filter", filter)
 		return false
 	}
 
@@ -316,45 +411,29 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 
 	switch op {
 	case "=":
-		if !itemValueExists {
-			return false
-		}
-		return compare(itemValue, value) == 0
+		return itemValueExists && compare(itemValue, value) == 0
 	case "!=":
-		if !itemValueExists {
-			return true
-		}
-		return compare(itemValue, value) != 0
+		return !itemValueExists || compare(itemValue, value) != 0
 	case ">":
-		if !itemValueExists {
-			return false
-		}
-		return compare(itemValue, value) > 0
+		return itemValueExists && compare(itemValue, value) > 0
 	case ">=":
-		if !itemValueExists {
-			return false
-		}
-		return compare(itemValue, value) >= 0
+		return itemValueExists && compare(itemValue, value) >= 0
 	case "<":
-		if !itemValueExists {
-			return false
-		}
-		return compare(itemValue, value) < 0
+		return itemValueExists && compare(itemValue, value) < 0
 	case "<=":
-		if !itemValueExists {
-			return false
-		}
-		return compare(itemValue, value) <= 0
+		return itemValueExists && compare(itemValue, value) <= 0
 	case "like":
 		if !itemValueExists {
 			return false
 		}
 		if sVal, isStr := itemValue.(string); isStr {
 			if pattern, isStrPattern := value.(string); isStrPattern {
+				// Basic LIKE to regex conversion: % -> .*
+				// We also quote meta characters to prevent regex injection.
 				pattern = strings.ReplaceAll(regexp.QuoteMeta(pattern), "%", ".*")
-				matched, err := regexp.MatchString("(?i)^"+pattern+"$", sVal)
+				matched, err := regexp.MatchString("(?i)^"+pattern+"$", sVal) // (?i) for case-insensitivity
 				if err != nil {
-					log.Printf("Error in LIKE regex for pattern '%s': %v", pattern, err)
+					slog.Warn("Error in LIKE regex pattern", "pattern", pattern, "error", err)
 					return false
 				}
 				return matched
@@ -386,7 +465,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 	case "is not null":
 		return itemValueExists && itemValue != nil
 	default:
-		log.Printf("Warning: Unsupported filter operator '%s'", op)
+		slog.Warn("Unsupported filter operator", "operator", op)
 		return false
 	}
 }

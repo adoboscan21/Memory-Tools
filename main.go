@@ -41,19 +41,20 @@ func (f updateActivityFunc) UpdateActivity() {
 }
 
 func main() {
-
-	err := godotenv.Load()
-	if err != nil {
-		slog.Debug("No .env file found, proceeding with existing environment")
+	// Attempt to load .env file. It's okay if it doesn't exist.
+	if err := godotenv.Load(); err != nil {
+		// This is a debug-level message because not having a .env file is normal in production.
+		// We can't use slog yet as it's not configured, so we use a temporary log.
+		log.Println("DEBUG: No .env file found, proceeding with existing environment")
 	}
 
-	// logs configuration //
-	// Create the logs directory if it doesn't exist
+	// --- slog configuration ---
+	// Create the logs directory if it doesn't exist.
 	if err := os.MkdirAll("logs", 0755); err != nil {
 		log.Fatalf("failed to create log directory: %v", err)
 	}
 
-	// Now, open the log file within that directory
+	// Now, open the log file within that directory.
 	logFile, err := os.OpenFile("logs/memory-tools.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalf("failed to open log file: %v", err)
@@ -67,14 +68,12 @@ func main() {
 	})
 
 	logger := slog.New(handlerLog)
-
 	slog.SetDefault(logger)
-	// logs configuration //
+	// --- end of slog configuration ---
 
-	// Configure logging to include date, time, and file information.
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	slog.Info("Logger successfully configured", "output", "console_and_file")
 
-	// Load the application configuration from the specified path.
+	// Load the application configuration.
 	cfg := config.LoadConfig()
 
 	// Initialize the main in-memory store and the collection manager.
@@ -84,10 +83,12 @@ func main() {
 
 	// Load persistent data for the main store and all collections.
 	if err := persistence.LoadData(mainInMemStore); err != nil {
-		log.Fatalf("Fatal error loading main persistent data: %v", err)
+		slog.Error("Fatal error loading main persistent data", "error", err)
+		os.Exit(1)
 	}
 	if err := persistence.LoadAllCollectionsIntoManager(collectionManager); err != nil {
-		log.Fatalf("Fatal error loading persistent collections data: %v", err)
+		slog.Error("Fatal error loading persistent collections data", "error", err)
+		os.Exit(1)
 	}
 
 	// Ensure the system collection and default users exist.
@@ -96,59 +97,62 @@ func main() {
 	// Ensure default admin user
 	adminUserKey := handler.UserPrefix + "admin"
 	if _, found := systemCollection.Get(adminUserKey); !found {
-		log.Println("Default admin user 'admin' not found. Creating a default admin user with password 'adminpass'.")
+		slog.Info("Default admin user not found, creating...", "user", "admin")
 		hashedPassword, err := handler.HashPassword("adminpass")
 		if err != nil {
-			log.Fatalf("Fatal error hashing default admin password: %v", err)
+			slog.Error("Fatal error hashing default admin password", "error", err)
+			os.Exit(1)
 		}
 		adminUserInfo := handler.UserInfo{
 			Username:     "admin",
 			PasswordHash: hashedPassword,
 			IsRoot:       false,
-			// Admin can write to any collection but can only read the system collection.
-			Permissions: map[string]string{"*": "write", handler.SystemCollectionName: "read"},
+			Permissions:  map[string]string{"*": "write", handler.SystemCollectionName: "read"},
 		}
 		adminUserInfoBytes, err := json.Marshal(adminUserInfo)
 		if err != nil {
-			log.Fatalf("Fatal error marshalling default admin user info: %v", err)
+			slog.Error("Fatal error marshalling default admin user info", "error", err)
+			os.Exit(1)
 		}
 		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
-		log.Println("Default admin user 'admin' created with password 'adminpass'.")
+		slog.Info("Default admin user created", "user", "admin", "password", "adminpass")
 	} else {
-		log.Println("Default admin user 'admin' found. Using existing credentials.")
+		slog.Info("Default admin user found", "user", "admin")
 	}
 
 	// Ensure default root user (localhost only)
 	rootUserKey := handler.UserPrefix + "root"
 	if _, found := systemCollection.Get(rootUserKey); !found {
-		log.Println("Default root user 'root' not found. Creating a default root user with password 'rootpass'.")
+		slog.Info("Default root user not found, creating...", "user", "root")
 		hashedPassword, err := handler.HashPassword("rootpass")
 		if err != nil {
-			log.Fatalf("Fatal error hashing default root password: %v", err)
+			slog.Error("Fatal error hashing default root password", "error", err)
+			os.Exit(1)
 		}
 		rootUserInfo := handler.UserInfo{
 			Username:     "root",
 			PasswordHash: hashedPassword,
 			IsRoot:       true,
-			// Root has universal write access.
-			Permissions: map[string]string{"*": "write"},
+			Permissions:  map[string]string{"*": "write"},
 		}
 		rootUserInfoBytes, err := json.Marshal(rootUserInfo)
 		if err != nil {
-			log.Fatalf("Fatal error marshalling default root user info: %v", err)
+			slog.Error("Fatal error marshalling default root user info", "error", err)
+			os.Exit(1)
 		}
 		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
-		log.Println("Default root user 'root' created with password 'rootpass'.")
+		slog.Info("Default root user created", "user", "root", "password", "rootpass")
 	} else {
-		log.Println("Default root user 'root' found. Using existing credentials.")
+		slog.Info("Default root user found", "user", "root")
 	}
 
 	// Load server certificate and key for TLS.
 	cert, err := tls.LoadX509KeyPair("certificates/server.crt", "certificates/server.key")
 	if err != nil {
-		log.Fatalf("Failed to load server certificate or key: %v", err)
+		slog.Error("Failed to load server certificate or key", "error", err)
+		os.Exit(1)
 	}
 
 	// Configure TLS settings, including the loaded certificate.
@@ -160,16 +164,15 @@ func main() {
 	// Start the TLS TCP server.
 	listener, err := tls.Listen("tcp", cfg.Port, tlsConfig)
 	if err != nil {
-		log.Fatalf("Fatal error starting TLS TCP server: %v", err)
+		slog.Error("Fatal error starting TLS TCP server", "port", cfg.Port, "error", err)
+		os.Exit(1)
 	}
 	defer listener.Close()
-	log.Printf("TLS TCP server listening securely on %s", cfg.Port)
+	slog.Info("TLS TCP server listening securely", "port", cfg.Port)
 
-	// create backup manager
+	// Create and start the backup manager.
 	backupManager := persistence.NewBackupManager(mainInMemStore, collectionManager, cfg.BackupInterval, cfg.BackupRetention)
-	// start backups
 	backupManager.Start()
-	// sure close on exit.
 	defer backupManager.Stop()
 
 	// Accept connections in a goroutine.
@@ -178,11 +181,10 @@ func main() {
 			conn, err := listener.Accept()
 			if err != nil {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" {
-					log.Println("Listener de red cerrado. Deteniendo la aceptación de conexiones.")
+					slog.Info("Network listener closed, stopping connection acceptance.")
 					return
 				}
-
-				log.Printf("Error al aceptar conexión: %v", err)
+				slog.Error("Error accepting connection", "error", err)
 				continue
 			}
 
@@ -206,7 +208,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
 		defer ticker.Stop()
-		log.Printf("Starting TTL cleaner with interval of %s", cfg.TtlCleanInterval)
+		slog.Info("Starting TTL cleaner", "interval", cfg.TtlCleanInterval.String())
 
 		for {
 			select {
@@ -214,7 +216,7 @@ func main() {
 				mainInMemStore.CleanExpiredItems()
 				collectionManager.CleanExpiredItemsAndSave()
 			case <-ttlCleanStopChan:
-				log.Println("TTL cleaner received stop signal. Stopping.")
+				slog.Info("TTL cleaner received stop signal. Stopping.")
 				return
 			}
 		}
@@ -228,18 +230,18 @@ func main() {
 
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
-		log.Printf("Idle memory cleaner started. Check interval: %s, threshold: %s.", checkInterval, idleThreshold)
+		slog.Info("Starting idle memory cleaner", "check_interval", checkInterval.String(), "idle_threshold", idleThreshold.String())
 
 		for {
 			select {
 			case <-ticker.C:
 				lastActive := lastActivity.Load().(time.Time)
 				if time.Since(lastActive) >= idleThreshold {
-					log.Println("Inactivity detected. Requesting Go runtime to release OS memory...")
+					slog.Info("Inactivity detected, requesting Go runtime to release OS memory...")
 					debug.FreeOSMemory()
 				}
 			case <-idleMemoryCleanerStopChan:
-				log.Println("Idle memory cleaner received stop signal. Stopping.")
+				slog.Info("Idle memory cleaner received stop signal. Stopping.")
 				return
 			}
 		}
@@ -250,13 +252,13 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	log.Println("Termination signal received. Attempting graceful shutdown...")
+	slog.Info("Termination signal received. Attempting graceful shutdown...")
 
 	// Stop the TCP listener to prevent new connections.
 	if err := listener.Close(); err != nil {
-		log.Printf("Error closing TCP listener: %v", err)
+		slog.Error("Error closing TCP listener", "error", err)
 	} else {
-		log.Println("TCP listener closed.")
+		slog.Info("TCP listener closed.")
 	}
 
 	// Stop all background tasks.
@@ -265,27 +267,27 @@ func main() {
 	close(idleMemoryCleanerStopChan)
 
 	// Wait for the asynchronous collection saver to finish.
-	log.Println("Waiting for all pending collection persistence tasks to complete...")
+	slog.Info("Waiting for all pending collection persistence tasks to complete...")
 	collectionManager.Wait()
-	log.Println("All pending collection persistence tasks completed.")
+	slog.Info("All pending collection persistence tasks completed.")
 
 	// Context for graceful shutdown.
 	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancelShutdown()
 
 	// Save final data for the main store to disk.
-	log.Println("Saving final data for main store before application exit...")
+	slog.Info("Saving final data for main store before application exit...")
 	if err := persistence.SaveData(mainInMemStore); err != nil {
-		log.Printf("Error saving final data for main store during shutdown: %v", err)
+		slog.Error("Error saving final data for main store during shutdown", "error", err)
 	} else {
-		log.Println("Final main store data saved.")
+		slog.Info("Final main store data saved.")
 	}
 
 	// Save final data for all collections to disk.
-	log.Println("Saving final data for all collections before application exit...")
+	slog.Info("Saving final data for all collections before application exit...")
 	if err := persistence.SaveAllCollectionsFromManager(collectionManager); err != nil {
-		log.Printf("Error saving final data for collections during shutdown: %v", err)
+		slog.Error("Error saving final data for collections during shutdown", "error", err)
 	} else {
-		log.Println("Final collection data saved. Application exiting.")
+		slog.Info("Final collection data saved. Application exiting.")
 	}
 }

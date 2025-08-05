@@ -2,7 +2,7 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"net"
@@ -11,29 +11,39 @@ import (
 // handleBackup handles the command for a manual backup.
 func (h *ConnectionHandler) handleBackup(conn net.Conn) {
 	if !h.IsRoot {
+		slog.Warn("Unauthorized backup attempt",
+			"user", h.AuthenticatedUser,
+			"remote_addr", conn.RemoteAddr().String(),
+		)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a manual backup.", nil)
 		return
 	}
 
-	log.Printf("Root user '%s' initiated a manual backup.", h.AuthenticatedUser)
+	slog.Info("Manual backup initiated", "user", h.AuthenticatedUser, "remote_addr", conn.RemoteAddr().String())
 	if err := h.BackupManager.PerformBackup(); err != nil {
-		log.Printf("Manual backup failed: %v", err)
+		slog.Error("Manual backup failed", "user", h.AuthenticatedUser, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Backup failed: %v", err), nil)
 		return
 	}
 
+	slog.Info("Manual backup completed successfully", "user", h.AuthenticatedUser)
 	protocol.WriteResponse(conn, protocol.StatusOk, "OK: Manual backup completed successfully.", nil)
 }
 
 // handleRestore handles the command to restore from a backup.
 func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 	if !h.IsRoot {
+		slog.Warn("Unauthorized restore attempt",
+			"user", h.AuthenticatedUser,
+			"remote_addr", conn.RemoteAddr().String(),
+		)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a restore.", nil)
 		return
 	}
 
 	backupName, err := protocol.ReadRestoreCommand(conn)
 	if err != nil {
+		slog.Error("Failed to read RESTORE command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid RESTORE command format.", nil)
 		return
 	}
@@ -42,20 +52,20 @@ func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 		return
 	}
 
-	log.Printf("!!! DESTRUCTIVE ACTION: Root user '%s' initiated a restore from '%s' !!!", h.AuthenticatedUser, backupName)
-
-	// NOTE: In a production system, the server should be paused or
-	// put into read-only mode here to prevent inconsistencies.
+	slog.Warn("DESTRUCTIVE ACTION: Restore initiated",
+		"user", h.AuthenticatedUser,
+		"backup_name", backupName,
+		"remote_addr", conn.RemoteAddr().String(),
+	)
 
 	err = persistence.PerformRestore(backupName, h.MainStore, h.CollectionManager)
 	if err != nil {
-		log.Printf("Restore from '%s' failed: %v", backupName, err)
-		// It is crucial not to leave the server in an inconsistent state.
-		// The best action here would be a forced restart or a severe alert.
+		slog.Error("Restore failed", "backup_name", backupName, "user", h.AuthenticatedUser, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Restore failed: %v. Server might be in an inconsistent state.", err), nil)
 		return
 	}
 
+	slog.Info("Restore completed successfully", "backup_name", backupName, "user", h.AuthenticatedUser)
 	msg := fmt.Sprintf("OK: Restore from '%s' completed successfully. A server restart is recommended to ensure consistency.", backupName)
 	protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
 }

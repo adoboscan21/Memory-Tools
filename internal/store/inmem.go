@@ -1,71 +1,156 @@
 package store
 
 import (
+	"bytes"
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"maps"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/google/btree"
 	jsoniter "github.com/json-iterator/go"
 )
 
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
-
-// tryUnmarshal unmarshals a byte slice into a map, returning nil if it fails.
+// tryUnmarshal unmarshals a byte slice into a map.
+// It ensures that all numbers from JSON are converted to float64 for consistent indexing.
 func tryUnmarshal(value []byte) map[string]any {
 	var data map[string]any
-	if err := json.Unmarshal(value, &data); err != nil {
+
+	// Use a decoder that treats all numbers as json.Number first.
+	decoder := jsoniter.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
 		return nil // Not a JSON object, cannot be indexed.
+	}
+
+	// Post-process to convert json.Number to float64.
+	for k, v := range data {
+		if num, ok := v.(jsoniter.Number); ok {
+			if f, err := num.Float64(); err == nil {
+				data[k] = f
+			} else {
+				// If it fails to be a float, store it as a string.
+				data[k] = num.String()
+			}
+		}
 	}
 	return data
 }
 
-// --- Indexing Structures ---
+// valueToFloat64 is a helper to safely convert various numeric types to float64.
+func valueToFloat64(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int8:
+		return float64(val), true
+	case int16:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case jsoniter.Number:
+		f, err := val.Float64()
+		return f, err == nil
+	case string:
+		// Also try to parse a string that might represent a number.
+		f, err := strconv.ParseFloat(val, 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
 
-// Index represents the index data for a single field.
-// It maps a field's value to a set of document keys (_id).
-// map[indexedValue] -> map[documentKey] -> struct{}
-type Index map[any]map[string]struct{}
+// --- NEW: B-Tree Indexing Structures ---
 
-// IndexManager manages all indexes for a single InMemStore (collection).
+const btreeDegree = 32 // Degree of the B-Tree, can be tuned for performance.
+
+// NumericKey implements the item for the numeric B-Tree.
+// It holds a float64 value and the set of associated document keys.
+type NumericKey struct {
+	Value float64
+	Keys  map[string]struct{}
+}
+
+// StringKey implements the item for the string B-Tree.
+type StringKey struct {
+	Value string
+	Keys  map[string]struct{}
+}
+
+// --- FIX: Create LessFunc functions instead of methods ---
+
+// numericLess provides the comparison logic for NumericKey items.
+func numericLess(a, b NumericKey) bool {
+	return a.Value < b.Value
+}
+
+// stringLess provides the comparison logic for StringKey items.
+func stringLess(a, b StringKey) bool {
+	return a.Value < b.Value
+}
+
+// Index now contains two B-Trees, one for each supported data type.
+type Index struct {
+	numericTree *btree.BTreeG[NumericKey]
+	stringTree  *btree.BTreeG[StringKey]
+}
+
+// NewIndex creates a new index structure with initialized B-Trees.
+func NewIndex() *Index {
+	return &Index{
+		// --- FIX: Pass the LessFunc as the second argument to NewG ---
+		numericTree: btree.NewG[NumericKey](btreeDegree, numericLess),
+		stringTree:  btree.NewG[StringKey](btreeDegree, stringLess),
+	}
+}
+
+// --- REWRITTEN: IndexManager for B-Trees ---
+
+// IndexManager manages all indexes for a single InMemStore.
 type IndexManager struct {
 	mu      sync.RWMutex
-	indexes map[string]Index // map[fieldName] -> Index
+	indexes map[string]*Index // map[fieldName] -> *Index
 }
 
 // NewIndexManager creates a new index manager.
 func NewIndexManager() *IndexManager {
 	return &IndexManager{
-		indexes: make(map[string]Index),
+		indexes: make(map[string]*Index),
 	}
 }
 
-// CreateIndex initializes a new index for a given field.
+// CreateIndex initializes a new B-Tree index for a given field.
 func (im *IndexManager) CreateIndex(field string) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 	if _, exists := im.indexes[field]; !exists {
-		im.indexes[field] = make(Index)
-		log.Printf("Index created for field '%s'.", field)
+		im.indexes[field] = NewIndex()
+		slog.Info("B-Tree Index created", "field", field)
 	}
 }
 
-// NEW: DeleteIndex removes an index for a given field.
+// DeleteIndex removes an index for a given field.
 func (im *IndexManager) DeleteIndex(field string) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 	if _, exists := im.indexes[field]; exists {
 		delete(im.indexes, field)
-		log.Printf("Index for field '%s' deleted.", field)
+		slog.Info("Index deleted", "field", field)
 	}
 }
 
-// NEW: ListIndexes returns a slice of all indexed field names.
+// ListIndexes returns the names of all indexed fields.
 func (im *IndexManager) ListIndexes() []string {
 	im.mu.RLock()
 	defer im.mu.RUnlock()
-
 	indexedFields := make([]string, 0, len(im.indexes))
 	for field := range im.indexes {
 		indexedFields = append(indexedFields, field)
@@ -73,13 +158,59 @@ func (im *IndexManager) ListIndexes() []string {
 	return indexedFields
 }
 
-// Update updates all relevant indexes for a given document.
-// It handles both removal of old values and addition of new ones.
+// addToIndex adds a document key to an index for a specific value.
+func (im *IndexManager) addToIndex(index *Index, docKey string, value any) {
+	if fVal, ok := valueToFloat64(value); ok {
+		key := NumericKey{Value: fVal}
+		item, found := index.numericTree.Get(key)
+		if !found {
+			item = NumericKey{Value: fVal, Keys: make(map[string]struct{})}
+		}
+		item.Keys[docKey] = struct{}{}
+		index.numericTree.ReplaceOrInsert(item)
+	} else if sVal, ok := value.(string); ok {
+		key := StringKey{Value: sVal}
+		item, found := index.stringTree.Get(key)
+		if !found {
+			item = StringKey{Value: sVal, Keys: make(map[string]struct{})}
+		}
+		item.Keys[docKey] = struct{}{}
+		index.stringTree.ReplaceOrInsert(item)
+	}
+}
+
+// removeFromIndex removes a document key from an index.
+func (im *IndexManager) removeFromIndex(index *Index, docKey string, value any) {
+	if fVal, ok := valueToFloat64(value); ok {
+		key := NumericKey{Value: fVal}
+		if item, found := index.numericTree.Get(key); found {
+			delete(item.Keys, docKey)
+			if len(item.Keys) == 0 {
+				// If no more documents are associated with this value, remove it from the B-Tree.
+				index.numericTree.Delete(item)
+			} else {
+				// Otherwise, update the item in the tree.
+				index.numericTree.ReplaceOrInsert(item)
+			}
+		}
+	} else if sVal, ok := value.(string); ok {
+		key := StringKey{Value: sVal}
+		if item, found := index.stringTree.Get(key); found {
+			delete(item.Keys, docKey)
+			if len(item.Keys) == 0 {
+				index.stringTree.Delete(item)
+			} else {
+				index.stringTree.ReplaceOrInsert(item)
+			}
+		}
+	}
+}
+
+// Update updates the indexes for a given document.
 func (im *IndexManager) Update(docKey string, oldData, newData map[string]any) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	// If no indexes are defined, do nothing.
 	if len(im.indexes) == 0 {
 		return
 	}
@@ -88,28 +219,15 @@ func (im *IndexManager) Update(docKey string, oldData, newData map[string]any) {
 		oldVal, oldOk := oldData[field]
 		newVal, newOk := newData[field]
 
-		// If value hasn't changed, do nothing for this field.
 		if oldOk && newOk && oldVal == newVal {
-			continue
+			continue // No change in the indexed field.
 		}
 
-		// Remove old value from index if it existed.
 		if oldOk {
-			if docKeySet, valueExists := index[oldVal]; valueExists {
-				delete(docKeySet, docKey)
-				// Clean up the map if the set becomes empty.
-				if len(docKeySet) == 0 {
-					delete(index, oldVal)
-				}
-			}
+			im.removeFromIndex(index, docKey, oldVal)
 		}
-
-		// Add new value to index if it exists.
 		if newOk {
-			if _, valueExists := index[newVal]; !valueExists {
-				index[newVal] = make(map[string]struct{})
-			}
-			index[newVal][docKey] = struct{}{}
+			im.addToIndex(index, docKey, newVal)
 		}
 	}
 }
@@ -121,39 +239,167 @@ func (im *IndexManager) Remove(docKey string, data map[string]any) {
 	if data == nil || len(im.indexes) == 0 {
 		return
 	}
-
 	for field, index := range im.indexes {
 		if val, ok := data[field]; ok {
-			if docKeySet, valueExists := index[val]; valueExists {
-				delete(docKeySet, docKey)
-				if len(docKeySet) == 0 {
-					delete(index, val)
-				}
-			}
+			im.removeFromIndex(index, docKey, val)
 		}
 	}
 }
 
-// Lookup performs a value lookup on an index and returns matching document keys.
+// Lookup performs an equality lookup on an index.
 func (im *IndexManager) Lookup(field string, value any) ([]string, bool) {
 	im.mu.RLock()
 	defer im.mu.RUnlock()
 
 	index, exists := im.indexes[field]
 	if !exists {
-		return nil, false // No index for this field.
+		return nil, false
 	}
 
-	keySet, exists := index[value]
-	if !exists {
-		return []string{}, true // Index exists, but value not found.
+	var foundKeys map[string]struct{}
+	if fVal, ok := valueToFloat64(value); ok {
+		if item, found := index.numericTree.Get(NumericKey{Value: fVal}); found {
+			foundKeys = item.Keys
+		}
+	} else if sVal, ok := value.(string); ok {
+		if item, found := index.stringTree.Get(StringKey{Value: sVal}); found {
+			foundKeys = item.Keys
+		}
 	}
 
-	keys := make([]string, 0, len(keySet))
-	for k := range keySet {
+	if foundKeys == nil {
+		return []string{}, true // Value not found in index.
+	}
+
+	keys := make([]string, 0, len(foundKeys))
+	for k := range foundKeys {
 		keys = append(keys, k)
 	}
 	return keys, true
+}
+
+// LookupRange performs a range scan on a B-Tree index.
+func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, highInclusive bool) ([]string, bool) {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+
+	index, exists := im.indexes[field]
+	if !exists {
+		return nil, false
+	}
+
+	unionKeys := make(map[string]struct{})
+
+	// Determine if we should query the numeric or string tree.
+	var isNumericQuery bool
+	if low != nil {
+		if _, ok := valueToFloat64(low); ok {
+			isNumericQuery = true
+		}
+	} else if high != nil {
+		if _, ok := valueToFloat64(high); ok {
+			isNumericQuery = true
+		}
+	}
+
+	if isNumericQuery {
+		var lowKey, highKey NumericKey
+		hasLowBound, hasHighBound := low != nil, high != nil
+		if hasLowBound {
+			lowKey.Value, _ = valueToFloat64(low)
+		}
+		if hasHighBound {
+			highKey.Value, _ = valueToFloat64(high)
+		}
+
+		iterator := func(item NumericKey) bool {
+			// Check upper bound
+			if hasHighBound {
+				if item.Value > highKey.Value {
+					return false // Stop iteration
+				}
+				if !highInclusive && item.Value == highKey.Value {
+					return false // Stop iteration
+				}
+			}
+			// Add keys to the result set
+			for k := range item.Keys {
+				unionKeys[k] = struct{}{}
+			}
+			return true
+		}
+
+		startKey := lowKey
+		if !hasLowBound {
+			if minItem, ok := index.numericTree.Min(); ok {
+				startKey = minItem
+			} else {
+				return []string{}, true // Tree is empty
+			}
+		}
+
+		index.numericTree.AscendGreaterOrEqual(startKey, iterator)
+
+		// Handle non-inclusive lower bound by removing keys from the startKey.
+		if hasLowBound && !lowInclusive {
+			if item, found := index.numericTree.Get(lowKey); found {
+				for k := range item.Keys {
+					delete(unionKeys, k)
+				}
+			}
+		}
+
+	} else {
+		// Logic for string range scan
+		var lowKey, highKey StringKey
+		hasLowBound, hasHighBound := low != nil, high != nil
+		if hasLowBound {
+			lowKey.Value, _ = low.(string)
+		}
+		if hasHighBound {
+			highKey.Value, _ = high.(string)
+		}
+
+		iterator := func(item StringKey) bool {
+			if hasHighBound {
+				if item.Value > highKey.Value {
+					return false
+				}
+				if !highInclusive && item.Value == highKey.Value {
+					return false
+				}
+			}
+			for k := range item.Keys {
+				unionKeys[k] = struct{}{}
+			}
+			return true
+		}
+
+		startKey := lowKey
+		if !hasLowBound {
+			if minItem, ok := index.stringTree.Min(); ok {
+				startKey = minItem
+			} else {
+				return []string{}, true // Tree is empty
+			}
+		}
+
+		index.stringTree.AscendGreaterOrEqual(startKey, iterator)
+
+		if hasLowBound && !lowInclusive {
+			if item, found := index.stringTree.Get(lowKey); found {
+				for k := range item.Keys {
+					delete(unionKeys, k)
+				}
+			}
+		}
+	}
+
+	finalKeys := make([]string, 0, len(unionKeys))
+	for k := range unionKeys {
+		finalKeys = append(finalKeys, k)
+	}
+	return finalKeys, true
 }
 
 // HasIndex checks if an index exists for a given field.
@@ -163,8 +409,6 @@ func (im *IndexManager) HasIndex(field string) bool {
 	_, exists := im.indexes[field]
 	return exists
 }
-
-// --- MODIFIED: DataStore and InMemStore ---
 
 // Item represents an individual key-value entry.
 type Item struct {
@@ -176,10 +420,10 @@ type Item struct {
 // Shard represents a segment of the in-memory store.
 type Shard struct {
 	data map[string]Item
-	mu   sync.RWMutex // Mutex to protect concurrent access.
+	mu   sync.RWMutex
 }
 
-// DataStore is the interface that defines basic key-value store operations.
+// --- UPDATED: DataStore Interface ---
 type DataStore interface {
 	Set(key string, value []byte, ttl time.Duration)
 	Get(key string) ([]byte, bool)
@@ -189,19 +433,22 @@ type DataStore interface {
 	LoadData(data map[string][]byte)
 	CleanExpiredItems() bool
 	Size() int
-	// Indexing interface methods.
+
+	// Indexing interface methods
 	CreateIndex(field string)
-	DeleteIndex(field string) // NEW
-	ListIndexes() []string    // NEW
+	DeleteIndex(field string)
+	ListIndexes() []string
 	HasIndex(field string) bool
 	Lookup(field string, value any) ([]string, bool)
+	// NEW METHOD IN THE INTERFACE!
+	LookupRange(field string, low, high any, lowInclusive, highInclusive bool) ([]string, bool)
 }
 
 // InMemStore implements DataStore for in-memory storage, with sharding and indexing.
 type InMemStore struct {
 	shards    []*Shard
 	numShards int
-	indexes   *IndexManager // NEW: Index manager for the store.
+	indexes   *IndexManager
 }
 
 // NewInMemStoreWithShards creates a new InMemStore with a specified number of shards.
@@ -209,14 +456,14 @@ func NewInMemStoreWithShards(numShards int) *InMemStore {
 	s := &InMemStore{
 		shards:    make([]*Shard, numShards),
 		numShards: numShards,
-		indexes:   NewIndexManager(), // NEW: Initialize the index manager.
+		indexes:   NewIndexManager(),
 	}
 	for i := range numShards {
 		s.shards[i] = &Shard{
 			data: make(map[string]Item),
 		}
 	}
-	log.Printf("InMemStore initialized with %d shards.", numShards)
+	slog.Info("InMemStore initialized", "num_shards", numShards)
 	return s
 }
 
@@ -240,11 +487,8 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
 
-	// MODIFIED: Handle index update.
-	// Get old value for index removal before overwriting.
-	oldItem, itemExists := shard.data[key]
 	var oldData map[string]any
-	if itemExists {
+	if oldItem, exists := shard.data[key]; exists {
 		oldData = tryUnmarshal(oldItem.Value)
 	}
 
@@ -253,13 +497,12 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 		CreatedAt: time.Now(),
 		TTL:       ttl,
 	}
-	shard.mu.Unlock() // Unlock early before index update.
+	shard.mu.Unlock()
 
-	// Update indexes outside the shard lock.
 	newData := tryUnmarshal(value)
 	s.indexes.Update(key, oldData, newData)
 
-	log.Printf("SET [Shard %d]: Key='%s', ValueLength=%d bytes, TTL=%s", s.getShardIndex(key), key, len(value), ttl)
+	slog.Debug("Item set", "shard_id", s.getShardIndex(key), "key", key, "value_len", len(value), "ttl", ttl.String())
 }
 
 // Get retrieves a value from the store by its key.
@@ -270,16 +513,16 @@ func (s *InMemStore) Get(key string) ([]byte, bool) {
 
 	item, found := shard.data[key]
 	if !found {
-		log.Printf("GET [Shard %d]: Key='%s' (not found)", s.getShardIndex(key), key)
+		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "not_found")
 		return nil, false
 	}
 
 	if item.TTL > 0 && time.Since(item.CreatedAt) > item.TTL {
-		log.Printf("GET [Shard %d]: Key='%s' (found, but expired)", s.getShardIndex(key), key)
-		return nil, false // Note: expired items are not proactively deleted here, but by CleanExpiredItems
+		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "expired")
+		return nil, false
 	}
 
-	log.Printf("GET [Shard %d]: Key='%s' (found, not expired)", s.getShardIndex(key), key)
+	slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "found")
 	return item.Value, true
 }
 
@@ -289,7 +532,6 @@ func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 		return make(map[string][]byte)
 	}
 
-	// 1. Group keys by the shard they belong to.
 	keysByShard := make([][]string, s.numShards)
 	for _, key := range keys {
 		h := fnv.New64a()
@@ -298,50 +540,39 @@ func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 		keysByShard[shardIndex] = append(keysByShard[shardIndex], key)
 	}
 
-	// 2. Prepare for concurrent fetching.
 	resultsChan := make(chan map[string][]byte, s.numShards)
 	var wg sync.WaitGroup
-
 	now := time.Now()
 
-	// 3. Launch a goroutine for each shard that has keys to fetch.
 	for i, shardKeys := range keysByShard {
 		if len(shardKeys) > 0 {
 			wg.Add(1)
 			go func(shardIndex int, keysInShard []string) {
 				defer wg.Done()
-
 				shard := s.shards[shardIndex]
 				shardResults := make(map[string][]byte, len(keysInShard))
-
 				shard.mu.RLock()
 				for _, key := range keysInShard {
 					if item, found := shard.data[key]; found {
-						// Check TTL
 						if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
 							shardResults[key] = item.Value
 						}
 					}
 				}
 				shard.mu.RUnlock()
-
 				resultsChan <- shardResults
 			}(i, shardKeys)
 		}
 	}
 
-	// 4. Wait for all goroutines to finish and close the channel.
 	go func() {
 		wg.Wait()
 		close(resultsChan)
 	}()
 
-	// 5. Combine results from all shards.
 	finalResults := make(map[string][]byte, len(keys))
 	for shardResults := range resultsChan {
-		for key, value := range shardResults {
-			finalResults[key] = value
-		}
+		maps.Copy(finalResults, shardResults)
 	}
 
 	return finalResults
@@ -352,17 +583,18 @@ func (s *InMemStore) Delete(key string) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
 
-	// MODIFIED: Get data for index removal before deleting.
-	item, itemExists := shard.data[key]
+	var data map[string]any
+	if item, exists := shard.data[key]; exists {
+		data = tryUnmarshal(item.Value)
+	}
 	delete(shard.data, key)
-	shard.mu.Unlock() // Unlock early.
+	shard.mu.Unlock()
 
-	if itemExists {
-		data := tryUnmarshal(item.Value)
+	if data != nil {
 		s.indexes.Remove(key, data)
 	}
 
-	log.Printf("DELETE [Shard %d]: Key='%s'", s.getShardIndex(key), key)
+	slog.Debug("Item deleted", "shard_id", s.getShardIndex(key), "key", key)
 }
 
 // GetAll returns a copy of all non-expired data from ALL shards for persistence.
@@ -380,23 +612,20 @@ func (s *InMemStore) GetAll() map[string][]byte {
 			}
 		}
 		shard.mu.RUnlock()
-
 	}
-	log.Printf("GetAll: Combined snapshot data from all %d shards. Total items: %d", s.numShards, len(snapshotData))
+	slog.Debug("Snapshot data combined", "num_shards", s.numShards, "total_items", len(snapshotData))
 	return snapshotData
 }
 
 // LoadData loads data into the store across its shards from a persistent source.
 func (s *InMemStore) LoadData(data map[string][]byte) {
-	// Clear all existing data from all shards before loading new data.
 	for _, shard := range s.shards {
 		shard.mu.Lock()
-		shard.data = make(map[string]Item) // Clear map in shard.
+		shard.data = make(map[string]Item)
 		shard.mu.Unlock()
 	}
-	log.Println("LoadData: All shards cleared.")
+	slog.Info("All shards cleared for data load")
 
-	loadedCount := 0
 	for k, v := range data {
 		shard := s.getShard(k)
 		shard.mu.Lock()
@@ -406,17 +635,12 @@ func (s *InMemStore) LoadData(data map[string][]byte) {
 			TTL:       0,          // Loaded items have no TTL by default.
 		}
 		shard.mu.Unlock()
-		loadedCount++
 	}
-	log.Printf("LoadData: Data successfully loaded into %d shards. Total keys: %d", s.numShards, loadedCount)
+	slog.Info("Data loaded into shards", "num_shards", s.numShards, "total_keys", len(data))
 }
 
 // CleanExpiredItems iterates through each shard and physically deletes expired items.
-// Returns true if any items were deleted.
 func (s *InMemStore) CleanExpiredItems() bool {
-	// Note: A more advanced implementation would also remove expired items from indexes here.
-	// For simplicity, we rely on the fact that Get/GetAll checks TTL, so expired
-	// items won't be returned, and they'll be removed from indexes upon next Set/Delete.
 	totalDeletedCount := 0
 	now := time.Now()
 	wasModified := false
@@ -426,8 +650,11 @@ func (s *InMemStore) CleanExpiredItems() bool {
 		deletedInShard := 0
 		for key, item := range shard.data {
 			if item.TTL > 0 && now.After(item.CreatedAt.Add(item.TTL)) {
-				// To correctly update indexes, we would need to unmarshal the value here.
-				// This simplified version omits that for performance.
+				// To avoid re-locking, we must remove from index here
+				data := tryUnmarshal(item.Value)
+				if data != nil {
+					s.indexes.Remove(key, data)
+				}
 				delete(shard.data, key)
 				deletedInShard++
 				wasModified = true
@@ -437,13 +664,14 @@ func (s *InMemStore) CleanExpiredItems() bool {
 
 		if deletedInShard > 0 {
 			totalDeletedCount += deletedInShard
-			log.Printf("TTL Cleaner [Shard %d]: Removed %d expired items.", i, deletedInShard)
+			slog.Info("TTL cleaner removed expired items from shard", "shard_id", i, "count", deletedInShard)
 		}
 	}
+
 	if totalDeletedCount > 0 {
-		log.Printf("TTL Cleaner: Total %d expired items removed across all shards.", totalDeletedCount)
+		slog.Info("TTL cleaner finished run", "total_removed", totalDeletedCount)
 	} else {
-		log.Println("TTL Cleaner: No expired items found to remove.")
+		slog.Debug("TTL cleaner run complete: no items to remove")
 	}
 	return wasModified
 }
@@ -464,33 +692,29 @@ func (s *InMemStore) Size() int {
 // CreateIndex creates an index on a field and backfills it with existing data.
 func (s *InMemStore) CreateIndex(field string) {
 	if s.HasIndex(field) {
-		log.Printf("Index on field '%s' already exists.", field)
+		slog.Debug("Index creation skipped: already exists", "field", field)
 		return
 	}
-
 	s.indexes.CreateIndex(field)
 
-	// Backfill the index with existing data.
-	log.Printf("Backfilling index for field '%s'...", field)
+	slog.Info("Backfilling index", "field", field)
 	allData := s.GetAll()
 	count := 0
 	for key, value := range allData {
-		data := tryUnmarshal(value)
-		if data != nil {
-			// Using the Update method with nil oldData to just add the new one.
+		if data := tryUnmarshal(value); data != nil {
 			s.indexes.Update(key, nil, data)
 			count++
 		}
 	}
-	log.Printf("Index for field '%s' backfilled with %d items.", field, count)
+	slog.Info("Index backfill complete", "field", field, "item_count", count)
 }
 
-// NEW: DeleteIndex removes an index from the store.
+// DeleteIndex removes an index from the store.
 func (s *InMemStore) DeleteIndex(field string) {
 	s.indexes.DeleteIndex(field)
 }
 
-// NEW: ListIndexes returns a list of indexed fields.
+// ListIndexes returns a list of indexed fields.
 func (s *InMemStore) ListIndexes() []string {
 	return s.indexes.ListIndexes()
 }
@@ -500,10 +724,17 @@ func (s *InMemStore) HasIndex(field string) bool {
 	return s.indexes.HasIndex(field)
 }
 
-// Lookup uses the index manager to find document keys.
+// Lookup uses the index manager to find document keys for an exact value.
 func (s *InMemStore) Lookup(field string, value any) ([]string, bool) {
 	return s.indexes.Lookup(field, value)
 }
+
+// LookupRange uses the index manager to find document keys within a range.
+func (s *InMemStore) LookupRange(field string, low, high any, lowInclusive, highInclusive bool) ([]string, bool) {
+	return s.indexes.LookupRange(field, low, high, lowInclusive, highInclusive)
+}
+
+// --- The rest of the file (CollectionManager, etc.) does not need changes ---
 
 // CollectionPersister defines the interface for persistence operations specific to collections.
 type CollectionPersister interface {
@@ -524,14 +755,13 @@ type deleteTask struct {
 
 // CollectionManager manages multiple named InMemStore instances, each representing a collection.
 type CollectionManager struct {
-	collections map[string]DataStore // Map of collection names to their DataStore instances.
-	mu          sync.RWMutex         // Mutex to protect the 'collections' map.
-	persister   CollectionPersister  // Interface for persistence operations.
-
-	saveQueue   chan saveTask   // Channel to send save tasks to a goroutine.
-	deleteQueue chan deleteTask // Channel to send delete tasks.
-	quit        chan struct{}   // Channel to signal the goroutines to stop.
-	wg          sync.WaitGroup  // WaitGroup to wait for goroutines to finish.
+	collections map[string]DataStore
+	mu          sync.RWMutex
+	persister   CollectionPersister
+	saveQueue   chan saveTask
+	deleteQueue chan deleteTask
+	quit        chan struct{}
+	wg          sync.WaitGroup
 	numShards   int
 }
 
@@ -554,47 +784,40 @@ func (cm *CollectionManager) StartAsyncWorker() {
 	cm.wg.Add(1)
 	go func() {
 		defer cm.wg.Done()
-		log.Println("Async collection worker started.")
+		slog.Info("Async collection worker started.")
 		for {
 			select {
 			case task, ok := <-cm.saveQueue:
 				if !ok {
-					// Channel is closed, stop.
-					log.Println("Async save queue channel closed, stopping worker.")
+					slog.Info("Async save queue closed, stopping worker.")
 					return
 				}
-				// Execute the save operation.
 				if err := cm.persister.SaveCollectionData(task.collectionName, task.collection); err != nil {
-					log.Printf("Error saving collection '%s' from async task: %v", task.collectionName, err)
+					slog.Error("Error saving collection from async task", "collection", task.collectionName, "error", err)
 				}
 			case task, ok := <-cm.deleteQueue:
 				if !ok {
-					// Channel is closed, stop.
-					log.Println("Async delete queue channel closed, stopping worker.")
+					slog.Info("Async delete queue closed, stopping worker.")
 					return
 				}
-				// Execute the delete operation.
 				if err := cm.persister.DeleteCollectionFile(task.collectionName); err != nil {
-					log.Printf("Error deleting collection file '%s' from async task: %v", task.collectionName, err)
+					slog.Error("Error deleting collection file from async task", "collection", task.collectionName, "error", err)
 				}
 			case <-cm.quit:
-				// Signal to stop and drain remaining tasks.
-				log.Println("Async worker received quit signal. Draining queues...")
-				// Draining the save queue.
+				slog.Info("Async worker received quit signal. Draining queues...")
 				for len(cm.saveQueue) > 0 {
 					task := <-cm.saveQueue
 					if err := cm.persister.SaveCollectionData(task.collectionName, task.collection); err != nil {
-						log.Printf("Error saving collection '%s' while draining save queue: %v", task.collectionName, err)
+						slog.Error("Error saving collection while draining save queue", "collection", task.collectionName, "error", err)
 					}
 				}
-				// Draining the delete queue.
 				for len(cm.deleteQueue) > 0 {
 					task := <-cm.deleteQueue
 					if err := cm.persister.DeleteCollectionFile(task.collectionName); err != nil {
-						log.Printf("Error deleting collection file '%s' while draining delete queue: %v", task.collectionName, err)
+						slog.Error("Error deleting collection file while draining delete queue", "collection", task.collectionName, "error", err)
 					}
 				}
-				log.Println("Async collection worker stopped.")
+				slog.Info("Async collection worker stopped.")
 				return
 			}
 		}
@@ -609,7 +832,8 @@ func (cm *CollectionManager) Wait() {
 
 // EnqueueSaveTask adds a collection save request to the asynchronous queue.
 func (cm *CollectionManager) EnqueueSaveTask(collectionName string, col DataStore) {
-	// Use a temporary `InMemStore` to get a consistent `GetAll()` snapshot.
+	// Create a temporary snapshot of the collection data to be saved.
+	// This avoids holding a lock on the main collection while I/O happens.
 	tempStore := NewInMemStoreWithShards(cm.numShards)
 	tempStore.LoadData(col.GetAll())
 
@@ -619,9 +843,9 @@ func (cm *CollectionManager) EnqueueSaveTask(collectionName string, col DataStor
 	}
 	select {
 	case cm.saveQueue <- task:
-		log.Printf("Save task for collection '%s' enqueued.", collectionName)
+		slog.Debug("Save task enqueued", "collection", collectionName)
 	default:
-		log.Printf("Warning: Save queue for collection '%s' is full. Dropping task.", collectionName)
+		slog.Warn("Save queue is full, dropping task", "collection", collectionName)
 	}
 }
 
@@ -632,37 +856,33 @@ func (cm *CollectionManager) EnqueueDeleteTask(collectionName string) {
 	}
 	select {
 	case cm.deleteQueue <- task:
-		log.Printf("Delete task for collection '%s' enqueued.", collectionName)
+		slog.Debug("Delete task enqueued", "collection", collectionName)
 	default:
-		log.Printf("Warning: Delete queue for collection '%s' is full. Dropping task.", collectionName)
+		slog.Warn("Delete queue is full, dropping task", "collection", collectionName)
 	}
 }
 
 // GetCollection retrieves an existing collection (InMemStore) by name, or creates a new one.
 func (cm *CollectionManager) GetCollection(name string) DataStore {
-	// Attempt to get with RLock first.
 	cm.mu.RLock()
 	col, found := cm.collections[name]
 	cm.mu.RUnlock()
-
 	if found {
 		return col
 	}
 
-	// Acquire write lock to create if not found.
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	// Double-check after acquiring lock.
+	// Double-check in case another goroutine created it while we waited for the lock.
 	col, found = cm.collections[name]
 	if found {
 		return col
 	}
 
-	// Create new collection.
 	newCol := NewInMemStoreWithShards(cm.numShards)
 	cm.collections[name] = newCol
-	log.Printf("Collection '%s' created with %d shards and added to CollectionManager.", name, cm.numShards)
+	slog.Info("Collection created", "name", name, "num_shards", cm.numShards)
 	return newCol
 }
 
@@ -672,9 +892,9 @@ func (cm *CollectionManager) DeleteCollection(name string) {
 	defer cm.mu.Unlock()
 	if _, exists := cm.collections[name]; exists {
 		delete(cm.collections, name)
-		log.Printf("Collection '%s' deleted from CollectionManager (in-memory).", name)
+		slog.Info("Collection deleted from memory", "name", name)
 	} else {
-		log.Printf("Attempted to delete non-existent collection '%s'.", name)
+		slog.Warn("Attempted to delete non-existent collection", "name", name)
 	}
 }
 
@@ -686,7 +906,7 @@ func (cm *CollectionManager) ListCollections() []string {
 	for name := range cm.collections {
 		names = append(names, name)
 	}
-	log.Printf("ListCollections: Returning %d collection names.", len(names))
+	slog.Debug("Listing collections", "count", len(names))
 	return names
 }
 
@@ -698,24 +918,6 @@ func (cm *CollectionManager) CollectionExists(name string) bool {
 	return exists
 }
 
-// LoadAllCollectionData loads data into the respective InMemStore instances within the manager.
-func (cm *CollectionManager) LoadAllCollectionData(allCollectionsData map[string]map[string][]byte) {
-	cm.mu.Lock() // Acquire write lock for the entire duration of loading collections.
-	defer cm.mu.Unlock()
-
-	// Clear existing in-memory collection instances before loading.
-	cm.collections = make(map[string]DataStore) // Re-initialize to clear.
-
-	for colName, data := range allCollectionsData {
-		// Directly create and load the new InMemStore for this collection.
-		newCol := NewInMemStoreWithShards(cm.numShards) // Create a new InMemStore for this collection.
-		newCol.LoadData(data)                           // Load data into this specific InMemStore.
-		cm.collections[colName] = newCol                // Directly assign to the map.
-		log.Printf("Loaded collection '%s' with %d items into CollectionManager from persistence.", colName, newCol.Size())
-	}
-	log.Printf("CollectionManager: Successfully loaded/updated %d collections from persistence.", len(allCollectionsData))
-}
-
 // GetAllCollectionsDataForPersistence gets data from all managed InMemStore instances for persistence.
 func (cm *CollectionManager) GetAllCollectionsDataForPersistence() map[string]map[string][]byte {
 	cm.mu.RLock()
@@ -723,36 +925,25 @@ func (cm *CollectionManager) GetAllCollectionsDataForPersistence() map[string]ma
 
 	dataToSave := make(map[string]map[string][]byte)
 	for colName, col := range cm.collections {
-		dataToSave[colName] = col.GetAll() // Get all non-expired data from each collection's InMemStore.
+		dataToSave[colName] = col.GetAll()
 	}
-	log.Printf("CollectionManager: Retrieved data from %d collections for persistence.", len(dataToSave))
+	slog.Debug("Retrieved all collections data for persistence", "collection_count", len(dataToSave))
 	return dataToSave
 }
 
-// SaveCollectionToDisk saves a single collection's data to disk using the injected persister.
-func (cm *CollectionManager) SaveCollectionToDisk(collectionName string, col DataStore) error {
-	log.Printf("Attempting to save collection '%s' to disk (via injected persister)...", collectionName)
-	return cm.persister.SaveCollectionData(collectionName, col)
-}
-
-// DeleteCollectionFromDisk removes a collection's file from disk using the injected persister.
-func (cm *CollectionManager) DeleteCollectionFromDisk(collectionName string) error {
-	log.Printf("Attempting to delete collection file for '%s' from disk (via injected persister)...", collectionName)
-	return cm.persister.DeleteCollectionFile(collectionName)
-}
-
-// CleanExpiredItemsAndSave triggers TTL cleanup on all managed collections and saves modified ones to disk.
+// CleanExpiredItemsAndSave triggers TTL cleanup on all managed collections.
 func (cm *CollectionManager) CleanExpiredItemsAndSave() {
 	cm.mu.RLock()
+	// Create a copy of the collections map to avoid holding the lock during the long-running loop.
 	collectionsAndNames := make(map[string]DataStore, len(cm.collections))
 	maps.Copy(collectionsAndNames, cm.collections)
 	cm.mu.RUnlock()
 
-	log.Println("TTL Cleaner (Collections): Starting sweep across all managed collections.")
+	slog.Info("Starting TTL sweep across all collections")
 	for name, col := range collectionsAndNames {
 		if col.CleanExpiredItems() {
 			cm.EnqueueSaveTask(name, col)
 		}
 	}
-	log.Println("TTL Cleaner (Collections): Finished sweep across all managed collections.")
+	slog.Info("Finished TTL sweep across all collections")
 }

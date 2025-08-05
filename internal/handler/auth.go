@@ -2,7 +2,7 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"memory-tools/internal/protocol"
 	"net"
 
@@ -42,7 +42,7 @@ func (h *ConnectionHandler) hasPermission(collectionName string, requiredLevel s
 func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 	username, password, err := protocol.ReadAuthenticateCommand(conn)
 	if err != nil {
-		log.Printf("Error reading AUTH command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read AUTH command", "remote_addr", conn.RemoteAddr().String(), "error", err)
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid AUTH command format", nil)
 		return
 	}
@@ -57,26 +57,26 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 
 	userDataBytes, found := sysCol.Get(userKey)
 	if !found {
-		log.Printf("Authentication failed for user '%s' from %s: User not found.", username, conn.RemoteAddr())
+		slog.Warn("Authentication failed", "reason", "User not found", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Invalid username or password.", nil)
 		return
 	}
 
 	var storedUserInfo UserInfo
 	if err := json.Unmarshal(userDataBytes, &storedUserInfo); err != nil {
-		log.Printf("Error unmarshalling user info for '%s' from %s: %v", username, conn.RemoteAddr(), err)
+		slog.Error("Failed to unmarshal user info during auth", "username", username, "remote_addr", conn.RemoteAddr().String(), "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Authentication failed: Internal server error.", nil)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(storedUserInfo.PasswordHash), []byte(password)); err != nil {
-		log.Printf("Authentication failed for user '%s' from %s: Invalid password.", username, conn.RemoteAddr())
+		slog.Warn("Authentication failed", "reason", "Invalid password", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Invalid username or password.", nil)
 		return
 	}
 
 	if storedUserInfo.IsRoot && !h.IsLocalhostConn {
-		log.Printf("Authentication failed for root user '%s' from %s: Not a localhost connection.", username, conn.RemoteAddr())
+		slog.Warn("Authentication failed", "reason", "Root login from non-localhost", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Root access only from localhost.", nil)
 		return
 	}
@@ -84,10 +84,10 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 	// Authentication successful!
 	h.IsAuthenticated = true
 	h.AuthenticatedUser = username
-	h.IsRoot = storedUserInfo.IsRoot           // Cache IsRoot status
-	h.Permissions = storedUserInfo.Permissions // Cache permissions
+	h.IsRoot = storedUserInfo.IsRoot
+	h.Permissions = storedUserInfo.Permissions
 
-	log.Printf("User '%s' authenticated successfully from %s.", username, conn.RemoteAddr())
+	slog.Info("User authenticated successfully", "username", username, "remote_addr", conn.RemoteAddr().String())
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Authenticated as '%s'.", username), nil)
 }
 
@@ -95,7 +95,7 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 	targetUsername, newPassword, err := protocol.ReadChangeUserPasswordCommand(conn)
 	if err != nil {
-		log.Printf("Error reading CHANGE_USER_PASSWORD command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read CHANGE_USER_PASSWORD command", "remote_addr", conn.RemoteAddr().String(), "error", err)
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CHANGE_USER_PASSWORD command format", nil)
 		return
 	}
@@ -107,7 +107,11 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 
 	// Authorization: Only the root user can change passwords.
 	if !h.IsRoot {
-		log.Printf("Unauthorized password change attempt by non-root user '%s' from %s.", h.AuthenticatedUser, conn.RemoteAddr())
+		slog.Warn("Unauthorized password change attempt",
+			"user", h.AuthenticatedUser,
+			"target_user", targetUsername,
+			"remote_addr", conn.RemoteAddr().String(),
+		)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can change passwords.", nil)
 		return
 	}
@@ -117,21 +121,21 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 
 	userDataBytes, found := sysCol.Get(targetUserKey)
 	if !found {
-		log.Printf("Failed to change password for '%s': Target user not found.", targetUsername)
+		slog.Warn("Password change failed", "reason", "Target user not found", "admin_user", h.AuthenticatedUser, "target_user", targetUsername)
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: User '%s' does not exist.", targetUsername), nil)
 		return
 	}
 
 	var storedUserInfo UserInfo
 	if err := json.Unmarshal(userDataBytes, &storedUserInfo); err != nil {
-		log.Printf("Error unmarshalling user info for '%s' during password change: %v", targetUsername, err)
+		slog.Error("Failed to unmarshal user info during password change", "target_user", targetUsername, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Internal server error: Invalid user data.", nil)
 		return
 	}
 
 	newHashedPassword, hashErr := HashPassword(newPassword)
 	if hashErr != nil {
-		log.Printf("Error hashing new password for user '%s': %v", targetUsername, hashErr)
+		slog.Error("Failed to hash new password", "target_user", targetUsername, "error", hashErr)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to hash new password.", nil)
 		return
 	}
@@ -139,7 +143,7 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 	storedUserInfo.PasswordHash = newHashedPassword
 	updatedUserInfoBytes, marshalErr := json.Marshal(storedUserInfo)
 	if marshalErr != nil {
-		log.Printf("Error marshalling updated user info for '%s': %v", targetUsername, marshalErr)
+		slog.Error("Failed to marshal updated user info", "target_user", targetUsername, "error", marshalErr)
 		protocol.WriteResponse(conn, protocol.StatusError, "Internal server error: Failed to marshal updated user data.", nil)
 		return
 	}
@@ -147,9 +151,8 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 	sysCol.Set(targetUserKey, updatedUserInfoBytes, 0)
 	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
 
-	log.Printf("Password for user '%s' changed successfully by '%s' from %s.", targetUsername, h.AuthenticatedUser, conn.RemoteAddr())
+	slog.Info("User password changed successfully", "admin_user", h.AuthenticatedUser, "target_user", targetUsername)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Password for user '%s' updated successfully.", targetUsername), nil)
-
 }
 
 // HashPassword hashes a password using bcrypt.

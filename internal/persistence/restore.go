@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
@@ -18,7 +18,7 @@ func PerformRestore(backupName string, mainStore store.DataStore, colManager *st
 		return fmt.Errorf("backup directory '%s' not found", backupName)
 	}
 
-	log.Printf("--- STARTING RESTORE FROM '%s' ---", backupName)
+	slog.Warn("--- STARTING RESTORE ---", "backup_name", backupName)
 
 	// Restore the Main Store
 	if err := restoreMainStore(backupPath, mainStore); err != nil {
@@ -30,19 +30,19 @@ func PerformRestore(backupName string, mainStore store.DataStore, colManager *st
 		return fmt.Errorf("failed to restore collections: %w", err)
 	}
 
-	log.Printf("--- RESTORE FROM '%s' COMPLETED SUCCESSFULLY ---", backupName)
+	slog.Info("--- RESTORE COMPLETED SUCCESSFULLY ---", "backup_name", backupName)
 	return nil
 }
 
 // restoreMainStore loads the main store's data from its backup file.
 func restoreMainStore(backupPath string, s store.DataStore) error {
 	filePath := filepath.Join(backupPath, "in-memory.mtdb")
-	log.Printf("Restoring main store from '%s'...", filePath)
+	slog.Info("Restoring main store...", "path", filePath)
 
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Main store backup file not found in '%s'. Skipping.", backupPath)
+			slog.Warn("Main store backup file not found, skipping.", "path", filePath)
 			s.LoadData(make(map[string][]byte)) // Load empty data
 			return nil
 		}
@@ -71,36 +71,34 @@ func restoreMainStore(backupPath string, s store.DataStore) error {
 	}
 
 	s.LoadData(loadedData)
-	log.Printf("Main store restored with %d keys.", len(loadedData))
+	slog.Info("Main store restored.", "key_count", len(loadedData))
 	return nil
 }
 
 // restoreCollections loads all collections from the backup directory.
 func restoreCollections(backupPath string, cm *store.CollectionManager) error {
-	// 1. Clear all existing in-memory collections to avoid conflicts
 	activeCollections := cm.ListCollections()
 	for _, colName := range activeCollections {
 		cm.DeleteCollection(colName)
 	}
-	log.Println("Cleared all active in-memory collections before restore.")
+	slog.Info("Cleared all active in-memory collections before restore.")
 
-	// 2. Load collections from backup files
 	collectionsBackupDir := filepath.Join(backupPath, "collections")
 	files, err := filepath.Glob(filepath.Join(collectionsBackupDir, "*"+collectionFileExtension))
 	if err != nil {
 		return fmt.Errorf("failed to list collection backup files in '%s': %w", collectionsBackupDir, err)
 	}
 
-	log.Printf("Found %d collection files in backup. Starting restore...", len(files))
+	slog.Info("Found collection files in backup, starting restore...", "count", len(files))
 	for _, filePath := range files {
 		baseName := filepath.Base(filePath)
 		colName := baseName[:len(baseName)-len(collectionFileExtension)]
 
-		log.Printf("Restoring collection '%s' from '%s'...", colName, filePath)
+		slog.Info("Restoring collection...", "collection", colName, "path", filePath)
 		colStore := cm.GetCollection(colName)
 
 		if err := loadCollectionDataFromBackup(filePath, colStore); err != nil {
-			log.Printf("WARNING: Failed to restore collection '%s', skipping. Error: %v", colName, err)
+			slog.Warn("Failed to restore collection, skipping.", "collection", colName, "error", err)
 			cm.DeleteCollection(colName) // Delete the partially created collection
 			continue
 		}
@@ -117,7 +115,6 @@ func loadCollectionDataFromBackup(filePath string, s store.DataStore) error {
 	}
 	defer file.Close()
 
-	// 1. Read index metadata
 	var numIndexes uint32
 	if err := binary.Read(file, binary.LittleEndian, &numIndexes); err != nil {
 		return fmt.Errorf("failed to read index count from '%s': %w", filePath, err)
@@ -132,7 +129,6 @@ func loadCollectionDataFromBackup(filePath string, s store.DataStore) error {
 		indexedFields[i] = string(fieldBytes)
 	}
 
-	// 2. Read the collection's data
 	var numEntries uint32
 	if err := binary.Read(file, binary.LittleEndian, &numEntries); err != nil {
 		return fmt.Errorf("failed to read entry count from '%s': %w", filePath, err)
@@ -153,16 +149,15 @@ func loadCollectionDataFromBackup(filePath string, s store.DataStore) error {
 		collectionData[key] = valBytes
 	}
 
-	// 3. Load data into the store and rebuild indexes
 	s.LoadData(collectionData)
-	log.Printf("Collection data loaded with %d keys.", len(collectionData))
+	slog.Info("Collection data loaded.", "key_count", len(collectionData))
 
 	if len(indexedFields) > 0 {
-		log.Printf("Rebuilding %d indexes...", len(indexedFields))
+		slog.Info("Rebuilding indexes...", "index_count", len(indexedFields))
 		for _, field := range indexedFields {
-			s.CreateIndex(field) // This rebuilds the index from the newly loaded data
+			s.CreateIndex(field)
 		}
-		log.Printf("Finished rebuilding indexes.")
+		slog.Info("Finished rebuilding indexes.")
 	}
 
 	return nil

@@ -2,7 +2,7 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"memory-tools/internal/protocol"
 	"net"
 )
@@ -11,7 +11,7 @@ import (
 func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionCreateCommand(conn)
 	if err != nil {
-		log.Printf("Error reading CREATE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read CREATE_COLLECTION command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CREATE_COLLECTION command format", nil)
 		return
 	}
@@ -20,16 +20,16 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection create attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
-
-	// --- ASYNC SAVE: Enqueue save task instead of saving synchronously ---
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+
+	slog.Info("Collection created/ensured", "user", h.AuthenticatedUser, "collection", collectionName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' ensured (persistence will be handled asynchronously)", collectionName), nil)
 }
 
@@ -37,7 +37,7 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionDeleteCommand(conn)
 	if err != nil {
-		log.Printf("Error reading DELETE_COLLECTION command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read DELETE_COLLECTION command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION command format", nil)
 		return
 	}
@@ -46,21 +46,22 @@ func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized collection delete attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Collection delete failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
 		return
 	}
 
 	h.CollectionManager.DeleteCollection(collectionName)
-
-	// --- ASYNC DELETE: Enqueue file deletion task asynchronously ---
 	h.CollectionManager.EnqueueDeleteTask(collectionName)
+
+	slog.Info("Collection deleted", "user", h.AuthenticatedUser, "collection", collectionName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' deleted (persistence will be handled asynchronously)", collectionName), nil)
 }
 
@@ -69,7 +70,6 @@ func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
 	allCollectionNames := h.CollectionManager.ListCollections()
 	accessibleCollections := []string{}
 
-	// Filter collections based on read permission
 	for _, name := range allCollectionNames {
 		if h.hasPermission(name, "read") {
 			accessibleCollections = append(accessibleCollections, name)
@@ -78,12 +78,14 @@ func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
 
 	jsonNames, err := json.Marshal(accessibleCollections)
 	if err != nil {
-		log.Printf("Error marshalling collection names to JSON: %v", err)
+		slog.Error("Failed to marshal collection names to JSON", "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal collection names", nil)
 		return
 	}
+
+	slog.Debug("User listed collections", "user", h.AuthenticatedUser, "count", len(accessibleCollections))
 	if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Accessible collections listed", jsonNames); err != nil {
-		log.Printf("Error writing collection list response to %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to write collection list response", "error", err, "remote_addr", conn.RemoteAddr().String())
 	}
 }
 
@@ -91,7 +93,7 @@ func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 	collectionName, fieldName, err := protocol.ReadCollectionIndexCreateCommand(conn)
 	if err != nil {
-		log.Printf("Error reading CREATE_COLLECTION_INDEX command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read CREATE_INDEX command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid CREATE_COLLECTION_INDEX command format", nil)
 		return
 	}
@@ -100,21 +102,22 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 		return
 	}
 
-	// Authorization check: Requires write permission to modify collection structure
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized index create attempt", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Index create failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		return
 	}
 
-	log.Printf("User '%s' requested to create index on '%s' for collection '%s'", h.AuthenticatedUser, fieldName, collectionName)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.CreateIndex(fieldName)
 
+	slog.Info("Index created on collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index creation process for field '%s' on collection '%s' completed.", fieldName, collectionName), nil)
 }
 
@@ -122,7 +125,7 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 	collectionName, fieldName, err := protocol.ReadCollectionIndexDeleteCommand(conn)
 	if err != nil {
-		log.Printf("Error reading DELETE_COLLECTION_INDEX command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read DELETE_INDEX command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_INDEX command format", nil)
 		return
 	}
@@ -131,21 +134,22 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 		return
 	}
 
-	// Authorization check: Requires write permission
 	if !h.hasPermission(collectionName, "write") {
+		slog.Warn("Unauthorized index delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Index delete failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		return
 	}
 
-	log.Printf("User '%s' requested to delete index on '%s' for collection '%s'", h.AuthenticatedUser, fieldName, collectionName)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.DeleteIndex(fieldName)
 
+	slog.Info("Index deleted from collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index for field '%s' on collection '%s' deleted.", fieldName, collectionName), nil)
 }
 
@@ -153,7 +157,7 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionIndexListCommand(conn)
 	if err != nil {
-		log.Printf("Error reading LIST_COLLECTION_INDEXES command from %s: %v", conn.RemoteAddr(), err)
+		slog.Error("Failed to read LIST_INDEXES command", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid LIST_COLLECTION_INDEXES command format", nil)
 		return
 	}
@@ -162,8 +166,8 @@ func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 		return
 	}
 
-	// Authorization check: Requires read permission
 	if !h.hasPermission(collectionName, "read") {
+		slog.Warn("Unauthorized index list attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
 	}
@@ -178,10 +182,11 @@ func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 
 	jsonResponse, err := json.Marshal(indexedFields)
 	if err != nil {
-		log.Printf("Error marshalling index list for collection '%s': %v", collectionName, err)
+		slog.Error("Failed to marshal index list", "collection", collectionName, "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Failed to marshal index list", nil)
 		return
 	}
 
+	slog.Debug("User listed indexes for collection", "user", h.AuthenticatedUser, "collection", collectionName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Indexes for collection '%s' retrieved.", collectionName), jsonResponse)
 }

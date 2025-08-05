@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"flag"
 	"io"
 	"log"
 	"log/slog"
@@ -19,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -41,6 +41,11 @@ func (f updateActivityFunc) UpdateActivity() {
 }
 
 func main() {
+
+	err := godotenv.Load()
+	if err != nil {
+		slog.Debug("No .env file found, proceeding with existing environment")
+	}
 
 	// logs configuration //
 	// Create the logs directory if it doesn't exist
@@ -69,15 +74,8 @@ func main() {
 	// Configure logging to include date, time, and file information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	// Define a command-line flag for the configuration file path.
-	configPath := flag.String("config", "config.json", "Path to the JSON configuration file")
-	flag.Parse()
-
 	// Load the application configuration from the specified path.
-	cfg, err := config.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatalf("Fatal error loading configuration: %v", err)
-	}
+	cfg := config.LoadConfig()
 
 	// Initialize the main in-memory store and the collection manager.
 	mainInMemStore := store.NewInMemStoreWithShards(cfg.NumShards)

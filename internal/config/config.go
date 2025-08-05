@@ -1,53 +1,28 @@
 package config
 
 import (
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"strconv"
 	"time"
-
-	jsoniter "github.com/json-iterator/go"
 )
-
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // Config holds application-wide configuration.
 type Config struct {
-	Port             string        `json:"port"`
-	ReadTimeout      time.Duration `json:"read_timeout"`
-	WriteTimeout     time.Duration `json:"write_timeout"`
-	IdleTimeout      time.Duration `json:"idle_timeout"`
-	ShutdownTimeout  time.Duration `json:"shutdown_timeout"`
-	SnapshotInterval time.Duration `json:"snapshot_interval"`  // How often to take snapshots
-	EnableSnapshots  bool          `json:"enable_snapshots"`   // Whether scheduled snapshots are enabled.
-	TtlCleanInterval time.Duration `json:"ttl_clean_interval"` // How often the TTL cleaner runs
-	BackupInterval   time.Duration `json:"backup_interval"`
-	BackupRetention  time.Duration `json:"backup_retention"`
-	NumShards        int           `json:"num_shards"`
-}
-
-// configJSON is an intermediate struct used for JSON unmarshalling.
-type configJSON struct {
-	Port             string `json:"port"`
-	ReadTimeout      string `json:"read_timeout"`
-	WriteTimeout     string `json:"write_timeout"`
-	IdleTimeout      string `json:"idle_timeout"`
-	ShutdownTimeout  string `json:"shutdown_timeout"`
-	SnapshotInterval string `json:"snapshot_interval"`
-	EnableSnapshots  bool   `json:"enable_snapshots"`
-	TtlCleanInterval string `json:"ttl_clean_interval"`
-	BackupInterval   string `json:"backup_interval"`
-	BackupRetention  string `json:"backup_retention"`
-	NumShards        int    `json:"num_shards"`
+	Port             string
+	ShutdownTimeout  time.Duration
+	SnapshotInterval time.Duration
+	EnableSnapshots  bool
+	TtlCleanInterval time.Duration
+	BackupInterval   time.Duration
+	BackupRetention  time.Duration
+	NumShards        int
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
 func NewDefaultConfig() Config {
 	return Config{
 		Port:             ":5876",
-		ReadTimeout:      5 * time.Second,
-		WriteTimeout:     10 * time.Second,
-		IdleTimeout:      120 * time.Second,
 		ShutdownTimeout:  10 * time.Second,
 		SnapshotInterval: 5 * time.Minute,
 		EnableSnapshots:  true,
@@ -58,90 +33,64 @@ func NewDefaultConfig() Config {
 	}
 }
 
-// LoadConfig loads configuration from a specified JSON file path.
-func LoadConfig(filePath string) (Config, error) {
-	// Start with default configuration values.
+// LoadConfig loads configuration with a clear precedence: Environment > Defaults.
+func LoadConfig() Config {
+	// 1. Start with default configuration values.
 	cfg := NewDefaultConfig()
-	jsonCfg := configJSON{} // Intermediate struct for string durations
+	slog.Info("Loading configuration with default values...")
 
-	// Read the content of the JSON file.
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("Config file '%s' not found. Using default configuration.", filePath)
-			return cfg, nil // Return defaults if file doesn't exist
-		}
-		return cfg, fmt.Errorf("failed to read config file '%s': %w", filePath, err)
+	// 2. Override defaults with environment variables, if they are set.
+	applyEnvConfig(&cfg)
+	slog.Info("Configuration check for environment variables complete.")
+
+	return cfg
+}
+
+// applyEnvConfig overrides config values from environment variables.
+func applyEnvConfig(cfg *Config) {
+	// String values
+	if portEnv := os.Getenv("MEMORYTOOLS_PORT"); portEnv != "" {
+		cfg.Port = portEnv
+		slog.Info("Overriding Port from environment", "value", portEnv)
 	}
 
-	// Unmarshal JSON into the intermediate struct.
-	if err := json.Unmarshal(data, &jsonCfg); err != nil {
-		return cfg, fmt.Errorf("failed to unmarshal config file '%s': %w", filePath, err)
-	}
-
-	// Convert string durations from jsonCfg to time.Duration in the actual Config.
-	if jsonCfg.Port != "" {
-		cfg.Port = jsonCfg.Port
-	}
-	cfg.EnableSnapshots = jsonCfg.EnableSnapshots // Direct assignment.
-
-	var parseErr error
-
-	if jsonCfg.ReadTimeout != "" {
-		cfg.ReadTimeout, parseErr = time.ParseDuration(jsonCfg.ReadTimeout)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'read_timeout' format in config file: %w", parseErr)
-		}
-	}
-	if jsonCfg.WriteTimeout != "" {
-		cfg.WriteTimeout, parseErr = time.ParseDuration(jsonCfg.WriteTimeout)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'write_timeout' format in config file: %w", parseErr)
-		}
-	}
-	if jsonCfg.IdleTimeout != "" {
-		cfg.IdleTimeout, parseErr = time.ParseDuration(jsonCfg.IdleTimeout)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'idle_timeout' format in config file: %w", parseErr)
-		}
-	}
-	if jsonCfg.ShutdownTimeout != "" {
-		cfg.ShutdownTimeout, parseErr = time.ParseDuration(jsonCfg.ShutdownTimeout)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'shutdown_timeout' format in config file: %w", parseErr)
-		}
-	}
-	if jsonCfg.SnapshotInterval != "" {
-		cfg.SnapshotInterval, parseErr = time.ParseDuration(jsonCfg.SnapshotInterval)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'snapshot_interval' format in config file: %w", parseErr)
-		}
-	}
-	if jsonCfg.TtlCleanInterval != "" {
-		cfg.TtlCleanInterval, parseErr = time.ParseDuration(jsonCfg.TtlCleanInterval)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'ttl_clean_interval' format in config file: %w", parseErr)
-		}
-
-	}
-	if jsonCfg.BackupInterval != "" {
-		cfg.BackupInterval, parseErr = time.ParseDuration(jsonCfg.BackupInterval)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'backup_interval' format in config file: %w", parseErr)
+	// Integer values
+	if numShardsEnv := os.Getenv("MEMORYTOOLS_NUM_SHARDS"); numShardsEnv != "" {
+		if i, err := strconv.Atoi(numShardsEnv); err == nil && i > 0 {
+			cfg.NumShards = i
+			slog.Info("Overriding NumShards from environment", "value", i)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_NUM_SHARDS env var, using default", "value", numShardsEnv)
 		}
 	}
 
-	if jsonCfg.BackupRetention != "" {
-		cfg.BackupRetention, parseErr = time.ParseDuration(jsonCfg.BackupRetention)
-		if parseErr != nil {
-			return cfg, fmt.Errorf("invalid 'backup_retention' format in config file: %w", parseErr)
+	// Boolean values
+	if enableSnapshotsEnv := os.Getenv("MEMORYTOOLS_ENABLE_SNAPSHOTS"); enableSnapshotsEnv != "" {
+		if b, err := strconv.ParseBool(enableSnapshotsEnv); err == nil {
+			cfg.EnableSnapshots = b
+			slog.Info("Overriding EnableSnapshots from environment", "value", b)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_ENABLE_SNAPSHOTS env var, using default", "value", enableSnapshotsEnv)
 		}
 	}
 
-	if jsonCfg.NumShards > 0 {
-		cfg.NumShards = jsonCfg.NumShards
-	}
+	// Duration values
+	overrideDuration("MEMORYTOOLS_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout)
+	overrideDuration("MEMORYTOOLS_SNAPSHOT_INTERVAL", &cfg.SnapshotInterval)
+	overrideDuration("MEMORYTOOLS_TTL_CLEAN_INTERVAL", &cfg.TtlCleanInterval)
+	overrideDuration("MEMORYTOOLS_BACKUP_INTERVAL", &cfg.BackupInterval)
+	overrideDuration("MEMORYTOOLS_BACKUP_RETENTION", &cfg.BackupRetention)
+}
 
-	log.Printf("Configuration loaded from '%s'.", filePath)
-	return cfg, nil
+// overrideDuration is a helper to avoid repetition for duration env vars.
+func overrideDuration(envKey string, target *time.Duration) {
+	envVal := os.Getenv(envKey)
+	if envVal != "" {
+		if d, err := time.ParseDuration(envVal); err == nil {
+			*target = d
+			slog.Info("Overriding config from environment", "key", envKey, "value", envVal)
+		} else {
+			slog.Warn("Invalid duration format in env var, using default", "key", envKey, "value", envVal)
+		}
+	}
 }

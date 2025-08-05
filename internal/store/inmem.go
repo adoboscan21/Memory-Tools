@@ -483,45 +483,74 @@ func (s *InMemStore) getShardIndex(key string) uint64 {
 }
 
 // Set saves a key-value pair and updates any relevant indexes.
+// Definitive and Corrected Version of InMemStore.Set
 func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	var oldData map[string]any
+	// 1. Capture the old state BEFORE any modifications.
+	//    This is crucial so the index update knows what to delete.
+	var oldDataForIndex map[string]any
+	var oldCreatedAt time.Time
+	isUpdate := false
 	if oldItem, exists := shard.data[key]; exists {
-		oldData = tryUnmarshal(oldItem.Value)
+		oldDataForIndex = tryUnmarshal(oldItem.Value)
+		oldCreatedAt = oldItem.CreatedAt // We preserve the original creation date on an update.
+		isUpdate = true
 	}
 
-	shard.data[key] = Item{
+	// 2. Prepare the new item's data.
+	//    If it's an update, use the original creation date.
+	newItemCreatedAt := time.Now()
+	if isUpdate {
+		newItemCreatedAt = oldCreatedAt
+	}
+
+	newItem := Item{
 		Value:     value,
-		CreatedAt: time.Now(),
+		CreatedAt: newItemCreatedAt,
 		TTL:       ttl,
 	}
-	shard.mu.Unlock()
 
-	newData := tryUnmarshal(value)
-	s.indexes.Update(key, oldData, newData)
+	// 3. Commit the new item to the main data store.
+	//    Now, shard.data[] holds the most recent information.
+	shard.data[key] = newItem
 
-	slog.Debug("Item set", "shard_id", s.getShardIndex(key), "key", key, "value_len", len(value), "ttl", ttl.String())
+	// 4. Finally, update the index to reflect the change.
+	newDataForIndex := tryUnmarshal(value)
+	if oldDataForIndex != nil || newDataForIndex != nil {
+		s.indexes.Update(key, oldDataForIndex, newDataForIndex)
+	}
+
+	slog.Debug("Item set", "shard_id", s.getShardIndex(key), "key", key, "is_update", isUpdate)
 }
 
 // Get retrieves a value from the store by its key.
 func (s *InMemStore) Get(key string) ([]byte, bool) {
+	// 1. Correctly identifies the shard for the key.
 	shard := s.getShard(key)
+	// 2. Uses a Read Lock, which is optimal for performance.
 	shard.mu.RLock()
+	// 3. Ensures the lock is always released.
 	defer shard.mu.RUnlock()
 
+	// 4. Performs an efficient and standard map lookup.
 	item, found := shard.data[key]
 	if !found {
+		// Correctly handles the "not found" case.
 		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "not_found")
 		return nil, false
 	}
 
+	// 5. Implements a robust TTL check.
 	if item.TTL > 0 && time.Since(item.CreatedAt) > item.TTL {
+		// Correctly treats an expired item as "not found".
 		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "expired")
 		return nil, false
 	}
 
+	// 6. Returns the value if found and not expired.
 	slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "found")
 	return item.Value, true
 }

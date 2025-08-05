@@ -50,12 +50,8 @@ COPY --from=builder /app/certificates/server.key ./certificates/
 # Copy the configuration file.
 COPY config.json .
 
-# Copy the entrypoint script and give it execution permissions.
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
 # Expose the server port.
 #EXPOSE 5876
 
 # Command to execute the entrypoint script when the container starts.
-ENTRYPOINT ["entrypoint.sh"]
+CMD "memory-tools-server"

@@ -47,9 +47,6 @@ COPY --from=builder /app/memory-tools-client /usr/local/bin/
 COPY --from=builder /app/certificates/server.crt ./certificates/
 COPY --from=builder /app/certificates/server.key ./certificates/
 
-# Copy the configuration file.
-COPY config.json .
-
 # Expose the server port.
 #EXPOSE 5876
 

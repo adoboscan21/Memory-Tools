@@ -202,11 +202,53 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 }
 
 // findCandidateKeysFromFilter is the advanced query optimizer.
-// It tries to use indexes for '=', 'in', and range operators ('>', '<', 'between', etc.)
-// to reduce the number of documents that need a full scan.
+// It tries to use indexes for '=', 'in', range operators, and now supports 'OR' clauses.
 func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore, filter map[string]any) (keys []string, usedIndex bool, remainingFilter map[string]any) {
 	if len(filter) == 0 {
 		return nil, false, filter
+	}
+
+	// --- NEW: Logic for compound filters with "OR" ---
+	if orConditions, ok := filter["or"].([]any); ok {
+		unionKeys := make(map[string]struct{})
+		allConditionsAreIndexable := true
+
+		for _, cond := range orConditions {
+			condMap, isMap := cond.(map[string]any)
+			if !isMap {
+				// Invalid condition format, this forces a full scan.
+				allConditionsAreIndexable = false
+				break
+			}
+
+			// We recursively call this function on the sub-filter.
+			// This allows nesting of AND inside OR, etc.
+			subKeys, subIndexUsed, _ := h.findCandidateKeysFromFilter(colStore, condMap)
+
+			if !subIndexUsed {
+				// If any part of the OR cannot use an index, the entire OR must be a full scan.
+				allConditionsAreIndexable = false
+				break
+			}
+
+			// Add the keys from the successful index lookup to our union set.
+			for _, key := range subKeys {
+				unionKeys[key] = struct{}{}
+			}
+		}
+
+		if allConditionsAreIndexable && len(orConditions) > 0 {
+			// Success! All conditions in the OR clause were resolved using indexes.
+			finalKeys := make([]string, 0, len(unionKeys))
+			for k := range unionKeys {
+				finalKeys = append(finalKeys, k)
+			}
+			slog.Debug("Query optimizer: using indexes for 'OR' clause", "found_keys", len(finalKeys))
+			// The entire OR filter was resolved, so the remaining filter is empty.
+			return finalKeys, true, make(map[string]any)
+		}
+		// If we fall through, it means at least one part of the OR couldn't use an index.
+		// The function will proceed to the fallback and return `nil, false, filter`.
 	}
 
 	// --- LOGIC FOR COMPOUND FILTERS WITH "AND" ---
@@ -221,68 +263,14 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 				continue
 			}
 
-			field, fieldOk := condMap["field"].(string)
-			op, opOk := condMap["op"].(string)
-			value := condMap["value"]
+			// Recursively call to handle nested conditions and use existing logic.
+			subKeys, subIndexUsed, subRemainingFilter := h.findCandidateKeysFromFilter(colStore, condMap)
 
-			if fieldOk && opOk && colStore.HasIndex(field) {
-				var usedIndexInCond bool
-				switch op {
-				case "=":
-					lookupKeys, _ := colStore.Lookup(field, value)
-					keySets = append(keySets, lookupKeys)
-					slog.Debug("Query optimizer: using index for '='", "field", field, "found_keys", len(lookupKeys))
-					usedIndexInCond = true
-
-				case "in":
-					if values, isSlice := value.([]any); isSlice {
-						unionKeys := make(map[string]struct{})
-						for _, v := range values {
-							lookupKeys, _ := colStore.Lookup(field, v)
-							for _, key := range lookupKeys {
-								unionKeys[key] = struct{}{}
-							}
-						}
-
-						finalKeys := make([]string, 0, len(unionKeys))
-						for k := range unionKeys {
-							finalKeys = append(finalKeys, k)
-						}
-						keySets = append(keySets, finalKeys)
-						slog.Debug("Query optimizer: using index for 'in'", "field", field, "found_keys", len(finalKeys))
-						usedIndexInCond = true
-					}
-
-				// --- NEW: Logic for range operators using B-Trees ---
-				case ">", ">=", "<", "<=", "between":
-					var keys []string
-					var used bool
-
-					// NOTE: For production use, ensure values are converted to float64 if possible before passing.
-					switch op {
-					case ">":
-						keys, used = colStore.LookupRange(field, value, nil, false, false)
-					case ">=":
-						keys, used = colStore.LookupRange(field, value, nil, true, false)
-					case "<":
-						keys, used = colStore.LookupRange(field, nil, value, false, false)
-					case "<=":
-						keys, used = colStore.LookupRange(field, nil, value, false, true)
-					case "between":
-						if bounds, ok := value.([]any); ok && len(bounds) == 2 {
-							keys, used = colStore.LookupRange(field, bounds[0], bounds[1], true, true)
-						}
-					}
-
-					if used {
-						keySets = append(keySets, keys)
-						slog.Debug("Query optimizer: using B-Tree index for range op", "field", field, "op", op, "found_keys", len(keys))
-						usedIndexInCond = true
-					}
-				}
-
-				if !usedIndexInCond {
-					nonIndexedConditions = append(nonIndexedConditions, condMap)
+			if subIndexUsed {
+				keySets = append(keySets, subKeys)
+				// If the sub-filter was not fully resolved, add the remainder to the non-indexed list.
+				if len(subRemainingFilter) > 0 {
+					nonIndexedConditions = append(nonIndexedConditions, subRemainingFilter)
 				}
 			} else {
 				nonIndexedConditions = append(nonIndexedConditions, condMap)
@@ -306,8 +294,7 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		return candidateKeys, true, newFilter
 	}
 
-	// --- LOGIC FOR SIMPLE FILTERS (NOT WRAPPED IN "AND") ---
-	// This part must also be updated to support all operators.
+	// --- LOGIC FOR SIMPLE FILTERS (NOT WRAPPED IN "AND" or "OR") ---
 	field, fieldOk := filter["field"].(string)
 	op, opOk := filter["op"].(string)
 	value := filter["value"]

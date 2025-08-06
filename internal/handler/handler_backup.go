@@ -65,6 +65,18 @@ func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 		return
 	}
 
+	slog.Info("Restore complete. Enqueuing persistence tasks for all restored collections.")
+
+	if err := persistence.SaveData(h.MainStore); err != nil {
+		slog.Error("Failed to persist main store after restore", "error", err)
+	}
+
+	restoredCollections := h.CollectionManager.ListCollections()
+	for _, colName := range restoredCollections {
+		colStore := h.CollectionManager.GetCollection(colName)
+		h.CollectionManager.EnqueueSaveTask(colName, colStore)
+	}
+
 	slog.Info("Restore completed successfully", "backup_name", backupName, "user", h.AuthenticatedUser)
 	msg := fmt.Sprintf("OK: Restore from '%s' completed successfully. A server restart is recommended to ensure consistency.", backupName)
 	protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)

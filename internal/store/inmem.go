@@ -866,6 +866,14 @@ func (cm *CollectionManager) EnqueueSaveTask(collectionName string, col DataStor
 	tempStore := NewInMemStoreWithShards(cm.numShards)
 	tempStore.LoadData(col.GetAll())
 
+	originalIndexes := col.ListIndexes()
+	if len(originalIndexes) > 0 {
+
+		for _, fieldName := range originalIndexes {
+			tempStore.CreateIndex(fieldName)
+		}
+	}
+
 	task := saveTask{
 		collectionName: collectionName,
 		collection:     tempStore,

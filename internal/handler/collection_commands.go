@@ -117,6 +117,8 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.CreateIndex(fieldName)
 
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
+
 	slog.Info("Index created on collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index creation process for field '%s' on collection '%s' completed.", fieldName, collectionName), nil)
 }
@@ -148,6 +150,8 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.DeleteIndex(fieldName)
+
+	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 
 	slog.Info("Index deleted from collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Index for field '%s' on collection '%s' deleted.", fieldName, collectionName), nil)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
 	"net"
@@ -86,53 +87,75 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 // processCollectionQuery executes a complex query on a collection.
 func (h *ConnectionHandler) processCollectionQuery(collectionName string, query Query) (any, error) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
-	var itemsData map[string][]byte
 
+	// --- HOT SEARCH (IN RAM) ---
+	slog.Debug("Executing query against hot data (RAM)...", "collection", collectionName)
+	// The index optimization and in-memory filtering logic is maintained.
 	candidateKeys, usedIndex, remainingFilter := h.findCandidateKeysFromFilter(colStore, query.Filter)
 
+	var itemsData map[string][]byte
 	if usedIndex {
-		slog.Debug("Query optimizer is using index(es)", "collection", collectionName, "candidate_keys", len(candidateKeys))
+		slog.Debug("Query optimizer using index(es) for hot data", "collection", collectionName, "candidate_keys", len(candidateKeys))
 		itemsData = colStore.GetMany(candidateKeys)
 	} else {
-		slog.Debug("Query optimizer is NOT using an index, falling back to full scan", "collection", collectionName)
+		slog.Debug("Query optimizer NOT using index for hot data, falling back to full scan", "collection", collectionName)
 		itemsData = colStore.GetAll()
 		remainingFilter = query.Filter
 	}
 
-	var itemsWithKeys []struct {
-		Key string
-		Val map[string]any
-	}
+	hotResultsMap := make(map[string]map[string]any) // Use a map to prevent duplicates
+
 	for k, vBytes := range itemsData {
 		var val map[string]any
 		if err := json.Unmarshal(vBytes, &val); err != nil {
-			slog.Warn("Failed to unmarshal JSON for key during query processing", "key", k, "collection", collectionName, "error", err)
 			continue
 		}
-		itemsWithKeys = append(itemsWithKeys, struct {
-			Key string
-			Val map[string]any
-		}{Key: k, Val: val})
-	}
-
-	// 1. Filtering (WHERE clause)
-	filteredItems := []struct {
-		Key string
-		Val map[string]any
-	}{}
-
-	for _, item := range itemsWithKeys {
-		if h.matchFilter(item.Val, remainingFilter) {
-			filteredItems = append(filteredItems, item)
+		if h.matchFilter(val, remainingFilter) {
+			hotResultsMap[k] = val // Store the hot result
 		}
 	}
+	slog.Info("Hot data query finished", "collection", collectionName, "found_matches", len(hotResultsMap))
 
-	// Handle DISTINCT early if requested
+	// --- COLD SEARCH (ON DISK) ---
+	slog.Debug("Executing query against cold data (Disk)...", "collection", collectionName)
+	// We create a `matcher` function that reuses the `matchFilter` logic.
+	// This is key to avoid repeating code.
+	coldMatcher := func(item map[string]any) bool {
+		// A cold item is only considered if it's not already in RAM (in hotResultsMap).
+		if id, ok := item["_id"].(string); ok {
+			if _, existsInHot := hotResultsMap[id]; existsInHot {
+				return false // We already found it in RAM, don't add it again.
+			}
+		}
+		// Apply the full, original filter to the cold data.
+		return h.matchFilter(item, query.Filter)
+	}
+
+	// Invoke the new search function on the persistence layer.
+	coldResults, err := persistence.SearchColdData(collectionName, coldMatcher)
+	if err != nil {
+		return nil, fmt.Errorf("error searching cold data: %w", err)
+	}
+	slog.Info("Cold data query finished", "collection", collectionName, "found_matches", len(coldResults))
+
+	// --- MERGE RESULTS ---
+	finalResults := make([]map[string]any, 0, len(hotResultsMap)+len(coldResults))
+	for _, hotItem := range hotResultsMap {
+		finalResults = append(finalResults, hotItem)
+	}
+	finalResults = append(finalResults, coldResults...)
+	slog.Info("Hot and Cold results merged", "total_results_before_processing", len(finalResults))
+
+	// From here on, the logic for `distinct`, `count`, `aggregations`, `order by`, and `limit/offset`
+	// operates on `finalResults`, which contains the union of hot and cold data.
+	// The code is the same as before, but it now operates on the `finalResults` slice.
+
 	if query.Distinct != "" {
+		// ... (distinct logic on `finalResults`) ...
 		distinctValues := make(map[any]bool)
 		var resultList []any
-		for _, item := range filteredItems {
-			if val, ok := item.Val[query.Distinct]; ok && val != nil {
+		for _, item := range finalResults {
+			if val, ok := item[query.Distinct]; ok && val != nil {
 				if _, seen := distinctValues[val]; !seen {
 					distinctValues[val] = true
 					resultList = append(resultList, val)
@@ -143,25 +166,32 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	}
 
 	if query.Count && len(query.Aggregations) == 0 && len(query.GroupBy) == 0 {
-		return map[string]int{"count": len(filteredItems)}, nil
+		return map[string]int{"count": len(finalResults)}, nil
 	}
 
-	// 2. Aggregations & Group By
 	if len(query.Aggregations) > 0 || len(query.GroupBy) > 0 {
-		return h.performAggregations(filteredItems, query)
-	}
-
-	results := make([]map[string]any, 0, len(filteredItems))
-	for _, item := range filteredItems {
-		results = append(results, item.Val)
+		// For aggregations, we need to convert `finalResults` to the expected format.
+		var itemsForAgg []struct {
+			Key string
+			Val map[string]any
+		}
+		for _, res := range finalResults {
+			key, _ := res["_id"].(string)
+			itemsForAgg = append(itemsForAgg, struct {
+				Key string
+				Val map[string]any
+			}{Key: key, Val: res})
+		}
+		return h.performAggregations(itemsForAgg, query)
 	}
 
 	// 3. Ordering (ORDER BY clause)
 	if len(query.OrderBy) > 0 {
-		sort.Slice(results, func(i, j int) bool {
+		sort.Slice(finalResults, func(i, j int) bool {
+			// ... (sorting logic on `finalResults`, no changes needed) ...
 			for _, ob := range query.OrderBy {
-				valA, okA := results[i][ob.Field]
-				valB, okB := results[j][ob.Field]
+				valA, okA := finalResults[i][ob.Field]
+				valB, okB := finalResults[j][ob.Field]
 				if !okA && !okB {
 					continue
 				}
@@ -184,21 +214,22 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	}
 
 	// 4. Pagination (OFFSET and LIMIT)
-	offset := min(max(query.Offset, 0), len(results))
-	results = results[offset:]
+	offset := min(max(query.Offset, 0), len(finalResults))
+	paginatedResults := finalResults[offset:]
 
 	if query.Limit != nil && *query.Limit >= 0 {
 		limit := *query.Limit
+		if limit > len(paginatedResults) {
+			limit = len(paginatedResults)
+		}
 		if limit == 0 {
-			return []map[string]any{}, nil
+			paginatedResults = []map[string]any{}
+		} else {
+			paginatedResults = paginatedResults[:limit]
 		}
-		if limit > len(results) {
-			limit = len(results)
-		}
-		results = results[:limit]
 	}
 
-	return results, nil
+	return paginatedResults, nil
 }
 
 // findCandidateKeysFromFilter is the advanced query optimizer.

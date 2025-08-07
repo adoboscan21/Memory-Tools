@@ -1,3 +1,5 @@
+// ./internal/config/config.go
+
 package config
 
 import (
@@ -19,6 +21,7 @@ type Config struct {
 	NumShards            int
 	DefaultRootPassword  string
 	DefaultAdminPassword string
+	ColdStorageMonths    int
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
@@ -34,31 +37,26 @@ func NewDefaultConfig() Config {
 		NumShards:            16,
 		DefaultRootPassword:  "rootpass",
 		DefaultAdminPassword: "adminpass",
+		ColdStorageMonths:    3,
 	}
 }
 
 // LoadConfig loads configuration with a clear precedence: Environment > Defaults.
 func LoadConfig() Config {
-	// 1. Start with default configuration values.
 	cfg := NewDefaultConfig()
 	slog.Info("Loading configuration with default values...")
-
-	// 2. Override defaults with environment variables, if they are set.
 	applyEnvConfig(&cfg)
 	slog.Info("Configuration check for environment variables complete.")
-
 	return cfg
 }
 
 // applyEnvConfig overrides config values from environment variables.
 func applyEnvConfig(cfg *Config) {
-	// String values
 	if portEnv := os.Getenv("MEMORYTOOLS_PORT"); portEnv != "" {
 		cfg.Port = portEnv
 		slog.Info("Overriding Port from environment", "value", portEnv)
 	}
 
-	// Integer values
 	if numShardsEnv := os.Getenv("MEMORYTOOLS_NUM_SHARDS"); numShardsEnv != "" {
 		if i, err := strconv.Atoi(numShardsEnv); err == nil && i > 0 {
 			cfg.NumShards = i
@@ -68,7 +66,15 @@ func applyEnvConfig(cfg *Config) {
 		}
 	}
 
-	// Boolean values
+	if coldMonthsEnv := os.Getenv("MEMORYTOOLS_COLD_STORAGE_MONTHS"); coldMonthsEnv != "" {
+		if i, err := strconv.Atoi(coldMonthsEnv); err == nil && i >= 0 {
+			cfg.ColdStorageMonths = i
+			slog.Info("Overriding ColdStorageMonths from environment", "value", i)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_COLD_STORAGE_MONTHS env var, using default", "value", coldMonthsEnv)
+		}
+	}
+
 	if enableSnapshotsEnv := os.Getenv("MEMORYTOOLS_ENABLE_SNAPSHOTS"); enableSnapshotsEnv != "" {
 		if b, err := strconv.ParseBool(enableSnapshotsEnv); err == nil {
 			cfg.EnableSnapshots = b
@@ -88,7 +94,6 @@ func applyEnvConfig(cfg *Config) {
 		slog.Info("Overriding DefaultAdminPassword from environment")
 	}
 
-	// Duration values
 	overrideDuration("MEMORYTOOLS_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout)
 	overrideDuration("MEMORYTOOLS_SNAPSHOT_INTERVAL", &cfg.SnapshotInterval)
 	overrideDuration("MEMORYTOOLS_TTL_CLEAN_INTERVAL", &cfg.TtlCleanInterval)
@@ -96,7 +101,6 @@ func applyEnvConfig(cfg *Config) {
 	overrideDuration("MEMORYTOOLS_BACKUP_RETENTION", &cfg.BackupRetention)
 }
 
-// overrideDuration is a helper to avoid repetition for duration env vars.
 func overrideDuration(envKey string, target *time.Duration) {
 	envVal := os.Getenv(envKey)
 	if envVal != "" {

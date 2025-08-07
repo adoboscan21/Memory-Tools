@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	jsoniter "github.com/json-iterator/go"
 )
 
 // Constants for main data persistence.
@@ -261,18 +263,19 @@ func (p *CollectionPersisterImpl) DeleteCollectionFile(collectionName string) er
 }
 
 // LoadCollectionData loads data for a single collection from its file.
-func LoadCollectionData(collectionName string, s store.DataStore) error {
+func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold time.Time) error {
 	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			slog.Info("Collection file not found, initializing empty collection", "collection", collectionName, "path", filePath)
-			return nil
+			return nil // No data to load, which is fine.
 		}
 		return fmt.Errorf("failed to open collection file '%s': %w", filePath, err)
 	}
 	defer file.Close()
 
+	// ... (reading index metadata does not change) ...
 	var numIndexes uint32
 	if err := binary.Read(file, binary.LittleEndian, &numIndexes); err != nil {
 		slog.Warn("Could not read index header, assuming old file format", "collection", collectionName, "error", err)
@@ -301,7 +304,11 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 	}
 
 	collectionData := make(map[string][]byte, numEntries)
+	hotDataCount := 0
+	coldDataCount := 0
+
 	for i := 0; i < int(numEntries); i++ {
+		// ... (reading key and value bytes does not change) ...
 		var keyLen uint32
 		if err := binary.Read(file, binary.LittleEndian, &keyLen); err != nil {
 			return fmt.Errorf("failed to read key length for entry %d in collection '%s': %w", i, collectionName, err)
@@ -320,18 +327,43 @@ func LoadCollectionData(collectionName string, s store.DataStore) error {
 		if _, err := io.ReadFull(file, valBytes); err != nil {
 			return fmt.Errorf("failed to read value for key '%s' in collection '%s': %w", key, collectionName, err)
 		}
+
+		// --- NEW HOT/COLD FILTERING LOGIC ---
+		// If hotThreshold is zero (disabled), we load everything.
+		if !hotThreshold.IsZero() {
+			var doc map[string]any
+			// We inspect the document's timestamp without storing it in memory yet.
+			if err := jsoniter.Unmarshal(valBytes, &doc); err == nil {
+				if createdAtStr, ok := doc["created_at"].(string); ok {
+					createdAt, err := time.Parse(time.RFC3339, createdAtStr)
+					// If the document is older than the threshold, we consider it "cold" and don't load it into RAM.
+					if err == nil && createdAt.Before(hotThreshold) {
+						coldDataCount++
+						continue // Skip to the next iteration of the loop.
+					}
+				}
+			}
+		}
+
+		// If we get here, the data is "hot" and is loaded into the map.
 		collectionData[key] = valBytes
+		hotDataCount++
 	}
 
 	s.LoadData(collectionData)
-	slog.Info("Collection data loaded", "collection", collectionName, "path", filePath, "total_keys", len(collectionData))
+	slog.Info("Collection data loaded",
+		"collection", collectionName,
+		"path", filePath,
+		"hot_items_in_ram", hotDataCount,
+		"cold_items_on_disk", coldDataCount)
 
+	// Index rebuilding should only happen on the hot data that is in RAM.
 	if len(indexedFields) > 0 {
-		slog.Info("Rebuilding indexes for collection", "collection", collectionName, "index_count", len(indexedFields))
+		slog.Info("Rebuilding indexes for hot data in collection", "collection", collectionName, "index_count", len(indexedFields))
 		for _, field := range indexedFields {
-			s.CreateIndex(field)
+			s.CreateIndex(field) // CreateIndex will now operate only on the in-memory data.
 		}
-		slog.Info("Finished rebuilding indexes", "collection", collectionName)
+		slog.Info("Finished rebuilding indexes for hot data", "collection", collectionName)
 	}
 
 	return nil
@@ -359,15 +391,25 @@ func ListCollectionFiles() ([]string, error) {
 }
 
 // LoadAllCollectionsIntoManager loads all existing collections from disk into the CollectionManager.
-func LoadAllCollectionsIntoManager(cm *store.CollectionManager) error {
+func LoadAllCollectionsIntoManager(cm *store.CollectionManager, coldStorageMonths int) error {
 	collectionNames, err := ListCollectionFiles()
 	if err != nil {
 		return fmt.Errorf("failed to get list of collection files: %w", err)
 	}
 
+	// --- NEW THRESHOLD LOGIC ---
+	var hotThreshold time.Time
+	if coldStorageMonths > 0 {
+		hotThreshold = time.Now().AddDate(0, -coldStorageMonths, 0)
+		slog.Info("Hot/Cold storage enabled", "hot_threshold", hotThreshold.Format(time.RFC3339))
+	} else {
+		slog.Info("Hot/Cold storage is disabled. All data will be loaded into RAM.")
+	}
+
 	for _, colName := range collectionNames {
 		colStore := cm.GetCollection(colName)
-		if err := LoadCollectionData(colName, colStore); err != nil {
+		// Pass the threshold to the loading function.
+		if err := LoadCollectionData(colName, colStore, hotThreshold); err != nil {
 			slog.Warn("Failed to load data for collection, skipping", "collection", colName, "error", err)
 			continue
 		}

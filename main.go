@@ -86,7 +86,8 @@ func main() {
 		slog.Error("Fatal error loading main persistent data", "error", err)
 		os.Exit(1)
 	}
-	if err := persistence.LoadAllCollectionsIntoManager(collectionManager); err != nil {
+	// Pass the Hot/Cold config to the data loader
+	if err := persistence.LoadAllCollectionsIntoManager(collectionManager, cfg.ColdStorageMonths); err != nil {
 		slog.Error("Fatal error loading persistent collections data", "error", err)
 		os.Exit(1)
 	}
@@ -99,7 +100,6 @@ func main() {
 	if _, found := systemCollection.Get(adminUserKey); !found {
 		slog.Info("Default admin user not found, creating...", "user", "admin")
 		hashedPassword, err := handler.HashPassword(cfg.DefaultAdminPassword)
-		slog.Info("Default admin user created", "user", "admin")
 		if err != nil {
 			slog.Error("Fatal error hashing default admin password", "error", err)
 			os.Exit(1)
@@ -117,7 +117,7 @@ func main() {
 		}
 		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
-		slog.Info("Default admin user created", "user", "admin", "password", "adminpass")
+		slog.Info("Default admin user created", "user", "admin")
 	} else {
 		slog.Info("Default admin user found", "user", "admin")
 	}
@@ -127,7 +127,6 @@ func main() {
 	if _, found := systemCollection.Get(rootUserKey); !found {
 		slog.Info("Default root user not found, creating...", "user", "root")
 		hashedPassword, err := handler.HashPassword(cfg.DefaultRootPassword)
-		slog.Info("Default root user created", "user", "root")
 		if err != nil {
 			slog.Error("Fatal error hashing default root password", "error", err)
 			os.Exit(1)
@@ -145,7 +144,7 @@ func main() {
 		}
 		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
-		slog.Info("Default root user created", "user", "root", "password", "rootpass")
+		slog.Info("Default root user created", "user", "root")
 	} else {
 		slog.Info("Default root user found", "user", "root")
 	}
@@ -224,6 +223,63 @@ func main() {
 		}
 	}()
 
+	// Cold Data Eviction Worker
+	evictionStopChan := make(chan struct{})
+	if cfg.ColdStorageMonths > 0 {
+		go func() {
+			// Runs every 24 hours, for example. This should be configurable.
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			slog.Info("Starting Hot/Cold Eviction Worker", "interval", "24h")
+
+			for {
+				select {
+				case <-ticker.C:
+					slog.Info("Eviction Worker starting run...")
+					// Recalculate the threshold for this run.
+					evictionThreshold := time.Now().AddDate(0, -cfg.ColdStorageMonths, 0)
+					collectionManager.EvictColdData(evictionThreshold)
+					slog.Info("Eviction Worker finished run.")
+				case <-evictionStopChan:
+					slog.Info("Eviction Worker received stop signal. Stopping.")
+					return
+				}
+			}
+		}()
+	}
+
+	// NEW: Data Compaction Worker
+	compactionStopChan := make(chan struct{})
+	if cfg.ColdStorageMonths > 0 { // Compaction is only relevant when using tombstones
+		go func() {
+			// Runs, for example, every 24 hours.
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			slog.Info("Starting Compaction Worker", "interval", "24h")
+
+			for {
+				select {
+				case <-ticker.C:
+					slog.Info("Compaction Worker starting run...")
+					collectionNames, err := persistence.ListCollectionFiles()
+					if err != nil {
+						slog.Error("Compaction worker failed to list collection files", "error", err)
+						continue
+					}
+					for _, name := range collectionNames {
+						if err := persistence.CompactCollectionFile(name); err != nil {
+							slog.Error("Failed to compact collection file", "collection", name, "error", err)
+						}
+					}
+					slog.Info("Compaction Worker finished run.")
+				case <-compactionStopChan:
+					slog.Info("Compaction Worker received stop signal. Stopping.")
+					return
+				}
+			}
+		}()
+	}
+
 	// Goroutine to monitor for inactivity and trigger memory release to the OS.
 	idleMemoryCleanerStopChan := make(chan struct{})
 	go func() {
@@ -267,6 +323,11 @@ func main() {
 	snapshotManager.Stop()
 	close(ttlCleanStopChan)
 	close(idleMemoryCleanerStopChan)
+	// Stop the new workers.
+	if cfg.ColdStorageMonths > 0 {
+		close(evictionStopChan)
+		close(compactionStopChan)
+	}
 
 	// Wait for the asynchronous collection saver to finish.
 	slog.Info("Waiting for all pending collection persistence tasks to complete...")

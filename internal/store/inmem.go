@@ -792,6 +792,8 @@ type CollectionManager struct {
 	quit        chan struct{}
 	wg          sync.WaitGroup
 	numShards   int
+	fileLocks   map[string]*sync.Mutex
+	fileLocksMu sync.RWMutex
 }
 
 // NewCollectionManager creates a new instance of CollectionManager.
@@ -803,6 +805,7 @@ func NewCollectionManager(persister CollectionPersister, numShards int) *Collect
 		deleteQueue: make(chan deleteTask, 10),
 		quit:        make(chan struct{}),
 		numShards:   numShards,
+		fileLocks:   make(map[string]*sync.Mutex),
 	}
 	cm.StartAsyncWorker()
 	return cm
@@ -821,30 +824,44 @@ func (cm *CollectionManager) StartAsyncWorker() {
 					slog.Info("Async save queue closed, stopping worker.")
 					return
 				}
+				fileLock := cm.GetFileLock(task.collectionName)
+				fileLock.Lock()
 				if err := cm.persister.SaveCollectionData(task.collectionName, task.collection); err != nil {
 					slog.Error("Error saving collection from async task", "collection", task.collectionName, "error", err)
 				}
+				fileLock.Unlock()
+
 			case task, ok := <-cm.deleteQueue:
 				if !ok {
 					slog.Info("Async delete queue closed, stopping worker.")
 					return
 				}
+				fileLock := cm.GetFileLock(task.collectionName)
+				fileLock.Lock()
 				if err := cm.persister.DeleteCollectionFile(task.collectionName); err != nil {
 					slog.Error("Error deleting collection file from async task", "collection", task.collectionName, "error", err)
 				}
+				fileLock.Unlock()
+
 			case <-cm.quit:
 				slog.Info("Async worker received quit signal. Draining queues...")
 				for len(cm.saveQueue) > 0 {
 					task := <-cm.saveQueue
+					fileLock := cm.GetFileLock(task.collectionName)
+					fileLock.Lock()
 					if err := cm.persister.SaveCollectionData(task.collectionName, task.collection); err != nil {
 						slog.Error("Error saving collection while draining save queue", "collection", task.collectionName, "error", err)
 					}
+					fileLock.Unlock()
 				}
 				for len(cm.deleteQueue) > 0 {
 					task := <-cm.deleteQueue
+					fileLock := cm.GetFileLock(task.collectionName)
+					fileLock.Lock()
 					if err := cm.persister.DeleteCollectionFile(task.collectionName); err != nil {
 						slog.Error("Error deleting collection file while draining delete queue", "collection", task.collectionName, "error", err)
 					}
+					fileLock.Unlock()
 				}
 				slog.Info("Async collection worker stopped.")
 				return
@@ -983,4 +1000,82 @@ func (cm *CollectionManager) CleanExpiredItemsAndSave() {
 		}
 	}
 	slog.Info("Finished TTL sweep across all collections")
+}
+
+// EvictColdData iterates over all collections and removes "cold" data from RAM.
+func (cm *CollectionManager) EvictColdData(threshold time.Time) {
+	cm.mu.RLock()
+	// Copy the map to avoid holding the lock during the operation.
+	collectionsToClean := make(map[string]DataStore, len(cm.collections))
+	maps.Copy(collectionsToClean, cm.collections)
+	cm.mu.RUnlock()
+
+	for name, col := range collectionsToClean {
+		// Delegate the eviction logic to the collection itself (InMemStore).
+		if inMemStore, ok := col.(*InMemStore); ok {
+			inMemStore.EvictColdData(name, threshold)
+		}
+	}
+}
+
+// EvictColdData iterates through all shards and removes items that have become "cold".
+func (s *InMemStore) EvictColdData(collectionName string, threshold time.Time) {
+	totalEvicted := 0
+	for i, shard := range s.shards {
+		shard.mu.Lock()
+		evictedInShard := 0
+		for key, item := range shard.data {
+			var doc map[string]any
+			if err := jsoniter.Unmarshal(item.Value, &doc); err != nil {
+				continue
+			}
+
+			createdAtStr, ok := doc["created_at"].(string)
+			if !ok {
+				continue
+			}
+
+			createdAt, err := time.Parse(time.RFC3339, createdAtStr)
+			if err != nil {
+				continue
+			}
+
+			if createdAt.Before(threshold) {
+				// Data is cold, remove it from RAM and from the indexes.
+				s.indexes.Remove(key, doc)
+				delete(shard.data, key)
+				evictedInShard++
+			}
+		}
+		shard.mu.Unlock()
+		if evictedInShard > 0 {
+			totalEvicted += evictedInShard
+			slog.Debug("Evicted cold items from shard", "collection", collectionName, "shard_id", i, "count", evictedInShard)
+		}
+	}
+	if totalEvicted > 0 {
+		slog.Info("Finished evicting cold data from collection", "collection", collectionName, "total_evicted", totalEvicted)
+	}
+}
+
+func (cm *CollectionManager) GetFileLock(collectionName string) *sync.Mutex {
+	cm.fileLocksMu.RLock()
+	lock, exists := cm.fileLocks[collectionName]
+	cm.fileLocksMu.RUnlock()
+
+	if exists {
+		return lock
+	}
+
+	cm.fileLocksMu.Lock()
+	defer cm.fileLocksMu.Unlock()
+	// Double-check in case another goroutine created it while we waited for the lock
+	lock, exists = cm.fileLocks[collectionName]
+	if exists {
+		return lock
+	}
+
+	newLock := &sync.Mutex{}
+	cm.fileLocks[collectionName] = newLock
+	return newLock
 }

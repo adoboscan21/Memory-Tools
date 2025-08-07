@@ -1,32 +1,31 @@
 # Memory Tools 🚀
 
-Memory Tools is a high-performance, sharded in-memory key-value **and document** store designed for speed, security, and scalability. It provides a robust backend for your applications, supporting flexible data organization through collections, persistent indexing, a powerful query engine, and a granular user permission system, all secured over a TLS-encrypted protocol.
+**Memory Tools** is a high-performance, sharded in-memory key-value and document store designed for speed, security, and scalability. It provides a robust backend for your applications, supporting flexible data organization through collections, persistent indexing, a powerful query engine, and a granular user permission system, all secured over a TLS-encrypted protocol.
 
 ---
 
 ## ✨ Features
 
 - 🚀 **High-Performance Concurrent Architecture:** At its core, Memory Tools uses an efficient **sharding design** to distribute data and minimize lock contention, allowing for massive concurrency across CPU cores. Collection writes are handled by an **asynchronous persistence queue**, resulting in non-blocking, lightning-fast write operations for the client.
-- 💾 **Robust Data Persistence:** Data is atomically saved to disk in an optimized binary format. The use of temporary files for writes which are then renamed ensures that your data is never corrupted, even in the event of a crash. The system reloads all data on startup for complete durability.
-- 🛡️ **Automated Backup & Restore System:** Go beyond simple persistence with a full-featured backup system. It performs **periodic, verifiable backups** to timestamped directories, manages a **retention policy** to clean up old files, and allows for a full manual **restore** from any backup point, ensuring your data is always safe.
-- 🧠 **Advanced Query Engine:** Don't just get keys; query your JSON documents like a relational database. The engine supports complex, SQL-like queries with:
+- 🧠 **Hot/Cold Data Tiering:** Manage datasets far larger than the available RAM. Memory Tools keeps recent and frequently accessed ("hot") data in memory for maximum speed, while older ("cold") data resides on disk. Query and modification operations **transparently access both tiers**, and cold data can be updated or deleted on-disk without needing to be loaded into memory.
+- 💾 **Robust Data Persistence:** Data is atomically saved to disk in an optimized binary format. The use of the **write-to-`.tmp`-and-rename strategy** ensures that your data files are never corrupted, even in the event of a crash. The system reloads all "hot" data on startup for complete durability.
+- 🛡️ **Automated Backup & Restore System:** Go beyond simple persistence with a full-featured backup system. It performs **periodic, verifiable backups** to timestamped directories, manages a **retention policy** to clean up old files, and allows for a full manual **restore** from any backup point.
+- 📈 **High-Performance B-Tree Indexing:** Drastically accelerate query performance by creating indexes on any field within your JSON documents. Unlike simple hash indexes, the use of **B-Trees** enables extremely fast **range scans (`>`, `<`, `between`)** in addition to equality lookups. This avoids costly full-collection scans for filtered queries.
+- 🔍 **Advanced Query Engine:** Don't just get keys; query your JSON documents like a relational database. The engine is backed by a **query optimizer** that leverages available indexes to execute operations in the most efficient way possible. It supports:
   - **Rich Filtering**: `WHERE`, `AND`, `OR`, `NOT`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`.
   - **Data Shaping**: `ORDER BY`, `LIMIT`, `OFFSET`, and `DISTINCT`.
   - **Powerful Aggregations**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY`.
   - **Post-Aggregation Filtering**: A full `HAVING` clause to filter your grouped results.
-- 📈 **Persistent Field Indexing:** Drastically accelerate query performance by creating indexes on any field within your JSON documents. This avoids costly full-collection scans for filtered queries. Indexes are persisted to disk and efficiently rebuilt on startup.
+- ⚡ **Efficient Batch Operations:** Execute commands on multiple items at once for greater efficiency and reduced network latency. `set many`, `update many`, and `delete many` commands are fully supported and optimized to work with both hot and cold data.
 - 🔐 **Full Security Suite:** Security is built-in, not an afterthought.
   - **TLS Encryption:** All communication is encrypted with TLS 1.2+, protecting data in transit.
   - **Strong Authentication:** Passwords are never stored in plain text, using `bcrypt` hashing.
   - **Granular Permissions:** A robust user management system allows for creating users and assigning specific `read`/`write` permissions per collection, with wildcard support.
   - **Restricted Superuser**: A `root` user with administrative privileges is restricted to **localhost connections only**, preventing remote admin access.
-- ⚡ **Efficient Batch Operations:** Execute commands on multiple items at once for greater efficiency and reduced network latency. `set many`, `update many`, and `delete many` commands are fully supported.
 - 🧹 **Automatic Data & Memory Management:** The engine works for you in the background.
-  - **TTL (Time-to-Live):** Assign a time-to-live to keys so they expire automatically. A background cleaner periodically purges them from memory.
+  - **TTL (Time-to-Live):** Assign a time-to-live to keys so they expire automatically. A background cleaner periodically purges them.
+  - **Data Compaction:** Deletes on "cold" storage use tombstones. A background compaction worker rewrites data files to permanently remove these records and reclaim disk space.
   - **Idle Memory Release:** The server monitors for periods of inactivity and automatically releases unused memory back to the operating system.
-- ⚙️ **Reliable Operations:** Built for stability and ease of use.
-  - **Graceful Shutdown:** The engine handles a clean shutdown, ensuring all pending writes and background tasks are safely completed before exiting.
-  - **Docker-Ready:** Easily deploy, manage, and scale the server with the provided Docker and Docker Compose configuration.
 
 ---
 
@@ -34,13 +33,13 @@ Memory Tools is a high-performance, sharded in-memory key-value **and document**
 
 To get the Memory Tools server up and running quickly, follow these steps:
 
-1. **Copy .env file:**
+1. **Copy the .env file:**
 
    ```bash
    cp .example.env .env
    ```
 
-2. **Start the Services:**
+2. **Start the services:**
 
    ```bash
    docker compose up -d --build
@@ -61,12 +60,11 @@ You need **Go version 1.21 or higher** to build and run this project.
 Memory Tools uses TLS for all its communications. You must generate a self-signed certificate pair and place it in the `./certificates/` directory.
 
 1. **Create the directory:**
-
    ```bash
    mkdir -p certificates
    ```
-
 2. **Run the following OpenSSL command to generate a certificate and key:**
+
    ```bash
    openssl req -x509 -newkey rsa:4096 -nodes -keyout certificates/server.key -out certificates/server.crt -days 3650 -subj "/CN=localhost" -addext "subjectAltName = DNS:localhost,IP:127.0.0.1"
    ```
@@ -94,6 +92,7 @@ You can use the interactive CLI client to connect to and operate the server.
   docker exec -it <container-id> ./memory-tools-client
   ```
 - **For a direct and authenticated connection:**
+
   ```bash
   ./bin/memory-tools-client -u admin -p adminpass
   ```

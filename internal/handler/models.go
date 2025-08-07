@@ -1,5 +1,12 @@
 package handler
 
+type LookupClause struct {
+	FromCollection string `json:"from"`         // The collection to join with
+	LocalField     string `json:"localField"`   // Field from the input documents
+	ForeignField   string `json:"foreignField"` // Field from the documents of the "from" collection
+	As             string `json:"as"`           // The new array field to add to the input documents
+}
+
 // UserInfo structure
 type UserInfo struct {
 	Username     string            `json:"username"`
@@ -20,6 +27,8 @@ type Query struct {
 	GroupBy      []string               `json:"group_by,omitempty"`     // GROUP BY clause
 	Having       map[string]any         `json:"having,omitempty"`       // HAVING clause (filters aggregated results)
 	Distinct     string                 `json:"distinct,omitempty"`     // DISTINCT field
+	Projection   []string               `json:"projection,omitempty"`
+	Lookups      []LookupClause         `json:"lookups,omitempty"`
 }
 
 // OrderByClause defines a single ordering criterion.

@@ -148,10 +148,9 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 
 	// From here on, the logic for `distinct`, `count`, `aggregations`, `order by`, and `limit/offset`
 	// operates on `finalResults`, which contains the union of hot and cold data.
-	// The code is the same as before, but it now operates on the `finalResults` slice.
 
+	// 1. Distinct field values
 	if query.Distinct != "" {
-		// ... (distinct logic on `finalResults`) ...
 		distinctValues := make(map[any]bool)
 		var resultList []any
 		for _, item := range finalResults {
@@ -165,12 +164,12 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		return resultList, nil
 	}
 
+	// 2. Count or Aggregations
 	if query.Count && len(query.Aggregations) == 0 && len(query.GroupBy) == 0 {
 		return map[string]int{"count": len(finalResults)}, nil
 	}
 
 	if len(query.Aggregations) > 0 || len(query.GroupBy) > 0 {
-		// For aggregations, we need to convert `finalResults` to the expected format.
 		var itemsForAgg []struct {
 			Key string
 			Val map[string]any
@@ -188,7 +187,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	// 3. Ordering (ORDER BY clause)
 	if len(query.OrderBy) > 0 {
 		sort.Slice(finalResults, func(i, j int) bool {
-			// ... (sorting logic on `finalResults`, no changes needed) ...
 			for _, ob := range query.OrderBy {
 				valA, okA := finalResults[i][ob.Field]
 				valB, okB := finalResults[j][ob.Field]
@@ -227,6 +225,66 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		} else {
 			paginatedResults = paginatedResults[:limit]
 		}
+	}
+
+	if len(query.Lookups) > 0 {
+		// We start with the results we have so far
+		currentResults := paginatedResults
+
+		// Process each lookup operation in sequence
+		for _, lookupSpec := range query.Lookups {
+			// This will hold the results after this stage of the pipeline
+			nextResults := []map[string]any{}
+
+			for _, doc := range currentResults {
+				localValue, ok := doc[lookupSpec.LocalField]
+				if !ok {
+					// If the key doesn't exist, we still keep the document but without joining
+					doc[lookupSpec.As] = []any{}
+					nextResults = append(nextResults, doc)
+					continue
+				}
+
+				joinQuery := Query{
+					Filter: map[string]any{
+						"field": lookupSpec.ForeignField,
+						"op":    "=",
+						"value": localValue,
+					},
+				}
+
+				joinedDocs, err := h.processCollectionQuery(lookupSpec.FromCollection, joinQuery)
+				if err != nil {
+					slog.Warn("Lookup sub-query failed", "error", err, "from", lookupSpec.FromCollection)
+					doc[lookupSpec.As] = []any{} // Attach an empty slice on error
+				} else {
+					doc[lookupSpec.As] = joinedDocs // Attach the found documents
+				}
+				nextResults = append(nextResults, doc)
+			}
+			// The result of this stage becomes the input for the next
+			currentResults = nextResults
+		}
+		// After all lookups are done, assign the final result back
+		paginatedResults = currentResults
+	}
+
+	// 5. Projection (SELECT specific fields)
+	if len(query.Projection) > 0 {
+		projectedResults := make([]map[string]any, 0, len(paginatedResults))
+		for _, fullDoc := range paginatedResults {
+			projectedDoc := make(map[string]any)
+
+			// The _id is no longer automatically included.
+			// It will only be added if it's present in the projection list.
+			for _, field := range query.Projection {
+				if value, ok := fullDoc[field]; ok {
+					projectedDoc[field] = value
+				}
+			}
+			projectedResults = append(projectedResults, projectedDoc)
+		}
+		return projectedResults, nil
 	}
 
 	return paginatedResults, nil

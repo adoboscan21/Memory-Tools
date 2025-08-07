@@ -228,9 +228,10 @@ func main() {
 	if cfg.ColdStorageMonths > 0 {
 		go func() {
 			// Runs every 24 hours, for example. This should be configurable.
-			ticker := time.NewTicker(24 * time.Hour)
+			interval := time.Duration(cfg.HotStorageCleanHours) * time.Hour
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
-			slog.Info("Starting Hot/Cold Eviction Worker", "interval", "24h")
+			slog.Info("Starting Hot/Cold Eviction Worker", "interval", interval.String())
 
 			for {
 				select {

@@ -22,6 +22,7 @@ type Config struct {
 	DefaultRootPassword  string
 	DefaultAdminPassword string
 	ColdStorageMonths    int
+	HotStorageCleanHours int
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
@@ -38,6 +39,7 @@ func NewDefaultConfig() Config {
 		DefaultRootPassword:  "rootpass",
 		DefaultAdminPassword: "adminpass",
 		ColdStorageMonths:    3,
+		HotStorageCleanHours: 24,
 	}
 }
 
@@ -92,6 +94,15 @@ func applyEnvConfig(cfg *Config) {
 	if adminPassEnv := os.Getenv("MEMORYTOOLS_ADMIN_PASSWORD"); adminPassEnv != "" {
 		cfg.DefaultAdminPassword = adminPassEnv
 		slog.Info("Overriding DefaultAdminPassword from environment")
+	}
+
+	if hotHoursEnv := os.Getenv("MEMORYTOOLS_HOT_STORAGE_CLEAN_HOURS"); hotHoursEnv != "" {
+		if i, err := strconv.Atoi(hotHoursEnv); err == nil && i >= 0 {
+			cfg.HotStorageCleanHours = i
+			slog.Info("Overriding HotStorageCleanHours from environment", "value", i)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_HOT_STORAGE_CLEAN_HOURS env var, using default", "value", hotHoursEnv)
+		}
 	}
 
 	overrideDuration("MEMORYTOOLS_SHUTDOWN_TIMEOUT", &cfg.ShutdownTimeout)

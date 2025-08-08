@@ -27,7 +27,7 @@ RUN mkdir -p certificates && \
 
 # Build the Go applications with specific names.
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-server ./main.go
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-client ./cmd/client/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix nocgo -o memory-tools-client ./cmd/client/
 
 # --- Stage 2: Production ---
 # Use a minimal base image for the production environment.

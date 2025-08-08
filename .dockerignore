@@ -7,3 +7,4 @@ README.md
 docker-compose.yml
 Dockerfile
 certificates
+.env

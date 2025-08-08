@@ -12,7 +12,7 @@ To start the client, you must provide the address of the `memory-tools-server`. 
 
 ```bash
 ./bin/memory-tools-client
-./bin/memory-tools-client -u admin -p adminpass localhost:5876
+./bin/memory-tools-client -u admin -p adminpass -addr localhost:5876
 ```
 
 **Docker 🐳:**
@@ -140,17 +140,17 @@ Here are advanced examples showcasing the depth of the query engine.
 
 - **Complex Nested Filtering**
   - Find sales in the 'North' region that are either 'pending' OR have an amount greater than 1000.
-  ```json
+  ```bash
   query sales {"filter":{"and":[{"field":"region","op":"=","value":"North"},{"or":[{"field":"status","op":"=","value":"pending"},{"field":"amount","op":">","value":1000}]}]}}
   ```
 - **Multi-Aggregation Query**
   - For each salesperson, calculate their total sales (`SUM`), average sale amount (`AVG`), and number of sales (`COUNT`).
-  ```json
+  ```bash
   query sales {"aggregations":{"total_sold":{"func":"sum","field":"amount"},"average_sale":{"func":"avg","field":"amount"},"deal_count":{"func":"count","field":"_id"}},"group_by":["salesperson"]}
   ```
 - **Joining Collections with `lookups` and `projection`**
   - **Goal**: Create a report from an `inventory_status` collection, joining data from `products` and `suppliers` to get a complete view, showing only the product name, stock, and supplier name.
-  ```json
+  ```bash
   query inventory_status {"lookups":[{"from":"products","localField":"productId","foreignField":"_id","as":"product"},{"from":"suppliers","localField":"product.supplierId","foreignField":"_id","as":"supplier"}],"projection":["product.name","stock","supplier.name"]}
   ```
 

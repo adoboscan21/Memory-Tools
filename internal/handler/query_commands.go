@@ -90,7 +90,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 
 	// --- HOT SEARCH (IN RAM) ---
 	slog.Debug("Executing query against hot data (RAM)...", "collection", collectionName)
-	// The index optimization and in-memory filtering logic is maintained.
 	candidateKeys, usedIndex, remainingFilter := h.findCandidateKeysFromFilter(colStore, query.Filter)
 
 	var itemsData map[string][]byte
@@ -103,35 +102,28 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		remainingFilter = query.Filter
 	}
 
-	hotResultsMap := make(map[string]map[string]any) // Use a map to prevent duplicates
-
+	hotResultsMap := make(map[string]map[string]any)
 	for k, vBytes := range itemsData {
 		var val map[string]any
 		if err := json.Unmarshal(vBytes, &val); err != nil {
 			continue
 		}
 		if h.matchFilter(val, remainingFilter) {
-			hotResultsMap[k] = val // Store the hot result
+			hotResultsMap[k] = val
 		}
 	}
 	slog.Info("Hot data query finished", "collection", collectionName, "found_matches", len(hotResultsMap))
 
 	// --- COLD SEARCH (ON DISK) ---
 	slog.Debug("Executing query against cold data (Disk)...", "collection", collectionName)
-	// We create a `matcher` function that reuses the `matchFilter` logic.
-	// This is key to avoid repeating code.
 	coldMatcher := func(item map[string]any) bool {
-		// A cold item is only considered if it's not already in RAM (in hotResultsMap).
 		if id, ok := item["_id"].(string); ok {
 			if _, existsInHot := hotResultsMap[id]; existsInHot {
-				return false // We already found it in RAM, don't add it again.
+				return false
 			}
 		}
-		// Apply the full, original filter to the cold data.
 		return h.matchFilter(item, query.Filter)
 	}
-
-	// Invoke the new search function on the persistence layer.
 	coldResults, err := persistence.SearchColdData(collectionName, coldMatcher)
 	if err != nil {
 		return nil, fmt.Errorf("error searching cold data: %w", err)
@@ -146,10 +138,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	finalResults = append(finalResults, coldResults...)
 	slog.Info("Hot and Cold results merged", "total_results_before_processing", len(finalResults))
 
-	// From here on, the logic for `distinct`, `count`, `aggregations`, `order by`, and `limit/offset`
-	// operates on `finalResults`, which contains the union of hot and cold data.
-
-	// 1. Distinct field values
 	if query.Distinct != "" {
 		distinctValues := make(map[any]bool)
 		var resultList []any
@@ -163,12 +151,9 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		}
 		return resultList, nil
 	}
-
-	// 2. Count or Aggregations
 	if query.Count && len(query.Aggregations) == 0 && len(query.GroupBy) == 0 {
 		return map[string]int{"count": len(finalResults)}, nil
 	}
-
 	if len(query.Aggregations) > 0 || len(query.GroupBy) > 0 {
 		var itemsForAgg []struct {
 			Key string
@@ -183,8 +168,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		}
 		return h.performAggregations(itemsForAgg, query)
 	}
-
-	// 3. Ordering (ORDER BY clause)
 	if len(query.OrderBy) > 0 {
 		sort.Slice(finalResults, func(i, j int) bool {
 			for _, ob := range query.OrderBy {
@@ -211,10 +194,8 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		})
 	}
 
-	// 4. Pagination (OFFSET and LIMIT)
 	offset := min(max(query.Offset, 0), len(finalResults))
 	paginatedResults := finalResults[offset:]
-
 	if query.Limit != nil && *query.Limit >= 0 {
 		limit := *query.Limit
 		if limit > len(paginatedResults) {
@@ -227,20 +208,15 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		}
 	}
 
+	// Chained Lookups (JOIN Pipeline)
 	if len(query.Lookups) > 0 {
-		// We start with the results we have so far
 		currentResults := paginatedResults
-
-		// Process each lookup operation in sequence
 		for _, lookupSpec := range query.Lookups {
-			// This will hold the results after this stage of the pipeline
 			nextResults := []map[string]any{}
-
 			for _, doc := range currentResults {
-				localValue, ok := doc[lookupSpec.LocalField]
+				localValue, ok := getNestedValue(doc, lookupSpec.LocalField)
 				if !ok {
-					// If the key doesn't exist, we still keep the document but without joining
-					doc[lookupSpec.As] = []any{}
+					doc[lookupSpec.As] = nil // Set joined field to nil if local key is missing
 					nextResults = append(nextResults, doc)
 					continue
 				}
@@ -253,33 +229,35 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 					},
 				}
 
-				joinedDocs, err := h.processCollectionQuery(lookupSpec.FromCollection, joinQuery)
+				joinedData, err := h.processCollectionQuery(lookupSpec.FromCollection, joinQuery)
 				if err != nil {
 					slog.Warn("Lookup sub-query failed", "error", err, "from", lookupSpec.FromCollection)
-					doc[lookupSpec.As] = []any{} // Attach an empty slice on error
+					doc[lookupSpec.As] = nil
 				} else {
-					doc[lookupSpec.As] = joinedDocs // Attach the found documents
+					// CRITICAL FIX: Correctly assert the specific slice type.
+					if joinedSlice, isSlice := joinedData.([]map[string]any); isSlice && len(joinedSlice) == 1 {
+						// Unwrap single-item slice for easier chaining.
+						doc[lookupSpec.As] = joinedSlice[0]
+					} else {
+						doc[lookupSpec.As] = joinedData
+					}
 				}
 				nextResults = append(nextResults, doc)
 			}
-			// The result of this stage becomes the input for the next
 			currentResults = nextResults
 		}
-		// After all lookups are done, assign the final result back
 		paginatedResults = currentResults
 	}
 
-	// 5. Projection (SELECT specific fields)
+	// Projection (SELECT specific fields)
 	if len(query.Projection) > 0 {
 		projectedResults := make([]map[string]any, 0, len(paginatedResults))
 		for _, fullDoc := range paginatedResults {
 			projectedDoc := make(map[string]any)
-
-			// The _id is no longer automatically included.
-			// It will only be added if it's present in the projection list.
-			for _, field := range query.Projection {
-				if value, ok := fullDoc[field]; ok {
-					projectedDoc[field] = value
+			for _, fieldPath := range query.Projection {
+				// Use helpers to handle nested data access.
+				if value, ok := getNestedValue(fullDoc, fieldPath); ok {
+					setNestedValue(projectedDoc, fieldPath, value)
 				}
 			}
 			projectedResults = append(projectedResults, projectedDoc)
@@ -760,4 +738,57 @@ func intersectKeys(keySets [][]string) []string {
 	}
 
 	return finalKeys
+}
+
+func getNestedValue(data map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	var current any = data
+
+	for _, part := range parts {
+		// If the current level is a slice with one element, unwrap it automatically.
+		if currentSlice, ok := current.([]any); ok && len(currentSlice) == 1 {
+			current = currentSlice[0]
+		} else if currentMapSlice, ok := current.([]map[string]any); ok && len(currentMapSlice) == 1 {
+			current = currentMapSlice[0]
+		}
+
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+
+		value, found := currentMap[part]
+		if !found {
+			return nil, false
+		}
+		current = value
+	}
+
+	return current, true
+}
+
+// VERSIÓN CORREGIDA Y SIMPLIFICADA
+func setNestedValue(data map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	currentMap := data
+
+	for i, key := range parts {
+		if i == len(parts)-1 {
+			currentMap[key] = value
+			return
+		}
+
+		// Si el siguiente nivel no existe, créalo.
+		if _, ok := currentMap[key]; !ok {
+			currentMap[key] = make(map[string]any)
+		}
+
+		// Avanza al siguiente nivel.
+		nextMap, ok := currentMap[key].(map[string]any)
+		if !ok {
+			// Hay un conflicto: ya existe un valor que no es un mapa. No se puede continuar.
+			return
+		}
+		currentMap = nextMap
+	}
 }

@@ -123,12 +123,12 @@ The `query_json` object can contain the following keys:
 | Key              | Type      | Description                                         |
 | ---------------- | --------- | --------------------------------------------------- |
 | `filter`         | object    | Conditions to select items (like a `WHERE` clause). |
-| `orderBy`        | array     | Sorts the results.                                  |
+| `order_by`       | array     | Sorts the results.                                  |
 | `limit`          | number    | Restricts the number of results.                    |
 | `offset`         | number    | Skips results, used for pagination.                 |
 | `count`          | boolean   | Returns a count of matching items.                  |
 | `distinct`       | string    | Returns unique values for a field.                  |
-| `groupBy`        | array     | Groups results for aggregation.                     |
+| `group_by`       | array     | Groups results for aggregation.                     |
 | `aggregations`   | object    | Defines functions like `sum`, `avg`, `count`.       |
 | `having`         | object    | Filters results after aggregation.                  |
 | **`projection`** | **array** | **Selects which fields to return.**                 |

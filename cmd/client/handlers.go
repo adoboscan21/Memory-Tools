@@ -1,3 +1,5 @@
+// cmd/client/handlers.go
+
 package main
 
 import (
@@ -7,6 +9,7 @@ import (
 	"io"
 	"memory-tools/internal/protocol"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,36 +17,49 @@ import (
 	"github.com/olekukonko/tablewriter"
 )
 
+// getCommands define todos los comandos disponibles, su ayuda, manejador y categoría.
 func (c *cli) getCommands() map[string]command {
 	return map[string]command{
-		"login":                       {help: "login <username> <password> - Authenticate to the server", handler: (*cli).handleLogin},
-		"help":                        {help: "help - Shows this help message", handler: (*cli).handleHelp},
-		"exit":                        {help: "exit - Exits the client", handler: (*cli).handleExit},
-		"clear":                       {help: "clear - Clears the screen", handler: (*cli).handleClear},
-		"use":                         {help: "use [collection_name] - Set or clear the active collection", handler: (*cli).handleUse},
-		"user create":                 {help: "user create <user> <pass> <perms_json|-|file:path> - Create a new user", handler: (*cli).handleUserCreate},
-		"user update":                 {help: "user update <user> <perms_json|-|file:path> - Update a user's permissions", handler: (*cli).handleUserUpdate},
-		"user delete":                 {help: "user delete <username> - Delete a user", handler: (*cli).handleUserDelete},
-		"update password":             {help: "update password <user> <new_pass> - Change a user's password", handler: (*cli).handleChangePassword},
-		"backup":                      {help: "backup - Triggers a manual server backup (root only)", handler: (*cli).handleBackup},
-		"restore":                     {help: "restore <backup_name> - Restores from a backup (root only)", handler: (*cli).handleRestore},
-		"set":                         {help: "set <key> <value_json> [ttl] - Set a key in the main store (root only)", handler: (*cli).handleMainSet},
-		"get":                         {help: "get <key> - Get a key from the main store (root only)", handler: (*cli).handleMainGet},
-		"collection create":           {help: "collection create <name> - Creates a new collection", handler: (*cli).handleCollectionCreate},
-		"collection delete":           {help: "collection delete [name] - Deletes a collection", handler: (*cli).handleCollectionDelete},
-		"collection list":             {help: "collection list - Lists all available collections", handler: (*cli).handleCollectionList},
-		"collection index create":     {help: "collection index create [coll] <field> - Creates an index on a field", handler: (*cli).handleIndexCreate},
-		"collection index delete":     {help: "collection index delete [coll] <field> - Deletes an index", handler: (*cli).handleIndexDelete},
-		"collection index list":       {help: "collection index list [coll] - Lists indexes on a collection", handler: (*cli).handleIndexList},
-		"collection item set":         {help: "collection item set [coll] [<key>] <value_json|-|file:path> [ttl] - Sets an item in a collection", handler: (*cli).handleItemSet},
-		"collection item get":         {help: "collection item get [coll] <key> - Gets an item from a collection", handler: (*cli).handleItemGet},
-		"collection item delete":      {help: "collection item delete [coll] <key> - Deletes an item from a collection", handler: (*cli).handleItemDelete},
-		"collection item update":      {help: "collection item update [coll] <key> <patch_json|-|file:path> - Updates an item", handler: (*cli).handleItemUpdate},
-		"collection item list":        {help: "collection item list [coll] - Lists all items in a collection (root only)", handler: (*cli).handleItemList},
-		"collection query":            {help: "collection query [coll] <query_json|-|file:path> - Performs a complex query", handler: (*cli).handleQuery},
-		"collection item set many":    {help: "collection item set many [coll] <json_array|-|file:path> - Sets multiple items", handler: (*cli).handleItemSetMany},
-		"collection item update many": {help: "collection item update many [coll] <patch_json_array|-|file:path> - Updates multiple items", handler: (*cli).handleItemUpdateMany},
-		"collection item delete many": {help: "collection item delete many [coll] <keys_json_array|-|file:path> - Deletes multiple items", handler: (*cli).handleItemDeleteMany},
+		// Authentication
+		"login": {help: "login <username> <password> - Authenticate to the server", handler: (*cli).handleLogin, category: "Authentication"},
+		"help":  {help: "help - Shows this help message", handler: (*cli).handleHelp, category: "Authentication"},
+		"exit":  {help: "exit - Exits the client", handler: (*cli).handleExit, category: "Authentication"},
+		"clear": {help: "clear - Clears the screen", handler: (*cli).handleClear, category: "Authentication"},
+
+		// User Management
+		"user create":     {help: "user create <user> <pass> <perms_json|-|file:path> - Create a new user", handler: (*cli).handleUserCreate, category: "User Management"},
+		"user update":     {help: "user update <user> <perms_json|-|file:path> - Update a user's permissions", handler: (*cli).handleUserUpdate, category: "User Management"},
+		"user delete":     {help: "user delete <username> - Delete a user", handler: (*cli).handleUserDelete, category: "User Management"},
+		"update password": {help: "update password <user> <new_pass> - Change a user's password", handler: (*cli).handleChangePassword, category: "User Management"},
+
+		// Server Operations (Root only)
+		"backup":  {help: "backup - Triggers a manual server backup (root only)", handler: (*cli).handleBackup, category: "Server Operations"},
+		"restore": {help: "restore <backup_name> - Restores from a backup (root only)", handler: (*cli).handleRestore, category: "Server Operations"},
+		"set":     {help: "set <key> <value_json> [ttl] - Set a key in the main store (root only)", handler: (*cli).handleMainSet, category: "Server Operations"},
+		"get":     {help: "get <key> - Get a key from the main store (root only)", handler: (*cli).handleMainGet, category: "Server Operations"},
+
+		// Collection Management
+		"collection create": {help: "collection create <name> - Creates a new collection", handler: (*cli).handleCollectionCreate, category: "Collection Management"},
+		"collection delete": {help: "collection delete <name> - Deletes a collection", handler: (*cli).handleCollectionDelete, category: "Collection Management"},
+		"collection list":   {help: "collection list - Lists all available collections", handler: (*cli).handleCollectionList, category: "Collection Management"},
+
+		// Index Management
+		"collection index create": {help: "collection index create <coll> <field> - Creates an index on a field", handler: (*cli).handleIndexCreate, category: "Index Management"},
+		"collection index delete": {help: "collection index delete <coll> <field> - Deletes an index", handler: (*cli).handleIndexDelete, category: "Index Management"},
+		"collection index list":   {help: "collection index list <coll> - Lists indexes on a collection", handler: (*cli).handleIndexList, category: "Index Management"},
+
+		// Item Operations
+		"collection item set":         {help: "collection item set <coll> [<key>] <value_json|-|file:path> [ttl] - Sets an item", handler: (*cli).handleItemSet, category: "Item Operations"},
+		"collection item get":         {help: "collection item get <coll> <key> - Gets an item from a collection", handler: (*cli).handleItemGet, category: "Item Operations"},
+		"collection item delete":      {help: "collection item delete <coll> <key> - Deletes an item from a collection", handler: (*cli).handleItemDelete, category: "Item Operations"},
+		"collection item update":      {help: "collection item update <coll> <key> <patch_json|-|file:path> - Updates an item", handler: (*cli).handleItemUpdate, category: "Item Operations"},
+		"collection item list":        {help: "collection item list <coll> - Lists all items in a collection (root only)", handler: (*cli).handleItemList, category: "Item Operations"},
+		"collection item set many":    {help: "collection item set many <coll> <json_array|-|file:path> - Sets multiple items", handler: (*cli).handleItemSetMany, category: "Item Operations"},
+		"collection item update many": {help: "collection item update many <coll> <patch_json_array|-|file:path> - Updates multiple items", handler: (*cli).handleItemUpdateMany, category: "Item Operations"},
+		"collection item delete many": {help: "collection item delete many <coll> <keys_json_array|-|file:path> - Deletes multiple items", handler: (*cli).handleItemDeleteMany, category: "Item Operations"},
+
+		// Query
+		"collection query": {help: "collection query <coll> <query_json|-|file:path> - Performs a complex query", handler: (*cli).handleQuery, category: "Query"},
 	}
 }
 
@@ -57,7 +73,6 @@ func (c *cli) handleLogin(args string) error {
 	}
 	username, password := parts[0], parts[1]
 
-	// Prepare and send the command
 	var cmdBuf bytes.Buffer
 	protocol.WriteAuthenticateCommand(&cmdBuf, username, password)
 
@@ -65,67 +80,64 @@ func (c *cli) handleLogin(args string) error {
 		return fmt.Errorf("could not send login command: %w", err)
 	}
 
-	// Read the raw response from the server
 	status, msg, _, err := c.readRawResponse()
 	if err != nil {
-		return err // Returns I/O errors, etc.
+		return err
 	}
 
-	// Display the response consistently with other commands
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
 	table.Render()
 	fmt.Println("---")
 
-	// Handle logic based on the status
 	if status == protocol.StatusOk {
 		c.isAuthenticated = true
 		c.currentUser = username
-
-		// === FIX 1: Update the completer without the incorrect error check ===
 		c.rlConfig.AutoComplete = c.getCompleter()
-		c.rl.SetConfig(c.rlConfig) // No error check needed here
-
-		// === FIX 2: Use Printf for correct formatting ===
+		c.rl.SetConfig(c.rlConfig)
 		fmt.Printf(colorOK("√ Login successful. Welcome, %s!\n"), c.currentUser)
-		return nil // Success
+		return nil
 	}
 
-	// If status was not OK, return an error to the main loop
 	return errors.New("authentication failed")
 }
 
 func (c *cli) handleHelp(args string) error {
 	fmt.Println(colorInfo("\nMemory Tools CLI Help"))
 	fmt.Println("---------------------")
-	fmt.Println("Commands are grouped by category. Use 'use <collection_name>' for contextual collections.")
+	fmt.Println("All commands require their full name. The collection must be specified as the first argument where required.")
 	fmt.Println("JSON arguments can be provided directly, via '-' (editor), or 'file:/path/to/file.json'.")
 	fmt.Println("---------------------")
 
-	// Definir categorías y sus comandos asociados
-	categories := map[string][]string{
-		"Authentication":        {"login", "help", "exit", "clear"},
-		"User Management":       {"user create", "user update", "user delete", "update password"},
-		"Server Operations":     {"backup", "restore", "set", "get"},
-		"Collection Management": {"collection create", "collection delete", "collection list", "use"},
-		"Index Management":      {"collection index create", "collection index delete", "collection index list"},
-		"Item Operations": {
-			"collection item set", "collection item get", "collection item delete",
-			"collection item update", "collection item list", "collection item set many",
-			"collection item update many", "collection item delete many",
-		},
-		"Query": {"collection query"},
+	categories := make(map[string][]string)
+	for cmdName, cmdDetails := range c.commands {
+		if cmdDetails.category == "" {
+			continue
+		}
+		if _, ok := categories[cmdDetails.category]; !ok {
+			categories[cmdDetails.category] = []string{}
+		}
+		categories[cmdDetails.category] = append(categories[cmdDetails.category], cmdName)
 	}
 
-	for category, cmds := range categories {
+	categoryNames := make([]string, 0, len(categories))
+	for name := range categories {
+		categoryNames = append(categoryNames, name)
+	}
+	sort.Strings(categoryNames)
+
+	for _, category := range categoryNames {
 		fmt.Printf("\n%s%s%s\n", colorOK("== "), colorOK(category), colorOK(" =="))
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"Command", "Description"})
 		table.SetAutoWrapText(false)
+
+		cmds := categories[category]
+		sort.Strings(cmds)
+
 		for _, cmd := range cmds {
-			details, exists := c.commands[cmd]
-			if exists {
+			if details, exists := c.commands[cmd]; exists {
 				table.Append([]string{cmd, details.help})
 			}
 		}
@@ -141,66 +153,6 @@ func (c *cli) handleExit(args string) error {
 
 func (c *cli) handleClear(args string) error {
 	clearScreen()
-	return nil
-}
-
-// cmd/client/handlers.go
-
-func (c *cli) handleUse(args string) error {
-	parts := strings.Fields(args)
-
-	// Case 1: No arguments provided. This is an error.
-	if len(parts) == 0 {
-		return errors.New("you must specify a collection name, or use 'exit' to leave the current collection")
-	}
-
-	targetCollection := parts[0]
-
-	// Case 2: The argument is 'exit'.
-	if targetCollection == "exit" {
-		// And we ARE in a collection, so we exit.
-		if c.currentCollection != "" {
-			fmt.Println(colorInfo("Exited collection mode."))
-			c.currentCollection = ""
-		} else {
-			// And we are NOT in a collection, so we inform the user and do nothing else.
-			fmt.Println(colorInfo("You are not currently in any collection."))
-			return nil // Return to avoid unnecessarily updating the completer.
-		}
-	} else {
-		// === START OF VALIDATION ===
-		// Case 3: A collection name is provided. It must be validated.
-
-		// We reuse the function from the completer to get the existing collections.
-		collections := c.fetchCollectionNames("")
-		if collections == nil {
-			// This can happen if there's a connection issue while fetching the list.
-			return errors.New("could not retrieve collection list from server")
-		}
-
-		found := false
-		for _, collection := range collections {
-			if collection == targetCollection {
-				found = true
-				break
-			}
-		}
-
-		// If the collection was found, we switch the context.
-		if found {
-			c.currentCollection = targetCollection
-			fmt.Println(colorInfo("Now using collection: ", c.currentCollection))
-		} else {
-			// If not, we return an error and DO NOT change the context.
-			return fmt.Errorf("collection '%s' not found", targetCollection)
-		}
-		// === END OF VALIDATION ===
-	}
-
-	// Update the completer to reflect the change of context.
-	c.rlConfig.AutoComplete = c.getCompleter()
-	c.rl.SetConfig(c.rlConfig)
-
 	return nil
 }
 
@@ -321,13 +273,13 @@ func (c *cli) handleCollectionCreate(args string) error {
 }
 
 func (c *cli) handleCollectionDelete(args string) error {
-	collName, _, err := c.resolveCollectionName(args)
+	collName, _, err := c.resolveCollectionName(args, "collection delete")
 	if err != nil {
 		return err
 	}
 
-	// Solicitar confirmación
-	fmt.Printf(colorInfo("Are you sure you want to delete collection '%s'? (y/N): "), collName)
+	fmt.Println(colorInfo("Are you sure you want to delete collection? (y/N): "), collName)
+
 	input, err := c.rl.Readline()
 	if err != nil {
 		return err
@@ -351,13 +303,13 @@ func (c *cli) handleCollectionList(args string) error {
 }
 
 func (c *cli) handleIndexCreate(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection index create")
 	if err != nil {
 		return err
 	}
 	parts := strings.Fields(remainingArgs)
 	if len(parts) != 1 {
-		return errors.New("usage: collection index create [collection] <field_name>")
+		return errors.New("usage: collection index create <collection> <field_name>")
 	}
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionIndexCreateCommand(&cmdBuf, collName, parts[0])
@@ -366,13 +318,13 @@ func (c *cli) handleIndexCreate(args string) error {
 }
 
 func (c *cli) handleIndexDelete(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection index delete")
 	if err != nil {
 		return err
 	}
 	parts := strings.Fields(remainingArgs)
 	if len(parts) != 1 {
-		return errors.New("usage: collection index delete [collection] <field_name>")
+		return errors.New("usage: collection index delete <collection> <field_name>")
 	}
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionIndexDeleteCommand(&cmdBuf, collName, parts[0])
@@ -381,7 +333,7 @@ func (c *cli) handleIndexDelete(args string) error {
 }
 
 func (c *cli) handleIndexList(args string) error {
-	collName, _, err := c.resolveCollectionName(args)
+	collName, _, err := c.resolveCollectionName(args, "collection index list")
 	if err != nil {
 		return err
 	}
@@ -392,7 +344,7 @@ func (c *cli) handleIndexList(args string) error {
 }
 
 func (c *cli) handleItemSet(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item set")
 	if err != nil {
 		return err
 	}
@@ -400,7 +352,7 @@ func (c *cli) handleItemSet(args string) error {
 	parts := strings.SplitN(remainingArgs, " ", 2)
 	key, jsonArg := "", ""
 	if len(parts) == 0 || parts[0] == "" {
-		return errors.New("usage: collection item set [coll] [<key>] <value_json|-|file:path> [ttl]")
+		return errors.New("usage: collection item set <coll> [<key>] <value_json|-|file:path> [ttl]")
 	}
 
 	if len(parts) == 1 {
@@ -435,13 +387,13 @@ func (c *cli) handleItemSet(args string) error {
 }
 
 func (c *cli) handleItemGet(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item get")
 	if err != nil {
 		return err
 	}
 	parts := strings.Fields(remainingArgs)
 	if len(parts) != 1 {
-		return errors.New("usage: collection item get [collection] <key>")
+		return errors.New("usage: collection item get <collection> <key>")
 	}
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionItemGetCommand(&cmdBuf, collName, parts[0])
@@ -450,13 +402,13 @@ func (c *cli) handleItemGet(args string) error {
 }
 
 func (c *cli) handleItemDelete(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item delete")
 	if err != nil {
 		return err
 	}
 	parts := strings.Fields(remainingArgs)
 	if len(parts) != 1 {
-		return errors.New("usage: collection item delete [collection] <key>")
+		return errors.New("usage: collection item delete <collection> <key>")
 	}
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionItemDeleteCommand(&cmdBuf, collName, parts[0])
@@ -465,7 +417,7 @@ func (c *cli) handleItemDelete(args string) error {
 }
 
 func (c *cli) handleItemList(args string) error {
-	collName, _, err := c.resolveCollectionName(args)
+	collName, _, err := c.resolveCollectionName(args, "collection item list")
 	if err != nil {
 		return err
 	}
@@ -476,13 +428,13 @@ func (c *cli) handleItemList(args string) error {
 }
 
 func (c *cli) handleItemUpdate(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item update")
 	if err != nil {
 		return err
 	}
 	parts := strings.SplitN(remainingArgs, " ", 2)
 	if len(parts) != 2 {
-		return errors.New("usage: collection item update [coll] <key> <patch_json|-|file:path>")
+		return errors.New("usage: collection item update <coll> <key> <patch_json|-|file:path>")
 	}
 	key, jsonArg := parts[0], parts[1]
 
@@ -498,12 +450,12 @@ func (c *cli) handleItemUpdate(args string) error {
 }
 
 func (c *cli) handleQuery(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection query")
 	if err != nil {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection query [coll] <query_json|-|file:path>")
+		return errors.New("usage: collection query <coll> <query_json|-|file:path>")
 	}
 
 	var jsonPayload []byte
@@ -523,12 +475,12 @@ func (c *cli) handleQuery(args string) error {
 }
 
 func (c *cli) handleItemSetMany(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item set many")
 	if err != nil {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item set many [coll] <json_array|-|file:path>")
+		return errors.New("usage: collection item set many <coll> <json_array|-|file:path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)
@@ -543,12 +495,12 @@ func (c *cli) handleItemSetMany(args string) error {
 }
 
 func (c *cli) handleItemUpdateMany(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item update many")
 	if err != nil {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item update many [coll] <patch_json_array|-|file:path>")
+		return errors.New("usage: collection item update many <coll> <patch_json_array|-|file:path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)
@@ -563,12 +515,12 @@ func (c *cli) handleItemUpdateMany(args string) error {
 }
 
 func (c *cli) handleItemDeleteMany(args string) error {
-	collName, remainingArgs, err := c.resolveCollectionName(args)
+	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item delete many")
 	if err != nil {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item delete many [coll] <keys_json_array|-|file:path>")
+		return errors.New("usage: collection item delete many <coll> <keys_json_array|-|file:path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)

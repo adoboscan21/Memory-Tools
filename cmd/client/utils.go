@@ -13,7 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"sort" // <-- IMPORT ADDED
+	"sort"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -33,18 +33,10 @@ var (
 )
 
 // getCommandAndRawArgs parses user input into a command and its arguments.
-func getCommandAndRawArgs(input string) (string, string) {
-	// List of multi-word commands, from longest to shortest.
-	multiWordCommands := []string{
-		"collection item update many", "collection item set many", "collection item delete many",
-		"collection item update", "collection item set", "collection item get",
-		"collection item delete", "collection item list", "collection index create",
-		"collection index delete", "collection index list", "collection create",
-		"collection delete", "collection list", "collection query", "user create",
-		"user update", "user delete", "update password",
-	}
-
-	for _, mwCmd := range multiWordCommands {
+// It is now a method of *cli to access the dynamic command list.
+func (c *cli) getCommandAndRawArgs(input string) (string, string) {
+	// Use the dynamically generated list of multi-word commands
+	for _, mwCmd := range c.multiWordCommands {
 		if strings.HasPrefix(input, mwCmd+" ") || input == mwCmd {
 			return mwCmd, strings.TrimSpace(input[len(mwCmd):])
 		}
@@ -106,9 +98,7 @@ func (c *cli) getJSONFromEditor() ([]byte, error) {
 	}
 	defer os.Remove(tmpfile.Name())
 
-	// Close readline to give terminal control to the editor
 	c.rl.Close()
-
 	fmt.Println(colorInfo("Opening editor (%s) for JSON input. Save and close the file to continue...", editor))
 
 	cmd := exec.Command(editor, tmpfile.Name())
@@ -118,7 +108,6 @@ func (c *cli) getJSONFromEditor() ([]byte, error) {
 
 	runErr := cmd.Run()
 
-	// IMPORTANT: Re-initialize readline after the editor is closed.
 	c.rl, err = readline.NewEx(c.rlConfig)
 	if err != nil {
 		return nil, fmt.Errorf("fatal: could not re-initialize readline: %w", err)
@@ -131,6 +120,7 @@ func (c *cli) getJSONFromEditor() ([]byte, error) {
 	return os.ReadFile(tmpfile.Name())
 }
 
+// getJSONPayload is the method the compiler was missing.
 func (c *cli) getJSONPayload(payload string) ([]byte, error) {
 	if payload == "-" {
 		return c.getJSONFromEditor()
@@ -142,44 +132,26 @@ func (c *cli) getJSONPayload(payload string) ([]byte, error) {
 	return []byte(payload), nil
 }
 
-func (c *cli) resolveCollectionName(args string) (string, string, error) {
+// resolveCollectionName is the new simplified version that requires an explicit collection name.
+func (c *cli) resolveCollectionName(args string, commandName string) (string, string, error) {
 	parts := strings.Fields(args)
-	if len(parts) > 0 &&
-		!strings.HasPrefix(parts[0], "{") &&
-		!strings.HasPrefix(parts[0], "[") &&
-		!strings.HasPrefix(parts[0], "file:") &&
-		parts[0] != "-" {
-		return parts[0], strings.Join(parts[1:], " "), nil
+	if len(parts) == 0 {
+		usage := fmt.Sprintf("usage: %s <collection_name> [other_args...]", commandName)
+		return "", "", errors.New("no collection name provided. " + usage)
 	}
 
-	if c.currentCollection != "" {
+	collectionName := parts[0]
+	remainingArgs := strings.Join(parts[1:], " ")
 
-		return c.currentCollection, args, nil
-	}
-	return "", "", errors.New("no collection name provided and no collection is in use. Use 'use <collection_name>' or specify it in the command")
+	return collectionName, remainingArgs, nil
 }
 
 func (c *cli) readResponse(lastCmd string) error {
-	c.connMutex.Lock()
-	defer c.connMutex.Unlock()
-
-	statusByte := make([]byte, 1)
-	if _, err := io.ReadFull(c.conn, statusByte); err != nil {
-		return fmt.Errorf("failed to read response status from server: %w", err)
-	}
-	status := protocol.ResponseStatus(statusByte[0])
-
-	msg, err := protocol.ReadString(c.conn)
+	status, msg, dataBytes, err := c.readRawResponse()
 	if err != nil {
-		return fmt.Errorf("failed to read response message from server: %w", err)
+		return err
 	}
 
-	dataBytes, err := protocol.ReadBytes(c.conn)
-	if err != nil {
-		return fmt.Errorf("failed to read response data from server: %w", err)
-	}
-
-	// Estandarizar la salida
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
@@ -206,20 +178,39 @@ func (c *cli) readResponse(lastCmd string) error {
 		if err := stdjson.Indent(&prettyJSON, dataBytes, "  ", "  "); err == nil {
 			fmt.Printf("  %s\n%s\n", colorInfo("Data:"), prettyJSON.String())
 		} else {
-			fmt.Printf("  %s %s\n", colorInfo("Data (Raw):"), string(dataBytes))
+			// Check for Base64 encoded data, common in 'get' commands for binary/JSON values
+			if s, ok := tryDecodeBase64(dataBytes); ok {
+				fmt.Printf("  %s %s\n", colorInfo("Data (Decoded):"), s)
+			} else {
+				fmt.Printf("  %s %s\n", colorInfo("Data (Raw):"), string(dataBytes))
+			}
 		}
 	}
 	fmt.Println("---")
 	return nil
 }
 
-// ---- NEW FUNCTION ADDED ----
-// printDynamicTable attempts to render a slice of JSON objects as a formatted table.
+// tryDecodeBase64 is a helper for readResponse to handle potentially encoded data.
+func tryDecodeBase64(data []byte) (string, bool) {
+	decoded, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return "", false
+	}
+	// Attempt to pretty print if it's JSON
+	var prettyJSON bytes.Buffer
+	if stdjson.Indent(&prettyJSON, decoded, "  ", "  ") == nil {
+		return prettyJSON.String(), true
+	}
+	// Otherwise return the decoded string
+	return string(decoded), true
+}
+
+// printDynamicTable renders a slice of JSON objects as a formatted table.
 func printDynamicTable(dataBytes []byte) error {
-	// Attempt 1: Try to unmarshal as an array of objects (multi-column table).
 	var objectArrayResults []map[string]any
 	if err := json.Unmarshal(dataBytes, &objectArrayResults); err == nil {
 		if len(objectArrayResults) == 0 {
+			fmt.Println("(No results)")
 			return nil
 		}
 		headerSet := make(map[string]bool)
@@ -243,7 +234,7 @@ func printDynamicTable(dataBytes []byte) error {
 					var valStr string
 					switch v := val.(type) {
 					case map[string]any, []any:
-						jsonVal, _ := json.MarshalIndent(v, "", "  ")
+						jsonVal, _ := json.Marshal(v)
 						valStr = string(jsonVal)
 					case nil:
 						valStr = "(nil)"
@@ -261,10 +252,10 @@ func printDynamicTable(dataBytes []byte) error {
 		return nil
 	}
 
-	// Attempt 2: If that failed, try as a single object (Key-Value table).
 	var singleObjectResult map[string]any
 	if err := json.Unmarshal(dataBytes, &singleObjectResult); err == nil {
 		if len(singleObjectResult) == 0 {
+			fmt.Println("(Empty object)")
 			return nil
 		}
 		table := tablewriter.NewWriter(os.Stdout)
@@ -287,24 +278,7 @@ func printDynamicTable(dataBytes []byte) error {
 			case nil:
 				valStr = "(nil)"
 			default:
-				// === START OF FIX ===
-				// The value is likely a string. Check if it's Base64 encoded JSON.
-				valStr = fmt.Sprintf("%v", v) // Default to the raw string
-				if s, ok := v.(string); ok {
-					// Attempt to decode from Base64
-					if decodedBytes, err := base64.StdEncoding.DecodeString(s); err == nil {
-						// If decoding succeeds, it might be JSON. Try to pretty-print it.
-						var prettyJSON bytes.Buffer
-						if stdjson.Indent(&prettyJSON, decodedBytes, "", "  ") == nil {
-							valStr = prettyJSON.String()
-						} else {
-							// It was Base64 but not JSON, so show the decoded string.
-							valStr = string(decodedBytes)
-						}
-					}
-					// If Base64 decoding fails, we just keep the original string.
-				}
-				// === END OF FIX ===
+				valStr = fmt.Sprintf("%v", v)
 			}
 			table.Append([]string{k, valStr})
 		}
@@ -312,10 +286,10 @@ func printDynamicTable(dataBytes []byte) error {
 		return nil
 	}
 
-	// Attempt 3: If that also failed, try as an array of simple values (single-column table).
 	var simpleArrayResults []any
 	if err := json.Unmarshal(dataBytes, &simpleArrayResults); err == nil {
 		if len(simpleArrayResults) == 0 {
+			fmt.Println("(Empty list)")
 			return nil
 		}
 		table := tablewriter.NewWriter(os.Stdout)
@@ -327,7 +301,6 @@ func printDynamicTable(dataBytes []byte) error {
 		return nil
 	}
 
-	// Fallback: If all attempts fail, return an error to trigger pretty JSON printing.
 	var initialErr error
 	_ = json.Unmarshal(dataBytes, &objectArrayResults)
 	return initialErr
@@ -365,7 +338,6 @@ func (c *cli) getInteractiveJSONPayload() ([]byte, error) {
 			return nil, fmt.Errorf("invalid pair format: %s (use key=value)", pair)
 		}
 		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		// Intenta parsear el valor como JSON; si falla, trata como string
 		var jsonValue interface{}
 		if err := json.Unmarshal([]byte(value), &jsonValue); err != nil {
 			jsonValue = value
@@ -377,7 +349,6 @@ func (c *cli) getInteractiveJSONPayload() ([]byte, error) {
 }
 
 // readRawResponse reads the raw components of a response from the server.
-// This is a helper to avoid code duplication in readResponse and handleLogin.
 func (c *cli) readRawResponse() (protocol.ResponseStatus, string, []byte, error) {
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()

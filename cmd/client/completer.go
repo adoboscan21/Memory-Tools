@@ -12,8 +12,10 @@ import (
 	"github.com/chzyer/readline"
 )
 
+// --- MODIFICADO ---
+// getCompleter ahora es mucho más simple.
 func (c *cli) getCompleter() readline.AutoCompleter {
-	// If not authenticated, return the basic completer.
+	// Si no está autenticado, devuelve el completador básico.
 	if !c.isAuthenticated {
 		return readline.NewPrefixCompleter(
 			readline.PcItem("login"),
@@ -23,37 +25,11 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 		)
 	}
 
-	// ---- START OF MODIFICATION ----
-	// If inside a collection, provide a CLEAN list of contextual commands.
-	if c.currentCollection != "" {
-		return readline.NewPrefixCompleter(
-			// === Contextual Aliases ===
-			readline.PcItem("list"),
-			readline.PcItem("query"),
-			readline.PcItem("get"),
-			readline.PcItem("set"),
-			readline.PcItem("delete"),
-			readline.PcItem("update"),
-			readline.PcItem("index",
-				readline.PcItem("create"),
-				readline.PcItem("delete"),
-				readline.PcItem("list"),
-			),
+	// --- ELIMINADO ---
+	// La lógica del completador contextual para 'currentCollection' ha sido eliminada.
 
-			// === Universal Commands ===
-			// 'use' is kept to allow switching or exiting the context.
-			readline.PcItem("use",
-				readline.PcItem("exit"),
-				readline.PcItemDynamic(c.fetchCollectionNames),
-			),
-			readline.PcItem("help"),
-			readline.PcItem("exit"),
-			readline.PcItem("clear"),
-		)
-	}
-	// ---- END OF MODIFICATION ----
-
-	// Default completer when NOT in a collection context.
+	// Completador por defecto cuando está autenticado.
+	// Ahora contiene todos los comandos disponibles.
 	return readline.NewPrefixCompleter(
 		readline.PcItem("user",
 			readline.PcItem("create"),
@@ -65,10 +41,6 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 		readline.PcItem("restore"),
 		readline.PcItem("set"),
 		readline.PcItem("get"),
-		readline.PcItem("use",
-			readline.PcItem("exit"),
-			readline.PcItemDynamic(c.fetchCollectionNames),
-		),
 		readline.PcItem("collection",
 			readline.PcItem("create"),
 			readline.PcItem("delete", readline.PcItemDynamic(c.fetchCollectionNames)),
@@ -80,6 +52,13 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 			),
 			readline.PcItem("item",
 				readline.PcItem("get", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("set", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("delete", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("update", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("list", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("set many", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("delete many", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("update many", readline.PcItemDynamic(c.fetchCollectionNames)),
 			),
 			readline.PcItem("query", readline.PcItemDynamic(c.fetchCollectionNames)),
 		),
@@ -89,7 +68,9 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 	)
 }
 
+// La función fetchCollectionNames no necesita cambios en su lógica interna.
 func (c *cli) fetchCollectionNames(line string) []string {
+	// ... (sin cambios)
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
@@ -119,8 +100,6 @@ func (c *cli) fetchCollectionNames(line string) []string {
 		}
 
 		var collections []string
-		// Use the existing 'json' package from utils.go if it were in the same package,
-		// otherwise, import a json library here.
 		if json.Unmarshal(dataBytes, &collections) != nil {
 			continue
 		}
@@ -128,8 +107,6 @@ func (c *cli) fetchCollectionNames(line string) []string {
 		parts := strings.Fields(line)
 		prefix := ""
 		if len(parts) > 0 {
-			// This logic might need adjustment depending on the exact completer behavior,
-			// but for single-word suggestions, it's often fine.
 			if len(parts) > 1 {
 				prefix = parts[len(parts)-1]
 			}
@@ -140,11 +117,6 @@ func (c *cli) fetchCollectionNames(line string) []string {
 			if strings.HasPrefix(collection, prefix) {
 				suggestions = append(suggestions, collection)
 			}
-		}
-		// Add an empty suggestion for 'use' to allow exiting context.
-		// Note: The library might handle this differently. This is one way.
-		if strings.HasPrefix("", prefix) {
-			suggestions = append(suggestions, "")
 		}
 		return suggestions
 	}

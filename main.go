@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"memory-tools/internal/config"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/handler"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/store"
@@ -93,10 +94,10 @@ func main() {
 	}
 
 	// Ensure the system collection and default users exist.
-	systemCollection := collectionManager.GetCollection(handler.SystemCollectionName)
+	systemCollection := collectionManager.GetCollection(globalconst.SystemCollectionName)
 
 	// Ensure default admin user
-	adminUserKey := handler.UserPrefix + "admin"
+	adminUserKey := globalconst.UserPrefix + "admin"
 	if _, found := systemCollection.Get(adminUserKey); !found {
 		slog.Info("Default admin user not found, creating...", "user", "admin")
 		hashedPassword, err := handler.HashPassword(cfg.DefaultAdminPassword)
@@ -108,7 +109,7 @@ func main() {
 			Username:     "admin",
 			PasswordHash: hashedPassword,
 			IsRoot:       false,
-			Permissions:  map[string]string{"*": "write", handler.SystemCollectionName: "read"},
+			Permissions:  map[string]string{"*": globalconst.PermissionWrite, globalconst.SystemCollectionName: globalconst.PermissionRead},
 		}
 		adminUserInfoBytes, err := json.Marshal(adminUserInfo)
 		if err != nil {
@@ -116,14 +117,14 @@ func main() {
 			os.Exit(1)
 		}
 		systemCollection.Set(adminUserKey, adminUserInfoBytes, 0)
-		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
+		collectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, systemCollection)
 		slog.Info("Default admin user created", "user", "admin")
 	} else {
 		slog.Info("Default admin user found", "user", "admin")
 	}
 
 	// Ensure default root user (localhost only)
-	rootUserKey := handler.UserPrefix + "root"
+	rootUserKey := globalconst.UserPrefix + "root"
 	if _, found := systemCollection.Get(rootUserKey); !found {
 		slog.Info("Default root user not found, creating...", "user", "root")
 		hashedPassword, err := handler.HashPassword(cfg.DefaultRootPassword)
@@ -135,7 +136,7 @@ func main() {
 			Username:     "root",
 			PasswordHash: hashedPassword,
 			IsRoot:       true,
-			Permissions:  map[string]string{"*": "write"},
+			Permissions:  map[string]string{"*": globalconst.PermissionWrite},
 		}
 		rootUserInfoBytes, err := json.Marshal(rootUserInfo)
 		if err != nil {
@@ -143,7 +144,7 @@ func main() {
 			os.Exit(1)
 		}
 		systemCollection.Set(rootUserKey, rootUserInfoBytes, 0)
-		collectionManager.EnqueueSaveTask(handler.SystemCollectionName, systemCollection)
+		collectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, systemCollection)
 		slog.Info("Default root user created", "user", "root")
 	} else {
 		slog.Info("Default root user found", "user", "root")

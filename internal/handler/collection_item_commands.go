@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"net"
@@ -25,7 +26,7 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item set attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -48,18 +49,18 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	existingValue, found := colStore.Get(key)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	data["_id"] = key
-	data["updated_at"] = now
+	data[globalconst.ID] = key
+	data[globalconst.UPDATED_AT] = now
 
 	if !found {
-		data["created_at"] = now
+		data[globalconst.CREATED_AT] = now
 	} else {
 		var existingData map[string]any
 		if err := json.Unmarshal(existingValue, &existingData); err == nil {
-			if originalCreatedAt, ok := existingData["created_at"]; ok {
-				data["created_at"] = originalCreatedAt
+			if originalCreatedAt, ok := existingData[globalconst.CREATED_AT]; ok {
+				data[globalconst.CREATED_AT] = originalCreatedAt
 			} else {
-				data["created_at"] = now
+				data[globalconst.CREATED_AT] = now
 			}
 		}
 	}
@@ -92,7 +93,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item update attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -118,13 +119,13 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 		}
 
 		for k, v := range patchData {
-			if k == "_id" || k == "created_at" {
+			if k == globalconst.ID || k == globalconst.CREATED_AT {
 				continue
 			}
 			existingData[k] = v
 		}
 
-		existingData["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		existingData[globalconst.UPDATED_AT] = time.Now().UTC().Format(time.RFC3339)
 
 		updatedValue, _ := json.Marshal(existingData)
 		colStore.Set(key, updatedValue, 0)
@@ -175,7 +176,7 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item update-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -216,12 +217,12 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 			continue
 		}
 		for k, v := range p.Patch {
-			if k == "_id" || k == "created_at" {
+			if k == globalconst.ID || k == globalconst.CREATED_AT {
 				continue
 			}
 			existingData[k] = v
 		}
-		existingData["updated_at"] = now
+		existingData[globalconst.UPDATED_AT] = now
 		updatedValue, err := json.Marshal(existingData)
 		if err != nil {
 			failedHotKeys = append(failedHotKeys, p.ID)
@@ -278,7 +279,7 @@ func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "read") {
+	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized collection item get attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
@@ -289,7 +290,7 @@ func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 	slog.Debug("Get item from collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "found", found)
 
 	if found {
-		if collectionName == SystemCollectionName && strings.HasPrefix(key, UserPrefix) {
+		if collectionName == globalconst.SystemCollectionName && strings.HasPrefix(key, globalconst.UserPrefix) {
 			var userInfo UserInfo
 			if err := json.Unmarshal(value, &userInfo); err == nil {
 				sanitizedInfo := map[string]any{
@@ -320,7 +321,7 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
 		return
 	}
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -381,7 +382,7 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "read") {
+	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized collection item list attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return
@@ -395,10 +396,10 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	allData := colStore.GetAll()
 
-	if collectionName == SystemCollectionName {
+	if collectionName == globalconst.SystemCollectionName {
 		sanitizedData := make(map[string]map[string]any)
 		for key, val := range allData {
-			if strings.HasPrefix(key, UserPrefix) {
+			if strings.HasPrefix(key, globalconst.UserPrefix) {
 				var userInfo UserInfo
 				if err := json.Unmarshal(val, &userInfo); err == nil {
 					sanitizedData[key] = map[string]any{
@@ -438,7 +439,7 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item set-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -457,15 +458,15 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 
 	for _, record := range records {
 		var key string
-		if id, ok := record["_id"].(string); ok && id != "" {
+		if id, ok := record[globalconst.ID].(string); ok && id != "" {
 			key = id
 		} else {
 			key = uuid.New().String()
 		}
 
-		record["_id"] = key
-		record["created_at"] = now
-		record["updated_at"] = now
+		record[globalconst.ID] = key
+		record[globalconst.CREATED_AT] = now
+		record[globalconst.UPDATED_AT] = now
 
 		updatedValue, err := json.Marshal(record)
 		if err != nil {
@@ -496,7 +497,7 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty and keys must be provided", nil)
 		return
 	}
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection item delete-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return

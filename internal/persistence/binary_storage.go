@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
@@ -162,24 +163,20 @@ func (sm *SnapshotManager) Stop() {
 	}
 }
 
-// Constants for collections persistence.
-const collectionsDir = "collections"
-const collectionFileExtension = ".mtdb"
-
 // CollectionPersisterImpl implements the store.CollectionPersister interface.
 type CollectionPersisterImpl struct{}
 
 // SaveCollectionData saves all non-expired data from a single collection (DataStore) to a file.
 func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s store.DataStore) error {
-	if err := os.MkdirAll(collectionsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create collections directory '%s': %w", collectionsDir, err)
+	if err := os.MkdirAll(globalconst.CollectionsDirName, 0755); err != nil {
+		return fmt.Errorf("failed to create collections directory '%s': %w", globalconst.CollectionsDirName, err)
 	}
 
 	data := s.GetAll()
 	indexedFields := s.ListIndexes()
 
-	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
-	tempFilePath := filePath + ".tmp"
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
+	tempFilePath := filePath + globalconst.TempFileSuffix
 
 	file, err := os.Create(tempFilePath)
 	if err != nil {
@@ -250,7 +247,7 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 
 // DeleteCollectionFile removes a collection's data file from disk.
 func (p *CollectionPersisterImpl) DeleteCollectionFile(collectionName string) error {
-	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
 	if err := os.Remove(filePath); err != nil {
 		if os.IsNotExist(err) {
 			slog.Debug("Collection file does not exist, no need to delete", "path", filePath)
@@ -264,7 +261,7 @@ func (p *CollectionPersisterImpl) DeleteCollectionFile(collectionName string) er
 
 // LoadCollectionData loads data for a single collection from its file.
 func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold time.Time) error {
-	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -334,7 +331,7 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 			var doc map[string]any
 			// We inspect the document's timestamp without storing it in memory yet.
 			if err := jsoniter.Unmarshal(valBytes, &doc); err == nil {
-				if createdAtStr, ok := doc["created_at"].(string); ok {
+				if createdAtStr, ok := doc[globalconst.CREATED_AT].(string); ok {
 					createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 					// If the document is older than the threshold, we consider it "cold" and don't load it into RAM.
 					if err == nil && createdAt.Before(hotThreshold) {
@@ -371,19 +368,19 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 
 // ListCollectionFiles returns a list of all collection names found on disk.
 func ListCollectionFiles() ([]string, error) {
-	if _, err := os.Stat(collectionsDir); os.IsNotExist(err) {
+	if _, err := os.Stat(globalconst.CollectionsDirName); os.IsNotExist(err) {
 		return []string{}, nil
 	}
 
-	files, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
+	files, err := filepath.Glob(filepath.Join(globalconst.CollectionsDirName, "*"+globalconst.DBFileExtension))
 	if err != nil {
-		return nil, fmt.Errorf("failed to list collection files in '%s': %w", collectionsDir, err)
+		return nil, fmt.Errorf("failed to list collection files in '%s': %w", globalconst.CollectionsDirName, err)
 	}
 
 	names := make([]string, 0, len(files))
 	for _, filePath := range files {
 		baseName := filepath.Base(filePath)
-		colName := baseName[:len(baseName)-len(collectionFileExtension)]
+		colName := baseName[:len(baseName)-len(globalconst.DBFileExtension)]
 		names = append(names, colName)
 	}
 	slog.Info("Found collection files on disk", "count", len(names))
@@ -431,7 +428,7 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 		}
 	}
 
-	existingFiles, err := filepath.Glob(filepath.Join(collectionsDir, "*"+collectionFileExtension))
+	existingFiles, err := filepath.Glob(filepath.Join(globalconst.CollectionsDirName, "*"+globalconst.DBFileExtension))
 	if err != nil {
 		slog.Warn("Failed to list existing collection files for cleanup during shutdown", "error", err)
 	} else {
@@ -442,7 +439,7 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 
 		for _, f := range existingFiles {
 			baseName := filepath.Base(f)
-			colName := baseName[:len(baseName)-len(collectionFileExtension)]
+			colName := baseName[:len(baseName)-len(globalconst.DBFileExtension)]
 			if !activeFileMap[colName] {
 				if err := persister.DeleteCollectionFile(colName); err != nil {
 					slog.Warn("Failed to remove old collection file during shutdown", "collection", colName, "error", err)

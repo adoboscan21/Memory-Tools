@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
@@ -30,7 +31,7 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 	}
 
 	// Authorization check
-	if !h.hasPermission(collectionName, "read") {
+	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized query attempt",
 			"user", h.AuthenticatedUser,
 			"collection", collectionName,
@@ -117,7 +118,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	// --- COLD SEARCH (ON DISK) ---
 	slog.Debug("Executing query against cold data (Disk)...", "collection", collectionName)
 	coldMatcher := func(item map[string]any) bool {
-		if id, ok := item["_id"].(string); ok {
+		if id, ok := item[globalconst.ID].(string); ok {
 			if _, existsInHot := hotResultsMap[id]; existsInHot {
 				return false
 			}
@@ -152,7 +153,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		return resultList, nil
 	}
 	if query.Count && len(query.Aggregations) == 0 && len(query.GroupBy) == 0 {
-		return map[string]int{"count": len(finalResults)}, nil
+		return map[string]int{globalconst.AggCount: len(finalResults)}, nil
 	}
 	if len(query.Aggregations) > 0 || len(query.GroupBy) > 0 {
 		var itemsForAgg []struct {
@@ -160,7 +161,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 			Val map[string]any
 		}
 		for _, res := range finalResults {
-			key, _ := res["_id"].(string)
+			key, _ := res[globalconst.ID].(string)
 			itemsForAgg = append(itemsForAgg, struct {
 				Key string
 				Val map[string]any
@@ -184,7 +185,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 				}
 				cmp := compare(valA, valB)
 				if cmp != 0 {
-					if ob.Direction == "desc" {
+					if ob.Direction == globalconst.SortDesc {
 						return cmp > 0
 					}
 					return cmp < 0
@@ -224,7 +225,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 				joinQuery := Query{
 					Filter: map[string]any{
 						"field": lookupSpec.ForeignField,
-						"op":    "=",
+						"op":    globalconst.OpEqual,
 						"value": localValue,
 					},
 				}
@@ -276,7 +277,7 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 	}
 
 	// --- NEW: Logic for compound filters with "OR" ---
-	if orConditions, ok := filter["or"].([]any); ok {
+	if orConditions, ok := filter[globalconst.OpOr].([]any); ok {
 		unionKeys := make(map[string]struct{})
 		allConditionsAreIndexable := true
 
@@ -319,7 +320,7 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 	}
 
 	// --- LOGIC FOR COMPOUND FILTERS WITH "AND" ---
-	if andConditions, ok := filter["and"].([]any); ok {
+	if andConditions, ok := filter[globalconst.OpAnd].([]any); ok {
 		keySets := [][]string{}
 		nonIndexedConditions := []any{}
 
@@ -355,7 +356,7 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		// Return a new filter containing only the conditions that did not use an index.
 		newFilter := make(map[string]any)
 		if len(nonIndexedConditions) > 0 {
-			newFilter["and"] = nonIndexedConditions
+			newFilter[globalconst.OpAnd] = nonIndexedConditions
 		}
 
 		return candidateKeys, true, newFilter
@@ -371,9 +372,9 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		var used bool
 
 		switch op {
-		case "=":
+		case globalconst.OpEqual:
 			keys, used = colStore.Lookup(field, value)
-		case "in":
+		case globalconst.OpIn:
 			if values, isSlice := value.([]any); isSlice {
 				unionKeys := make(map[string]struct{})
 				for _, v := range values {
@@ -389,15 +390,15 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 				keys = finalKeys
 				used = true
 			}
-		case ">":
+		case globalconst.OpGreaterThan:
 			keys, used = colStore.LookupRange(field, value, nil, false, false)
-		case ">=":
+		case globalconst.OpGreaterThanOrEqual:
 			keys, used = colStore.LookupRange(field, value, nil, true, false)
-		case "<":
+		case globalconst.OpLessThan:
 			keys, used = colStore.LookupRange(field, nil, value, false, false)
-		case "<=":
+		case globalconst.OpLessThanOrEqual:
 			keys, used = colStore.LookupRange(field, nil, value, false, true)
-		case "between":
+		case globalconst.OpBetween:
 			if bounds, ok := value.([]any); ok && len(bounds) == 2 {
 				keys, used = colStore.LookupRange(field, bounds[0], bounds[1], true, true)
 			}
@@ -420,7 +421,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		return true
 	}
 
-	if andConditions, ok := filter["and"].([]any); ok {
+	if andConditions, ok := filter[globalconst.OpAnd].([]any); ok {
 		for _, cond := range andConditions {
 			if condMap, isMap := cond.(map[string]any); isMap {
 				if !h.matchFilter(item, condMap) {
@@ -434,7 +435,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		return true
 	}
 
-	if orConditions, ok := filter["or"].([]any); ok {
+	if orConditions, ok := filter[globalconst.OpOr].([]any); ok {
 		for _, cond := range orConditions {
 			if condMap, isMap := cond.(map[string]any); isMap {
 				if h.matchFilter(item, condMap) {
@@ -448,7 +449,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		return false
 	}
 
-	if notCondition, ok := filter["not"].(map[string]any); ok {
+	if notCondition, ok := filter[globalconst.OpNot].(map[string]any); ok {
 		return !h.matchFilter(item, notCondition)
 	}
 
@@ -464,19 +465,19 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 	itemValue, itemValueExists := item[field]
 
 	switch op {
-	case "=":
+	case globalconst.OpEqual:
 		return itemValueExists && compare(itemValue, value) == 0
-	case "!=":
+	case globalconst.OpNotEqual:
 		return !itemValueExists || compare(itemValue, value) != 0
-	case ">":
+	case globalconst.OpGreaterThan:
 		return itemValueExists && compare(itemValue, value) > 0
-	case ">=":
+	case globalconst.OpGreaterThanOrEqual:
 		return itemValueExists && compare(itemValue, value) >= 0
-	case "<":
+	case globalconst.OpLessThan:
 		return itemValueExists && compare(itemValue, value) < 0
-	case "<=":
+	case globalconst.OpLessThanOrEqual:
 		return itemValueExists && compare(itemValue, value) <= 0
-	case "like":
+	case globalconst.OpLike:
 		if !itemValueExists {
 			return false
 		}
@@ -494,7 +495,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 			}
 		}
 		return false
-	case "between":
+	case globalconst.OpBetween:
 		if !itemValueExists {
 			return false
 		}
@@ -502,7 +503,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 			return compare(itemValue, values[0]) >= 0 && compare(itemValue, values[1]) <= 0
 		}
 		return false
-	case "in":
+	case globalconst.OpIn:
 		if !itemValueExists {
 			return false
 		}
@@ -514,9 +515,9 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 			}
 		}
 		return false
-	case "is null":
+	case globalconst.OpIsNull:
 		return !itemValueExists || itemValue == nil
-	case "is not null":
+	case globalconst.OpIsNotNull:
 		return itemValueExists && itemValue != nil
 	default:
 		slog.Warn("Unsupported filter operator", "operator", op)
@@ -619,7 +620,7 @@ func (h *ConnectionHandler) performAggregations(items []struct {
 			var err error
 
 			switch agg.Func {
-			case "count":
+			case globalconst.AggCount:
 				if agg.Field == "*" {
 					aggValue = len(groupItems)
 				} else {
@@ -631,7 +632,7 @@ func (h *ConnectionHandler) performAggregations(items []struct {
 					}
 					aggValue = count
 				}
-			case "sum", "avg", "min", "max":
+			case globalconst.AggSum, globalconst.AggAvg, globalconst.AggMin, globalconst.AggMax:
 				numbers := []float64{}
 				for _, item := range groupItems {
 					if val, ok := item[agg.Field]; ok {
@@ -647,19 +648,19 @@ func (h *ConnectionHandler) performAggregations(items []struct {
 				}
 
 				switch agg.Func {
-				case "sum":
+				case globalconst.AggSum:
 					sum := 0.0
 					for _, n := range numbers {
 						sum += n
 					}
 					aggValue = sum
-				case "avg":
+				case globalconst.AggAvg:
 					sum := 0.0
 					for _, n := range numbers {
 						sum += n
 					}
 					aggValue = sum / float64(len(numbers))
-				case "min":
+				case globalconst.AggMin:
 					min := numbers[0]
 					for _, n := range numbers {
 						if n < min {
@@ -667,7 +668,7 @@ func (h *ConnectionHandler) performAggregations(items []struct {
 						}
 					}
 					aggValue = min
-				case "max":
+				case globalconst.AggMax:
 					max := numbers[0]
 					for _, n := range numbers {
 						if n > max {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 // PerformRestore performs a full restore from a specific backup directory.
 // WARNING: This is a destructive operation that replaces all in-memory data.
 func PerformRestore(backupName string, mainStore store.DataStore, colManager *store.CollectionManager) error {
-	backupPath := filepath.Join(backupDir, backupName)
+	backupPath := filepath.Join(globalconst.BackupsDirName, backupName)
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		return fmt.Errorf("backup directory '%s' not found", backupName)
 	}
@@ -84,7 +85,7 @@ func restoreCollections(backupPath string, cm *store.CollectionManager) error {
 	slog.Info("Cleared all active in-memory collections before restore.")
 
 	collectionsBackupDir := filepath.Join(backupPath, "collections")
-	files, err := filepath.Glob(filepath.Join(collectionsBackupDir, "*"+collectionFileExtension))
+	files, err := filepath.Glob(filepath.Join(collectionsBackupDir, "*"+globalconst.DBFileExtension))
 	if err != nil {
 		return fmt.Errorf("failed to list collection backup files in '%s': %w", collectionsBackupDir, err)
 	}
@@ -92,7 +93,7 @@ func restoreCollections(backupPath string, cm *store.CollectionManager) error {
 	slog.Info("Found collection files in backup, starting restore...", "count", len(files))
 	for _, filePath := range files {
 		baseName := filepath.Base(filePath)
-		colName := baseName[:len(baseName)-len(collectionFileExtension)]
+		colName := baseName[:len(baseName)-len(globalconst.DBFileExtension)]
 
 		slog.Info("Restoring collection...", "collection", colName, "path", filePath)
 		colStore := cm.GetCollection(colName)

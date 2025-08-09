@@ -14,9 +14,6 @@ import (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-const SystemCollectionName = "_system"
-const UserPrefix = "user:"
-
 // ActivityUpdater is an interface for updating activity timestamps.
 type ActivityUpdater interface {
 	UpdateActivity()

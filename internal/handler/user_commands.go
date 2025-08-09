@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/protocol"
 	"net"
 )
@@ -10,7 +11,7 @@ import (
 // handleUserCreate processes the CmdUserCreate command.
 func (h *ConnectionHandler) handleUserCreate(conn net.Conn) {
 	// Authorization check: Must have write permission on the system collection.
-	if !h.hasPermission(SystemCollectionName, "write") {
+	if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized user creation attempt",
 			"user", h.AuthenticatedUser,
 			"remote_addr", conn.RemoteAddr().String(),
@@ -36,8 +37,8 @@ func (h *ConnectionHandler) handleUserCreate(conn net.Conn) {
 		return
 	}
 
-	sysCol := h.CollectionManager.GetCollection(SystemCollectionName)
-	userKey := UserPrefix + username
+	sysCol := h.CollectionManager.GetCollection(globalconst.SystemCollectionName)
+	userKey := globalconst.UserPrefix + username
 
 	if _, found := sysCol.Get(userKey); found {
 		slog.Warn("User creation failed: user already exists", "username", username, "admin_user", h.AuthenticatedUser)
@@ -67,7 +68,7 @@ func (h *ConnectionHandler) handleUserCreate(conn net.Conn) {
 	}
 
 	sysCol.Set(userKey, userBytes, 0)
-	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
+	h.CollectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, sysCol)
 
 	slog.Info("User created successfully", "admin_user", h.AuthenticatedUser, "new_user", username)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("User '%s' created successfully", username), nil)
@@ -76,7 +77,7 @@ func (h *ConnectionHandler) handleUserCreate(conn net.Conn) {
 // handleUserUpdate processes the CmdUserUpdate command.
 func (h *ConnectionHandler) handleUserUpdate(conn net.Conn) {
 	// Authorization check
-	if !h.hasPermission(SystemCollectionName, "write") {
+	if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized user update attempt",
 			"user", h.AuthenticatedUser,
 			"remote_addr", conn.RemoteAddr().String(),
@@ -98,8 +99,8 @@ func (h *ConnectionHandler) handleUserUpdate(conn net.Conn) {
 		return
 	}
 
-	sysCol := h.CollectionManager.GetCollection(SystemCollectionName)
-	userKey := UserPrefix + username
+	sysCol := h.CollectionManager.GetCollection(globalconst.SystemCollectionName)
+	userKey := globalconst.UserPrefix + username
 
 	userData, found := sysCol.Get(userKey)
 	if !found {
@@ -122,7 +123,7 @@ func (h *ConnectionHandler) handleUserUpdate(conn net.Conn) {
 	userBytes, _ := json.Marshal(userInfo)
 
 	sysCol.Set(userKey, userBytes, 0)
-	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
+	h.CollectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, sysCol)
 
 	slog.Info("User permissions updated successfully", "admin_user", h.AuthenticatedUser, "target_user", username)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("Permissions for user '%s' updated successfully", username), nil)
@@ -131,7 +132,7 @@ func (h *ConnectionHandler) handleUserUpdate(conn net.Conn) {
 // handleUserDelete processes the CmdUserDelete command.
 func (h *ConnectionHandler) handleUserDelete(conn net.Conn) {
 	// Authorization check
-	if !h.hasPermission(SystemCollectionName, "write") {
+	if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized user delete attempt",
 			"user", h.AuthenticatedUser,
 			"remote_addr", conn.RemoteAddr().String(),
@@ -147,8 +148,8 @@ func (h *ConnectionHandler) handleUserDelete(conn net.Conn) {
 		return
 	}
 
-	sysCol := h.CollectionManager.GetCollection(SystemCollectionName)
-	userKey := UserPrefix + username
+	sysCol := h.CollectionManager.GetCollection(globalconst.SystemCollectionName)
+	userKey := globalconst.UserPrefix + username
 
 	userData, found := sysCol.Get(userKey)
 	if !found {
@@ -167,7 +168,7 @@ func (h *ConnectionHandler) handleUserDelete(conn net.Conn) {
 	}
 
 	sysCol.Delete(userKey)
-	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
+	h.CollectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, sysCol)
 
 	slog.Info("User deleted successfully", "admin_user", h.AuthenticatedUser, "deleted_user", username)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("User '%s' deleted successfully", username), nil)

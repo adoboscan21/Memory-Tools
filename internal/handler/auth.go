@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/protocol"
 	"net"
 
@@ -30,7 +31,7 @@ func (h *ConnectionHandler) hasPermission(collectionName string, requiredLevel s
 	}
 
 	// "write" permission implies "read" permission.
-	if requiredLevel == "read" && level == "write" {
+	if requiredLevel == globalconst.PermissionRead && level == globalconst.PermissionWrite {
 		return true
 	}
 
@@ -52,8 +53,8 @@ func (h *ConnectionHandler) handleAuthenticate(conn net.Conn) {
 		return
 	}
 
-	sysCol := h.CollectionManager.GetCollection(SystemCollectionName)
-	userKey := UserPrefix + username
+	sysCol := h.CollectionManager.GetCollection(globalconst.SystemCollectionName)
+	userKey := globalconst.UserPrefix + username
 
 	userDataBytes, found := sysCol.Get(userKey)
 	if !found {
@@ -116,8 +117,8 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 		return
 	}
 
-	sysCol := h.CollectionManager.GetCollection(SystemCollectionName)
-	targetUserKey := UserPrefix + targetUsername
+	sysCol := h.CollectionManager.GetCollection(globalconst.SystemCollectionName)
+	targetUserKey := globalconst.UserPrefix + targetUsername
 
 	userDataBytes, found := sysCol.Get(targetUserKey)
 	if !found {
@@ -149,7 +150,7 @@ func (h *ConnectionHandler) handleChangeUserPassword(conn net.Conn) {
 	}
 
 	sysCol.Set(targetUserKey, updatedUserInfoBytes, 0)
-	h.CollectionManager.EnqueueSaveTask(SystemCollectionName, sysCol)
+	h.CollectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, sysCol)
 
 	slog.Info("User password changed successfully", "admin_user", h.AuthenticatedUser, "target_user", targetUsername)
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Password for user '%s' updated successfully.", targetUsername), nil)

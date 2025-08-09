@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/store"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
-)
-
-var (
-	backupDir = "backups"
 )
 
 // BackupManager handles backup operations
@@ -42,8 +39,8 @@ func NewBackupManager(mainStore store.DataStore, colManager *store.CollectionMan
 
 // Start initiates the periodic backup service
 func (bm *BackupManager) Start() {
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		slog.Error("Failed to create backup directory", "path", backupDir, "error", err)
+	if err := os.MkdirAll(globalconst.BackupsDirName, 0755); err != nil {
+		slog.Error("Failed to create backup directory", "path", globalconst.BackupsDirName, "error", err)
 		return
 	}
 	slog.Info("Backup manager starting...", "interval", bm.backupInterval.String(), "retention", bm.backupRetention.String())
@@ -97,7 +94,7 @@ func (bm *BackupManager) PerformBackup() error {
 	defer func() { bm.backupRunning = false }()
 
 	backupTime := time.Now().Format("2006-01-02_15-04-05")
-	backupPath := filepath.Join(backupDir, backupTime)
+	backupPath := filepath.Join(globalconst.BackupsDirName, backupTime)
 	slog.Info("Starting new backup", "path", backupPath)
 
 	if err := os.Mkdir(backupPath, 0755); err != nil {
@@ -274,7 +271,7 @@ func (bm *BackupManager) verifyBackup(backupPath string) error {
 // cleanOldBackups removes backups older than the retention period
 func (bm *BackupManager) cleanOldBackups() {
 	cutoffTime := time.Now().Add(-bm.backupRetention)
-	entries, err := os.ReadDir(backupDir)
+	entries, err := os.ReadDir(globalconst.BackupsDirName)
 	if err != nil {
 		slog.Error("Failed to read backup directory for cleanup", "error", err)
 		return
@@ -290,7 +287,7 @@ func (bm *BackupManager) cleanOldBackups() {
 			continue
 		}
 		if info.ModTime().Before(cutoffTime) {
-			path := filepath.Join(backupDir, entry.Name())
+			path := filepath.Join(globalconst.BackupsDirName, entry.Name())
 			if err := os.RemoveAll(path); err != nil {
 				slog.Error("Failed to delete old backup", "path", path, "error", err)
 			} else {

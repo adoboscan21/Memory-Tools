@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,7 +19,7 @@ import (
 // It iterates through the existing file and uses the updateFunc to decide
 // what to do with each item (keep, modify, or skip).
 func rewriteCollectionFile(collectionName string, updateFunc func(key string, data []byte) ([]byte, error)) error {
-	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
 	tempFilePath := filePath + ".tmp"
 
 	// Open the original file for reading.
@@ -148,12 +149,12 @@ func UpdateColdItem(collectionName, key string, patchValue []byte) (bool, error)
 		}
 
 		for k, v := range patchData {
-			if k == "_id" || k == "created_at" {
+			if k == globalconst.ID || k == globalconst.CREATED_AT {
 				continue
 			}
 			existingData[k] = v
 		}
-		existingData["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		existingData[globalconst.UPDATED_AT] = time.Now().UTC().Format(time.RFC3339)
 
 		return jsoniter.Marshal(existingData)
 	})
@@ -175,8 +176,8 @@ func DeleteColdItem(collectionName, key string) (bool, error) {
 			return nil, fmt.Errorf("could not unmarshal cold data for deletion: %w", err)
 		}
 
-		doc["_deleted"] = true // Add the tombstone flag.
-		doc["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		doc[globalconst.DELETED_FLAG] = true // Add the tombstone flag.
+		doc[globalconst.UPDATED_AT] = time.Now().UTC().Format(time.RFC3339)
 
 		return jsoniter.Marshal(doc)
 	})
@@ -193,7 +194,7 @@ func CompactCollectionFile(collectionName string) error {
 			return data, nil // Keep malformed data just in case.
 		}
 
-		if deleted, ok := doc["_deleted"].(bool); ok && deleted {
+		if deleted, ok := doc[globalconst.DELETED_FLAG].(bool); ok && deleted {
 			return nil, nil // Return nil to skip/delete this record permanently.
 		}
 
@@ -238,12 +239,12 @@ func UpdateManyColdItems(collectionName string, payloads []ColdUpdatePayload) (i
 			}
 
 			for k, v := range patchData {
-				if k == "_id" || k == "created_at" {
+				if k == globalconst.ID || k == globalconst.CREATED_AT {
 					continue
 				}
 				existingData[k] = v
 			}
-			existingData["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			existingData[globalconst.UPDATED_AT] = time.Now().UTC().Format(time.RFC3339)
 
 			return jsoniter.Marshal(existingData)
 		}
@@ -274,8 +275,8 @@ func DeleteManyColdItems(collectionName string, keys []string) (int, error) {
 				return nil, fmt.Errorf("could not unmarshal cold data for batch deletion: %w", err)
 			}
 
-			doc["_deleted"] = true // Add the tombstone flag.
-			doc["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+			doc[globalconst.DELETED_FLAG] = true // Add the tombstone flag.
+			doc[globalconst.UPDATED_AT] = time.Now().UTC().Format(time.RFC3339)
 
 			return jsoniter.Marshal(doc)
 		}

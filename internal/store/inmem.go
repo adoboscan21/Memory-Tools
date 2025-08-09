@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"maps"
+	"memory-tools/internal/globalconst"
 	"strconv"
 	"sync"
 	"time"
@@ -1030,7 +1031,7 @@ func (s *InMemStore) EvictColdData(collectionName string, threshold time.Time) {
 				continue
 			}
 
-			createdAtStr, ok := doc["created_at"].(string)
+			createdAtStr, ok := doc[globalconst.CREATED_AT].(string)
 			if !ok {
 				continue
 			}

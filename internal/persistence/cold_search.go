@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"os"
 	"path/filepath"
 )
@@ -21,7 +22,7 @@ type MatcherFunc func(item map[string]any) bool
 // SearchColdData searches a collection's persistence file for items that match a filter.
 // It now correctly skips items marked with a tombstone.
 func SearchColdData(collectionName string, matcher MatcherFunc) ([]map[string]any, error) {
-	filePath := filepath.Join(collectionsDir, collectionName+collectionFileExtension)
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -89,9 +90,8 @@ func SearchColdData(collectionName string, matcher MatcherFunc) ([]map[string]an
 			continue // If it's not valid JSON, we can't filter it.
 		}
 
-		// --- MODIFICACIÓN CLAVE ---
 		// Check for the tombstone flag. If present and true, skip this record.
-		if deleted, ok := doc["_deleted"].(bool); ok && deleted {
+		if deleted, ok := doc[globalconst.DELETED_FLAG].(bool); ok && deleted {
 			continue
 		}
 

@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"memory-tools/internal/globalconst"
 	"memory-tools/internal/protocol"
 	"net"
 )
@@ -20,7 +21,7 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection create attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -46,7 +47,7 @@ func (h *ConnectionHandler) handleCollectionDelete(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized collection delete attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -71,7 +72,7 @@ func (h *ConnectionHandler) handleCollectionList(conn net.Conn) {
 	accessibleCollections := []string{}
 
 	for _, name := range allCollectionNames {
-		if h.hasPermission(name, "read") {
+		if h.hasPermission(name, globalconst.PermissionRead) {
 			accessibleCollections = append(accessibleCollections, name)
 		}
 	}
@@ -102,7 +103,7 @@ func (h *ConnectionHandler) handleCollectionIndexCreate(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized index create attempt", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -136,7 +137,7 @@ func (h *ConnectionHandler) handleCollectionIndexDelete(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "write") {
+	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
 		slog.Warn("Unauthorized index delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
@@ -170,7 +171,7 @@ func (h *ConnectionHandler) handleCollectionIndexList(conn net.Conn) {
 		return
 	}
 
-	if !h.hasPermission(collectionName, "read") {
+	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized index list attempt", "user", h.AuthenticatedUser, "collection", collectionName)
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have read permission for collection '%s'", collectionName), nil)
 		return

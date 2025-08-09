@@ -12,13 +12,13 @@ To start the client, you must provide the address of the `memory-tools-server`. 
 
 ```bash
 ./bin/memory-tools-client
-./bin/memory-tools-client -u admin -p adminpass -addr localhost:5876
+./bin/memory-tools-client -u admin -p adminpass localhost:5876
 ```
 
 **Docker 🐳:**
 
 ```bash
-docker exec -it <container_id> ./memory-tools-client -u root -p rootpass localhost:5876
+sudo docker exec -it <containerId> memory-tools-client -u root -p rootpass localhost:5876
 ```
 
 Once connected, you will see the message: `Connected securely to Memory Tools server at <address>.`

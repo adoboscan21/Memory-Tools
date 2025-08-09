@@ -59,7 +59,7 @@ func (c *cli) run(user, pass *string) error {
 
 	// Automatic authentication if flags are provided
 	if *user != "" && *pass != "" {
-		fmt.Println(colorInfo("Attempting automatic login for user '%s'...", *user))
+		fmt.Println(colorInfo("Attempting automatic login for user ", *user))
 		if err := c.handleLogin(fmt.Sprintf("%s %s", *user, *pass)); err != nil {
 			fmt.Println(colorErr("Automatic login failed. Please login manually."))
 			os.Exit(1)

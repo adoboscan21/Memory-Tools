@@ -23,10 +23,10 @@ func main() {
 	}
 
 	// TLS Connection Configuration
-	fmt.Println(colorInfo("Connecting to Memory Tools server at", addr))
+	fmt.Println(colorInfo("Connecting to Memory Tools server at ", addr))
 	caCert, err := os.ReadFile("certificates/server.crt")
 	if err != nil {
-		log.Fatal(colorErr("Failed to read server certificate 'certificates/server.crt': %v", err))
+		log.Fatal(colorErr("Failed to read server certificate 'certificates/server.crt': ", err))
 	}
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(caCert)

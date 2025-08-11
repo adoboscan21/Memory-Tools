@@ -37,7 +37,7 @@ FROM alpine:latest
 WORKDIR /data
 
 # Create necessary directories. The WORKDIR will also be the data directory.
-RUN mkdir -p certificates collections
+RUN mkdir -p certificates collections json
 
 # Copy the binaries to a standard location in the PATH.
 COPY --from=builder /app/memory-tools-server /usr/local/bin/

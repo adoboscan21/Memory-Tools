@@ -17,7 +17,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 )
 
-// getCommands define todos los comandos disponibles, su ayuda, manejador y categoría.
+// getCommands defines all available commands, their help, handler, and category.
 func (c *cli) getCommands() map[string]command {
 	return map[string]command{
 		// Authentication
@@ -27,8 +27,8 @@ func (c *cli) getCommands() map[string]command {
 		"clear": {help: "clear - Clears the screen", handler: (*cli).handleClear, category: "Authentication"},
 
 		// User Management
-		"user create":     {help: "user create <user> <pass> <perms_json|-|file:path> - Create a new user", handler: (*cli).handleUserCreate, category: "User Management"},
-		"user update":     {help: "user update <user> <perms_json|-|file:path> - Update a user's permissions", handler: (*cli).handleUserUpdate, category: "User Management"},
+		"user create":     {help: "user create <user> <pass> <perms_json|path> - Create a new user", handler: (*cli).handleUserCreate, category: "User Management"},
+		"user update":     {help: "user update <user> <perms_json|path> - Update a user's permissions", handler: (*cli).handleUserUpdate, category: "User Management"},
 		"user delete":     {help: "user delete <username> - Delete a user", handler: (*cli).handleUserDelete, category: "User Management"},
 		"update password": {help: "update password <user> <new_pass> - Change a user's password", handler: (*cli).handleChangePassword, category: "User Management"},
 
@@ -49,17 +49,17 @@ func (c *cli) getCommands() map[string]command {
 		"collection index list":   {help: "collection index list <coll> - Lists indexes on a collection", handler: (*cli).handleIndexList, category: "Index Management"},
 
 		// Item Operations
-		"collection item set":         {help: "collection item set <coll> [<key>] <value_json|-|file:path> [ttl] - Sets an item", handler: (*cli).handleItemSet, category: "Item Operations"},
+		"collection item set":         {help: "collection item set <coll> [<key>] <value_json|path> [ttl] - Sets an item", handler: (*cli).handleItemSet, category: "Item Operations"},
 		"collection item get":         {help: "collection item get <coll> <key> - Gets an item from a collection", handler: (*cli).handleItemGet, category: "Item Operations"},
 		"collection item delete":      {help: "collection item delete <coll> <key> - Deletes an item from a collection", handler: (*cli).handleItemDelete, category: "Item Operations"},
-		"collection item update":      {help: "collection item update <coll> <key> <patch_json|-|file:path> - Updates an item", handler: (*cli).handleItemUpdate, category: "Item Operations"},
+		"collection item update":      {help: "collection item update <coll> <key> <patch_json|path> - Updates an item", handler: (*cli).handleItemUpdate, category: "Item Operations"},
 		"collection item list":        {help: "collection item list <coll> - Lists all items in a collection (root only)", handler: (*cli).handleItemList, category: "Item Operations"},
-		"collection item set many":    {help: "collection item set many <coll> <json_array|-|file:path> - Sets multiple items", handler: (*cli).handleItemSetMany, category: "Item Operations"},
-		"collection item update many": {help: "collection item update many <coll> <patch_json_array|-|file:path> - Updates multiple items", handler: (*cli).handleItemUpdateMany, category: "Item Operations"},
-		"collection item delete many": {help: "collection item delete many <coll> <keys_json_array|-|file:path> - Deletes multiple items", handler: (*cli).handleItemDeleteMany, category: "Item Operations"},
+		"collection item set many":    {help: "collection item set many <coll> <json_array|path> - Sets multiple items", handler: (*cli).handleItemSetMany, category: "Item Operations"},
+		"collection item update many": {help: "collection item update many <coll> <patch_json_array|path> - Updates multiple items", handler: (*cli).handleItemUpdateMany, category: "Item Operations"},
+		"collection item delete many": {help: "collection item delete many <coll> <keys_json_array|path> - Deletes multiple items", handler: (*cli).handleItemDeleteMany, category: "Item Operations"},
 
 		// Query
-		"collection query": {help: "collection query <coll> <query_json|-|file:path> - Performs a complex query", handler: (*cli).handleQuery, category: "Query"},
+		"collection query": {help: "collection query <coll> <query_json|path> - Performs a complex query", handler: (*cli).handleQuery, category: "Query"},
 	}
 }
 
@@ -107,7 +107,6 @@ func (c *cli) handleHelp(args string) error {
 	fmt.Println(colorInfo("\nMemory Tools CLI Help"))
 	fmt.Println("---------------------")
 	fmt.Println("All commands require their full name. The collection must be specified as the first argument where required.")
-	fmt.Println("JSON arguments can be provided directly, via '-' (editor), or 'file:/path/to/file.json'.")
 	fmt.Println("---------------------")
 
 	categories := make(map[string][]string)
@@ -159,7 +158,7 @@ func (c *cli) handleClear(args string) error {
 func (c *cli) handleUserCreate(args string) error {
 	parts := strings.SplitN(args, " ", 3)
 	if len(parts) < 3 {
-		return errors.New("usage: user create <username> <password> <permissions_json|-|file:path>")
+		return errors.New("usage: user create <username> <password> <permissions_json|path>")
 	}
 	username, password, jsonArg := parts[0], parts[1], parts[2]
 
@@ -180,7 +179,7 @@ func (c *cli) handleUserCreate(args string) error {
 func (c *cli) handleUserUpdate(args string) error {
 	parts := strings.SplitN(args, " ", 2)
 	if len(parts) < 2 {
-		return errors.New("usage: user update <username> <permissions_json|-|file:path>")
+		return errors.New("usage: user update <username> <permissions_json|path>")
 	}
 	username, jsonArg := parts[0], parts[1]
 
@@ -352,14 +351,14 @@ func (c *cli) handleItemSet(args string) error {
 	parts := strings.SplitN(remainingArgs, " ", 2)
 	key, jsonArg := "", ""
 	if len(parts) == 0 || parts[0] == "" {
-		return errors.New("usage: collection item set <coll> [<key>] <value_json|-|file:path> [ttl]")
+		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl]")
 	}
 
 	if len(parts) == 1 {
 		key = uuid.New().String()
 		jsonArg = parts[0]
 	} else {
-		if strings.HasPrefix(parts[1], "{") || strings.HasPrefix(parts[1], "[") || parts[1] == "-" || strings.HasPrefix(parts[1], "file:") {
+		if strings.HasPrefix(parts[1], "{") || strings.HasPrefix(parts[1], "[") {
 			key = parts[0]
 			jsonArg = parts[1]
 		} else {
@@ -434,7 +433,7 @@ func (c *cli) handleItemUpdate(args string) error {
 	}
 	parts := strings.SplitN(remainingArgs, " ", 2)
 	if len(parts) != 2 {
-		return errors.New("usage: collection item update <coll> <key> <patch_json|-|file:path>")
+		return errors.New("usage: collection item update <coll> <key> <patch_json|path>")
 	}
 	key, jsonArg := parts[0], parts[1]
 
@@ -455,7 +454,7 @@ func (c *cli) handleQuery(args string) error {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection query <coll> <query_json|-|file:path>")
+		return errors.New("usage: collection query <coll> <query_json|path>")
 	}
 
 	var jsonPayload []byte
@@ -480,7 +479,7 @@ func (c *cli) handleItemSetMany(args string) error {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item set many <coll> <json_array|-|file:path>")
+		return errors.New("usage: collection item set many <coll> <json_array|path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)
@@ -500,7 +499,7 @@ func (c *cli) handleItemUpdateMany(args string) error {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item update many <coll> <patch_json_array|-|file:path>")
+		return errors.New("usage: collection item update many <coll> <patch_json_array|path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)
@@ -520,7 +519,7 @@ func (c *cli) handleItemDeleteMany(args string) error {
 		return err
 	}
 	if remainingArgs == "" {
-		return errors.New("usage: collection item delete many <coll> <keys_json_array|-|file:path>")
+		return errors.New("usage: collection item delete many <coll> <keys_json_array|path>")
 	}
 
 	jsonPayload, err := c.getJSONPayload(remainingArgs)

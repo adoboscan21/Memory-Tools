@@ -55,6 +55,12 @@ func main() {
 		log.Fatalf("failed to create log directory: %v", err)
 	}
 
+	// --- Json Scripts ---
+	// Create the logs directory if it doesn't exist.
+	if err := os.MkdirAll("json", 0755); err != nil {
+		log.Fatalf("failed to create json directory: %v", err)
+	}
+
 	// Now, open the log file within that directory.
 	logFile, err := os.OpenFile("logs/memory-tools.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {

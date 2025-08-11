@@ -16,17 +16,15 @@ import (
 	"github.com/chzyer/readline"
 )
 
-// --- MODIFICADO ---
-// La struct de comando ahora incluye una categoría para la ayuda dinámica.
+// The command struct now includes a category for dynamic help.
 type command struct {
 	help     string
 	handler  func(c *cli, args string) error
 	category string
 }
 
-// --- MODIFICADO ---
-// El struct cli ya no contiene 'currentCollection'.
-// Se añade 'multiWordCommands' para el parseo dinámico.
+// The cli struct no longer contains 'currentCollection'.
+// 'multiWordCommands' is added for dynamic parsing.
 type cli struct {
 	conn              net.Conn
 	rl                *readline.Instance
@@ -34,26 +32,25 @@ type cli struct {
 	isAuthenticated   bool
 	currentUser       string
 	commands          map[string]command
-	multiWordCommands []string // Lista generada dinámicamente
+	multiWordCommands []string // Dynamically generated list
 	connMutex         sync.Mutex
 }
 
-// --- MODIFICADO ---
-// newCLI ahora genera la lista de comandos de varias palabras dinámicamente.
+// newCLI now dynamically generates the list of multi-word commands.
 func newCLI(conn net.Conn) *cli {
 	c := &cli{
 		conn: conn,
 	}
 	c.commands = c.getCommands()
 
-	// Generar dinámicamente la lista de comandos de varias palabras
+	// Dynamically generate the list of multi-word commands
 	var mwCmds []string
 	for cmd := range c.commands {
 		if strings.Contains(cmd, " ") {
 			mwCmds = append(mwCmds, cmd)
 		}
 	}
-	// Ordenar de más largo a más corto para un matching correcto
+	// Sort from longest to shortest for correct matching
 	sort.Slice(mwCmds, func(i, j int) bool {
 		return len(mwCmds[i]) > len(mwCmds[j])
 	})
@@ -93,8 +90,7 @@ func (c *cli) run(user, pass *string) error {
 	return c.mainLoop()
 }
 
-// --- MODIFICADO ---
-// El bucle principal es ahora mucho más simple. No hay alias ni lógica contextual.
+// The main loop is now much simpler. No aliases or contextual logic.
 func (c *cli) mainLoop() error {
 	for {
 		var prompt string
@@ -123,18 +119,13 @@ func (c *cli) mainLoop() error {
 			continue
 		}
 
-		// Se llama al nuevo método 'getCommandAndRawArgs' que está en el struct
 		cmd, args := c.getCommandAndRawArgs(input)
-
-		// --- ELIMINADO ---
-		// Toda la lógica de alias contextuales y de 'currentCollection' ha sido eliminada.
 
 		handler, found := c.commands[cmd]
 
 		if !found {
-			// --- CORREGIDO ---
-			// Bug de Printf corregido para mostrar el comando desconocido correctamente.
-			fmt.Println(colorErr("Error: Unknown command '%s'. Type 'help' for commands.", cmd))
+
+			fmt.Println(colorErr("Error: Unknown command. Type 'help' for commands: ", cmd))
 			continue
 		}
 

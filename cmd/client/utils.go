@@ -12,11 +12,11 @@ import (
 	"memory-tools/internal/protocol"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 
-	"github.com/chzyer/readline"
 	"github.com/fatih/color"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/olekukonko/tablewriter"
@@ -82,51 +82,10 @@ func getStatusString(s protocol.ResponseStatus) string {
 	}
 }
 
-func (c *cli) getJSONFromEditor() ([]byte, error) {
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		if runtime.GOOS == "windows" {
-			editor = "notepad"
-		} else {
-			editor = "vim"
-		}
-	}
-
-	tmpfile, err := os.CreateTemp("", "memory-tools-*.json")
-	if err != nil {
-		return nil, fmt.Errorf("could not create temp file: %w", err)
-	}
-	defer os.Remove(tmpfile.Name())
-
-	c.rl.Close()
-	fmt.Println(colorInfo("Opening editor (%s) for JSON input. Save and close the file to continue...", editor))
-
-	cmd := exec.Command(editor, tmpfile.Name())
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	runErr := cmd.Run()
-
-	c.rl, err = readline.NewEx(c.rlConfig)
-	if err != nil {
-		return nil, fmt.Errorf("fatal: could not re-initialize readline: %w", err)
-	}
-
-	if runErr != nil {
-		return nil, fmt.Errorf("error running editor: %w", runErr)
-	}
-
-	return os.ReadFile(tmpfile.Name())
-}
-
 // getJSONPayload is the method the compiler was missing.
 func (c *cli) getJSONPayload(payload string) ([]byte, error) {
-	if payload == "-" {
-		return c.getJSONFromEditor()
-	}
-	if strings.HasPrefix(payload, "file:") {
-		filePath := strings.TrimPrefix(payload, "file:")
+	if strings.HasSuffix(payload, ".json") {
+		filePath := filepath.Join("json", payload)
 		return os.ReadFile(filePath)
 	}
 	return []byte(payload), nil

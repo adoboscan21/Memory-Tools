@@ -12,10 +12,7 @@ import (
 	"github.com/chzyer/readline"
 )
 
-// --- MODIFICADO ---
-// getCompleter ahora es mucho más simple.
 func (c *cli) getCompleter() readline.AutoCompleter {
-	// Si no está autenticado, devuelve el completador básico.
 	if !c.isAuthenticated {
 		return readline.NewPrefixCompleter(
 			readline.PcItem("login"),
@@ -25,11 +22,6 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 		)
 	}
 
-	// --- ELIMINADO ---
-	// La lógica del completador contextual para 'currentCollection' ha sido eliminada.
-
-	// Completador por defecto cuando está autenticado.
-	// Ahora contiene todos los comandos disponibles.
 	return readline.NewPrefixCompleter(
 		readline.PcItem("user",
 			readline.PcItem("create"),
@@ -56,11 +48,11 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 				readline.PcItem("delete", readline.PcItemDynamic(c.fetchCollectionNames)),
 				readline.PcItem("update", readline.PcItemDynamic(c.fetchCollectionNames)),
 				readline.PcItem("list", readline.PcItemDynamic(c.fetchCollectionNames)),
-				readline.PcItem("set many", readline.PcItemDynamic(c.fetchCollectionNames)),
-				readline.PcItem("delete many", readline.PcItemDynamic(c.fetchCollectionNames)),
-				readline.PcItem("update many", readline.PcItemDynamic(c.fetchCollectionNames)),
+				readline.PcItem("set many", readline.PcItemDynamic(c.fetchCollectionNames, readline.PcItemDynamic(c.fetchJSONFileNames))),
+				readline.PcItem("delete many", readline.PcItemDynamic(c.fetchCollectionNames, readline.PcItemDynamic(c.fetchJSONFileNames))),
+				readline.PcItem("update many", readline.PcItemDynamic(c.fetchCollectionNames, readline.PcItemDynamic(c.fetchJSONFileNames))),
 			),
-			readline.PcItem("query", readline.PcItemDynamic(c.fetchCollectionNames)),
+			readline.PcItem("query", readline.PcItemDynamic(c.fetchCollectionNames, readline.PcItemDynamic(c.fetchJSONFileNames))),
 		),
 		readline.PcItem("clear"),
 		readline.PcItem("help"),
@@ -68,9 +60,8 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 	)
 }
 
-// La función fetchCollectionNames no necesita cambios en su lógica interna.
+// The fetchCollectionNames function needs no changes to its internal logic.
 func (c *cli) fetchCollectionNames(line string) []string {
-	// ... (sin cambios)
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
@@ -122,4 +113,22 @@ func (c *cli) fetchCollectionNames(line string) []string {
 	}
 	fmt.Fprintln(os.Stderr, colorErr("Warning: Could not fetch collection names for autocompletion after %d attempts.", maxRetries))
 	return nil
+}
+
+func (c *cli) fetchJSONFileNames(line string) []string {
+	const jsonDir = "json"
+	files, err := os.ReadDir(jsonDir)
+
+	if err != nil {
+
+		return nil
+	}
+
+	var suggestions []string
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".json") {
+			suggestions = append(suggestions, file.Name())
+		}
+	}
+	return suggestions
 }

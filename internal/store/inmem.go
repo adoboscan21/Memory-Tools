@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"maps"
@@ -420,8 +421,10 @@ type Item struct {
 
 // Shard represents a segment of the in-memory store.
 type Shard struct {
-	data map[string]Item
-	mu   sync.RWMutex
+	data          map[string]Item
+	mu            sync.RWMutex
+	keyLocks      map[string]string
+	pendingWrites map[string]map[string]Item
 }
 
 // --- UPDATED: DataStore Interface ---
@@ -461,7 +464,9 @@ func NewInMemStoreWithShards(numShards int) *InMemStore {
 	}
 	for i := range numShards {
 		s.shards[i] = &Shard{
-			data: make(map[string]Item),
+			data:          make(map[string]Item),
+			keyLocks:      make(map[string]string),
+			pendingWrites: make(map[string]map[string]Item),
 		}
 	}
 	slog.Info("InMemStore initialized", "num_shards", numShards)
@@ -1079,4 +1084,116 @@ func (cm *CollectionManager) GetFileLock(collectionName string) *sync.Mutex {
 	newLock := &sync.Mutex{}
 	cm.fileLocks[collectionName] = newLock
 	return newLock
+}
+
+// lockKeys intenta adquirir un bloqueo para un conjunto de claves dentro de este shard.
+func (s *Shard) lockKeys(txID string, keys []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, key := range keys {
+		if ownerTxID, isLocked := s.keyLocks[key]; isLocked && ownerTxID != txID {
+			return fmt.Errorf("key '%s' is already locked by transaction '%s'", key, ownerTxID)
+		}
+	}
+
+	for _, key := range keys {
+		s.keyLocks[key] = txID
+	}
+
+	return nil
+}
+
+// prepareWrite almacena los cambios en el área de "pendingWrites".
+func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if owner, ok := s.keyLocks[op.Key]; !ok || owner != txID {
+		return fmt.Errorf("cannot prepare write for key '%s': not locked by transaction '%s'", op.Key, txID)
+	}
+
+	// CORRECCIÓN: Crear el mapa interno para la transacción si es la primera operación.
+	if _, exists := s.pendingWrites[txID]; !exists {
+		s.pendingWrites[txID] = make(map[string]Item)
+	}
+
+	var pendingItem Item
+	if op.IsDelete {
+		pendingItem = Item{Value: nil} // nil marca una eliminación.
+	} else {
+		createdAt := time.Now()
+		if existingItem, exists := s.data[op.Key]; exists {
+			createdAt = existingItem.CreatedAt
+		}
+		pendingItem = Item{
+			Value:     op.Value,
+			CreatedAt: createdAt,
+			TTL:       0,
+		}
+	}
+
+	// Ahora asignamos el Item al mapa interno de la transacción.
+	s.pendingWrites[txID][op.Key] = pendingItem
+	return nil
+}
+
+// commitAppliedChanges aplica los cambios de pendingWrites al data store principal.
+func (s *Shard) commitAppliedChanges(txID string, indexManager *IndexManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pendingOps, ok := s.pendingWrites[txID]
+	if !ok {
+		for key, owner := range s.keyLocks {
+			if owner == txID {
+				delete(s.keyLocks, key)
+			}
+		}
+		return
+	}
+
+	for key, newItem := range pendingOps {
+		var oldDataForIndex map[string]any
+		// Versión corregida y más limpia:
+		if oldItem, exists := s.data[key]; exists && oldItem.Value != nil {
+			oldDataForIndex = tryUnmarshal(oldItem.Value)
+		}
+
+		if newItem.Value == nil { // DELETE
+			delete(s.data, key)
+			if oldDataForIndex != nil {
+				indexManager.Remove(key, oldDataForIndex)
+			}
+		} else { // SET/UPDATE
+			s.data[key] = newItem
+			newDataForIndex := tryUnmarshal(newItem.Value)
+			indexManager.Update(key, oldDataForIndex, newDataForIndex)
+		}
+
+		delete(s.keyLocks, key)
+	}
+
+	delete(s.pendingWrites, txID)
+}
+
+// rollbackChanges descarta los cambios pendientes y libera los bloqueos.
+func (s *Shard) rollbackChanges(txID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// CORRECCIÓN: 'pendingOps' ahora es correctamente un 'map[string]Item'.
+	if pendingOps, ok := s.pendingWrites[txID]; ok {
+		// CORRECCIÓN: El 'range' ahora funciona.
+		for key := range pendingOps {
+			delete(s.keyLocks, key)
+		}
+		delete(s.pendingWrites, txID)
+	} else {
+		for key, owner := range s.keyLocks {
+			if owner == txID {
+				delete(s.keyLocks, key)
+			}
+		}
+	}
 }

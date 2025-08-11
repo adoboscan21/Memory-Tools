@@ -17,7 +17,9 @@ import (
 	jsoniter "github.com/json-iterator/go"
 )
 
-// handleCollectionQuery processes the CmdCollectionQuery command.
+// ./internal/handler/query_commands.go
+
+// handleCollectionQuery processes the CmdCollectionQuery command, now using a pool for Query structs.
 func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 	collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
 	if err != nil {
@@ -46,8 +48,25 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 		return
 	}
 
-	var query Query
-	if err := json.Unmarshal(queryJSONBytes, &query); err != nil {
+	// =========================================================================
+	// INICIO DE LOS CAMBIOS (sync.Pool)
+	// =========================================================================
+
+	// 1. Obtener un objeto Query del pool en lugar de crear uno nuevo.
+	query := queryPool.Get().(*Query)
+
+	// 2. Usar 'defer' para garantizar que el objeto se limpie y se devuelva al pool
+	//    sin importar cómo salga de la función (éxito o error).
+	defer func() {
+		query.Reset()
+		queryPool.Put(query)
+	}()
+
+	// =========================================================================
+	// FIN DE LOS CAMBIOS (sync.Pool)
+	// =========================================================================
+
+	if err := json.Unmarshal(queryJSONBytes, query); err != nil {
 		slog.Warn("Failed to unmarshal query JSON",
 			"user", h.AuthenticatedUser,
 			"collection", collectionName,
@@ -58,6 +77,9 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 	}
 
 	slog.Debug("Processing collection query", "user", h.AuthenticatedUser, "collection", collectionName, "query", string(queryJSONBytes))
+
+	// 3. Pasar el puntero a la función para evitar copiar la estructura.
+	//    (Asegúrate de que la firma de processCollectionQuery ahora sea `*Query`)
 	results, err := h.processCollectionQuery(collectionName, query)
 	if err != nil {
 		slog.Error("Error processing collection query",
@@ -86,7 +108,7 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 }
 
 // processCollectionQuery executes a complex query on a collection.
-func (h *ConnectionHandler) processCollectionQuery(collectionName string, query Query) (any, error) {
+func (h *ConnectionHandler) processCollectionQuery(collectionName string, query *Query) (any, error) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 
 	// --- HOT SEARCH (IN RAM) ---
@@ -230,14 +252,13 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 					},
 				}
 
-				joinedData, err := h.processCollectionQuery(lookupSpec.FromCollection, joinQuery)
+				// <-- CAMBIO AQUÍ: Se pasa la dirección de memoria con '&'
+				joinedData, err := h.processCollectionQuery(lookupSpec.FromCollection, &joinQuery)
 				if err != nil {
 					slog.Warn("Lookup sub-query failed", "error", err, "from", lookupSpec.FromCollection)
 					doc[lookupSpec.As] = nil
 				} else {
-					// CRITICAL FIX: Correctly assert the specific slice type.
 					if joinedSlice, isSlice := joinedData.([]map[string]any); isSlice && len(joinedSlice) == 1 {
-						// Unwrap single-item slice for easier chaining.
 						doc[lookupSpec.As] = joinedSlice[0]
 					} else {
 						doc[lookupSpec.As] = joinedData
@@ -256,7 +277,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		for _, fullDoc := range paginatedResults {
 			projectedDoc := make(map[string]any)
 			for _, fieldPath := range query.Projection {
-				// Use helpers to handle nested data access.
 				if value, ok := getNestedValue(fullDoc, fieldPath); ok {
 					setNestedValue(projectedDoc, fieldPath, value)
 				}
@@ -576,7 +596,7 @@ func toFloat64(val any) (float64, bool) {
 func (h *ConnectionHandler) performAggregations(items []struct {
 	Key string
 	Val map[string]any
-}, query Query) (any, error) {
+}, query *Query) (any, error) {
 	groupedData := make(map[string][]map[string]any)
 
 	if len(query.GroupBy) == 0 {

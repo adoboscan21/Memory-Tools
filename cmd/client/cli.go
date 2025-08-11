@@ -16,15 +16,12 @@ import (
 	"github.com/chzyer/readline"
 )
 
-// The command struct now includes a category for dynamic help.
 type command struct {
 	help     string
 	handler  func(c *cli, args string) error
 	category string
 }
 
-// The cli struct no longer contains 'currentCollection'.
-// 'multiWordCommands' is added for dynamic parsing.
 type cli struct {
 	conn              net.Conn
 	rl                *readline.Instance
@@ -32,25 +29,24 @@ type cli struct {
 	isAuthenticated   bool
 	currentUser       string
 	commands          map[string]command
-	multiWordCommands []string // Dynamically generated list
+	multiWordCommands []string
 	connMutex         sync.Mutex
+	inTransaction     bool
 }
 
-// newCLI now dynamically generates the list of multi-word commands.
+// newCLI (sin cambios)
 func newCLI(conn net.Conn) *cli {
 	c := &cli{
 		conn: conn,
 	}
 	c.commands = c.getCommands()
 
-	// Dynamically generate the list of multi-word commands
 	var mwCmds []string
 	for cmd := range c.commands {
 		if strings.Contains(cmd, " ") {
 			mwCmds = append(mwCmds, cmd)
 		}
 	}
-	// Sort from longest to shortest for correct matching
 	sort.Slice(mwCmds, func(i, j int) bool {
 		return len(mwCmds[i]) > len(mwCmds[j])
 	})
@@ -90,15 +86,17 @@ func (c *cli) run(user, pass *string) error {
 	return c.mainLoop()
 }
 
-// The main loop is now much simpler. No aliases or contextual logic.
 func (c *cli) mainLoop() error {
 	for {
 		var prompt string
 		if c.isAuthenticated && c.currentUser != "" {
-			prompt = c.currentUser + "> "
-		} else {
-			prompt = "> "
+			prompt = c.currentUser
 		}
+		if c.inTransaction {
+			prompt += "[TX]"
+		}
+		prompt += "> "
+
 		c.rl.SetPrompt(colorPrompt(prompt))
 
 		input, err := c.rl.Readline()
@@ -120,11 +118,8 @@ func (c *cli) mainLoop() error {
 		}
 
 		cmd, args := c.getCommandAndRawArgs(input)
-
 		handler, found := c.commands[cmd]
-
 		if !found {
-
 			fmt.Println(colorErr("Error: Unknown command. Type 'help' for commands: ", cmd))
 			continue
 		}

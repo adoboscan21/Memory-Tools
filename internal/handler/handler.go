@@ -1,3 +1,5 @@
+// ./internal/handler/handler.go
+
 package handler
 
 import (
@@ -8,32 +10,71 @@ import (
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
 	"net"
+	"sync"
 
 	jsoniter "github.com/json-iterator/go"
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-// ActivityUpdater is an interface for updating activity timestamps.
+// ActivityUpdater es una interfaz para actualizar los timestamps de actividad.
 type ActivityUpdater interface {
 	UpdateActivity()
 }
 
-// ConnectionHandler holds the dependencies needed to handle client connections.
+// ConnectionHandler contiene las dependencias necesarias para manejar las conexiones de los clientes.
 type ConnectionHandler struct {
 	MainStore         store.DataStore
 	CollectionManager *store.CollectionManager
 	BackupManager     *persistence.BackupManager
-	ActivityUpdater   ActivityUpdater   // Dependency for updating activity
-	IsAuthenticated   bool              // Tracks authentication status for this connection
-	AuthenticatedUser string            // Stores the authenticated username
-	IsLocalhostConn   bool              // True if connection is from localhost
-	IsRoot            bool              // Cache if the user is root
-	Permissions       map[string]string // Cache user permissions for quick lookups
+	ActivityUpdater   ActivityUpdater
+	IsAuthenticated   bool
+	AuthenticatedUser string
+	IsLocalhostConn   bool
+	IsRoot            bool
+	Permissions       map[string]string
+	// --- NUEVOS CAMPOS PARA TRANSACCIONES ---
+	TransactionManager   *store.TransactionManager
+	CurrentTransactionID string
 }
 
-// NewConnectionHandler creates a new instance of ConnectionHandler.
-func NewConnectionHandler(mainStore store.DataStore, colManager *store.CollectionManager, backupManager *persistence.BackupManager, updater ActivityUpdater, conn net.Conn) *ConnectionHandler {
+// connectionHandlerPool aloja objetos ConnectionHandler para su reutilización.
+var connectionHandlerPool = sync.Pool{
+	New: func() any {
+		return &ConnectionHandler{
+			Permissions: make(map[string]string),
+		}
+	},
+}
+
+// Reset prepara el ConnectionHandler para ser reutilizado por una nueva conexión.
+func (h *ConnectionHandler) Reset() {
+	h.MainStore = nil
+	h.CollectionManager = nil
+	h.BackupManager = nil
+	h.ActivityUpdater = nil
+	h.IsAuthenticated = false
+	h.AuthenticatedUser = ""
+	h.IsLocalhostConn = false
+	h.IsRoot = false
+	clear(h.Permissions)
+	// --- Limpiar campos de la transacción ---
+	h.TransactionManager = nil
+	h.CurrentTransactionID = ""
+}
+
+// GetConnectionHandlerFromPool obtiene un handler del pool y lo inicializa con los datos de la nueva conexión.
+// NOTA: La firma ha cambiado para aceptar el TransactionManager. ¡Asegúrate de actualizar la llamada en main.go!
+func GetConnectionHandlerFromPool(
+	mainStore store.DataStore,
+	colManager *store.CollectionManager,
+	backupManager *persistence.BackupManager,
+	txManager *store.TransactionManager, // Nuevo parámetro
+	updater ActivityUpdater,
+	conn net.Conn,
+) *ConnectionHandler {
+	h := connectionHandlerPool.Get().(*ConnectionHandler)
+
 	isLocal := false
 	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
 		if host == "127.0.0.1" || host == "::1" || host == "localhost" {
@@ -41,19 +82,28 @@ func NewConnectionHandler(mainStore store.DataStore, colManager *store.Collectio
 		}
 	}
 
-	return &ConnectionHandler{
-		MainStore:         mainStore,
-		CollectionManager: colManager,
-		BackupManager:     backupManager,
-		ActivityUpdater:   updater,
-		IsAuthenticated:   false,
-		AuthenticatedUser: "",
-		IsLocalhostConn:   isLocal,
-		Permissions:       make(map[string]string),
-	}
+	h.MainStore = mainStore
+	h.CollectionManager = colManager
+	h.BackupManager = backupManager
+	h.TransactionManager = txManager // Inyectar el gestor de transacciones
+	h.ActivityUpdater = updater
+	h.IsLocalhostConn = isLocal
+
+	return h
 }
 
-// HandleConnection processes incoming commands from a TCP client.
+// PutConnectionHandlerToPool resetea y devuelve un handler al pool para que pueda ser reutilizado.
+func PutConnectionHandlerToPool(h *ConnectionHandler) {
+	// Si una conexión se cierra a mitad de una transacción, asegúrate de que se aborte.
+	if h.CurrentTransactionID != "" {
+		slog.Warn("Connection closed mid-transaction, rolling back.", "txID", h.CurrentTransactionID)
+		h.TransactionManager.Rollback(h.CurrentTransactionID)
+	}
+	h.Reset()
+	connectionHandlerPool.Put(h)
+}
+
+// HandleConnection procesa los comandos entrantes de un cliente TCP.
 func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	slog.Info("New client connected", "remote_addr", conn.RemoteAddr().String(), "is_localhost", h.IsLocalhostConn)
@@ -66,36 +116,38 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			} else {
 				slog.Error("Failed to read command type", "remote_addr", conn.RemoteAddr().String(), "error", err)
 			}
-			return // Exit goroutine on read error
+			return
 		}
 
 		h.ActivityUpdater.UpdateActivity()
 
-		// Authentication command can be run by anyone.
 		if cmdType == protocol.CmdAuthenticate {
 			h.handleAuthenticate(conn)
 			continue
 		}
 
-		// All other commands require authentication.
 		if !h.IsAuthenticated {
-			slog.Warn("Unauthorized access attempt",
-				"remote_addr", conn.RemoteAddr().String(),
-				"command_type", cmdType,
-			)
+			slog.Warn("Unauthorized access attempt", "remote_addr", conn.RemoteAddr().String(), "command_type", cmdType)
 			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
 			continue
 		}
 
-		// If we reach here, the client is authenticated. Now, dispatch the command.
 		switch cmdType {
-		// Main Store Commands.
+		// --- NUEVOS COMANDOS DE TRANSACCIÓN ---
+		case protocol.CmdBegin:
+			h.handleBegin(conn)
+		case protocol.CmdCommit:
+			h.handleCommit(conn)
+		case protocol.CmdRollback:
+			h.handleRollback(conn)
+
+		// Comandos del Almacén Principal
 		case protocol.CmdSet:
 			h.handleMainStoreSet(conn)
 		case protocol.CmdGet:
 			h.handleMainStoreGet(conn)
 
-		// Collection Management Commands.
+		// Comandos de Gestión de Colecciones
 		case protocol.CmdCollectionCreate:
 			h.handleCollectionCreate(conn)
 		case protocol.CmdCollectionDelete:
@@ -109,7 +161,7 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 		case protocol.CmdCollectionIndexList:
 			h.handleCollectionIndexList(conn)
 
-		// Collection Item Commands.
+		// Comandos de Items de Colección
 		case protocol.CmdCollectionItemSet:
 			h.handleCollectionItemSet(conn)
 		case protocol.CmdCollectionItemSetMany:
@@ -127,11 +179,11 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 		case protocol.CmdCollectionItemUpdateMany:
 			h.handleCollectionItemUpdateMany(conn)
 
-		// Collection Query Command
+		// Comando de Consulta de Colección
 		case protocol.CmdCollectionQuery:
 			h.handleCollectionQuery(conn)
 
-		// User Management Commands
+		// Comandos de Gestión de Usuarios
 		case protocol.CmdChangeUserPassword:
 			h.handleChangeUserPassword(conn)
 		case protocol.CmdUserCreate:
@@ -147,13 +199,8 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 			h.handleRestore(conn)
 
 		default:
-			slog.Warn("Received unhandled command type",
-				"command_type", cmdType,
-				"remote_addr", conn.RemoteAddr().String(),
-			)
-			if err := protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil); err != nil {
-				slog.Error("Failed to write bad command response", "remote_addr", conn.RemoteAddr().String(), "error", err)
-			}
+			slog.Warn("Received unhandled command type", "command_type", cmdType, "remote_addr", conn.RemoteAddr().String())
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil)
 		}
 	}
 }

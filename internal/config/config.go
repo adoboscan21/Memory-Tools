@@ -23,6 +23,7 @@ type Config struct {
 	DefaultAdminPassword string
 	ColdStorageMonths    int
 	HotStorageCleanHours int
+	WorkerPoolSize       int
 }
 
 // NewDefaultConfig creates a Config struct with sensible default values.
@@ -40,6 +41,7 @@ func NewDefaultConfig() Config {
 		DefaultAdminPassword: "adminpass",
 		ColdStorageMonths:    3,
 		HotStorageCleanHours: 24,
+		WorkerPoolSize:       100,
 	}
 }
 
@@ -102,6 +104,15 @@ func applyEnvConfig(cfg *Config) {
 			slog.Info("Overriding HotStorageCleanHours from environment", "value", i)
 		} else {
 			slog.Warn("Invalid MEMORYTOOLS_HOT_STORAGE_CLEAN_HOURS env var, using default", "value", hotHoursEnv)
+		}
+	}
+
+	if workerPoolEnv := os.Getenv("MEMORYTOOLS_WORKER_POOL_SIZE"); workerPoolEnv != "" {
+		if i, err := strconv.Atoi(workerPoolEnv); err == nil && i > 0 {
+			cfg.WorkerPoolSize = i
+			slog.Info("Overriding WorkerPoolSize from environment", "value", i)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_WORKER_POOL_SIZE env var, using default", "value", workerPoolEnv)
 		}
 	}
 

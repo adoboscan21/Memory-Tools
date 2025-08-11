@@ -87,6 +87,7 @@ func main() {
 	mainInMemStore := store.NewInMemStoreWithShards(cfg.NumShards)
 	collectionPersister := &persistence.CollectionPersisterImpl{}
 	collectionManager := store.NewCollectionManager(collectionPersister, cfg.NumShards)
+	transactionManager := store.NewTransactionManager(collectionManager)
 
 	// Load persistent data for the main store and all collections.
 	if err := persistence.LoadData(mainInMemStore); err != nil {
@@ -183,27 +184,45 @@ func main() {
 	backupManager.Start()
 	defer backupManager.Stop()
 
-	// Accept connections in a goroutine.
+	jobs := make(chan net.Conn, 100)
+
+	worker := func(id int, jobs <-chan net.Conn) {
+		slog.Info("Starting worker", "id", id)
+		for conn := range jobs {
+			h := handler.GetConnectionHandlerFromPool(
+				mainInMemStore,
+				collectionManager,
+				backupManager,
+				transactionManager,
+				updateActivityFunc(func() { lastActivity.Store(time.Now()) }),
+				conn,
+			)
+
+			h.HandleConnection(conn)
+
+			handler.PutConnectionHandlerToPool(h)
+		}
+		slog.Info("Stopping worker", "id", id)
+	}
+
+	slog.Info("Launching worker pool", "size", cfg.WorkerPoolSize)
+	for w := 1; w <= cfg.WorkerPoolSize; w++ {
+		go worker(w, jobs)
+	}
+
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Op == "accept" {
 					slog.Info("Network listener closed, stopping connection acceptance.")
+					close(jobs)
 					return
 				}
 				slog.Error("Error accepting connection", "error", err)
 				continue
 			}
-
-			// Handle each new connection in a separate goroutine.
-			go handler.NewConnectionHandler(
-				mainInMemStore,
-				collectionManager,
-				backupManager,
-				updateActivityFunc(func() { lastActivity.Store(time.Now()) }),
-				conn,
-			).HandleConnection(conn)
+			jobs <- conn
 		}
 	}()
 

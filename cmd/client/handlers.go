@@ -32,6 +32,12 @@ func (c *cli) getCommands() map[string]command {
 		"user delete":     {help: "user delete <username> - Delete a user", handler: (*cli).handleUserDelete, category: "User Management"},
 		"update password": {help: "update password <user> <new_pass> - Change a user's password", handler: (*cli).handleChangePassword, category: "User Management"},
 
+		// --- NUEVA CATEGORÍA: TRANSACCIONES ---
+		"begin":    {help: "begin - Starts a new transaction", handler: (*cli).handleBegin, category: "Transactions"},
+		"commit":   {help: "commit - Commits the current transaction", handler: (*cli).handleCommit, category: "Transactions"},
+		"rollback": {help: "rollback - Rolls back the current transaction", handler: (*cli).handleRollback, category: "Transactions"},
+		// ------------------------------------
+
 		// Server Operations (Root only)
 		"backup":  {help: "backup - Triggers a manual server backup (root only)", handler: (*cli).handleBackup, category: "Server Operations"},
 		"restore": {help: "restore <backup_name> - Restores from a backup (root only)", handler: (*cli).handleRestore, category: "Server Operations"},
@@ -61,6 +67,79 @@ func (c *cli) getCommands() map[string]command {
 		// Query
 		"collection query": {help: "collection query <coll> <query_json|path> - Performs a complex query", handler: (*cli).handleQuery, category: "Query"},
 	}
+}
+
+func (c *cli) handleBegin(args string) error {
+	if c.inTransaction {
+		return errors.New("a transaction is already in progress")
+	}
+
+	var cmdBuf bytes.Buffer
+	if err := protocol.WriteBeginCommand(&cmdBuf); err != nil {
+		return fmt.Errorf("could not build begin command: %w", err)
+	}
+
+	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
+		return fmt.Errorf("could not send begin command: %w", err)
+	}
+
+	// Leemos la respuesta para confirmar que el servidor inició la transacción
+	status, msg, _, err := c.readRawResponse()
+	if err != nil {
+		return err
+	}
+
+	// Renderizar la respuesta simple
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Status", "Message"})
+	table.Append([]string{getStatusString(status), msg})
+	table.Render()
+	fmt.Println("---")
+
+	if status == protocol.StatusOk {
+		c.inTransaction = true
+		fmt.Println(colorOK("√ Transaction started."))
+	}
+
+	return nil
+}
+
+func (c *cli) handleCommit(args string) error {
+	if !c.inTransaction {
+		return errors.New("no transaction is in progress to commit")
+	}
+
+	var cmdBuf bytes.Buffer
+	if err := protocol.WriteCommitCommand(&cmdBuf); err != nil {
+		return fmt.Errorf("could not build commit command: %w", err)
+	}
+
+	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
+		return fmt.Errorf("could not send commit command: %w", err)
+	}
+
+	c.inTransaction = false
+
+	return c.readResponse("commit")
+}
+
+func (c *cli) handleRollback(args string) error {
+	if !c.inTransaction {
+		return errors.New("no transaction is in progress to roll back")
+	}
+
+	var cmdBuf bytes.Buffer
+	if err := protocol.WriteRollbackCommand(&cmdBuf); err != nil {
+		return fmt.Errorf("could not build rollback command: %w", err)
+	}
+
+	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
+		return fmt.Errorf("could not send rollback command: %w", err)
+	}
+
+	c.inTransaction = false
+
+	return c.readResponse("rollback")
 }
 
 func (c *cli) handleLogin(args string) error {

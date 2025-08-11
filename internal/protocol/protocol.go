@@ -46,6 +46,11 @@ const (
 	// --- NEW: Admin Commands ---
 	CmdBackup  // BACKUP
 	CmdRestore // RESTORE backup_name
+
+	// --- TRANSACTION COMMANDS ---
+	CmdBegin
+	CmdCommit
+	CmdRollback
 )
 
 // ResponseStatus defines the status of a server response.
@@ -61,6 +66,30 @@ const (
 )
 
 var ByteOrder = binary.LittleEndian
+
+// WriteBeginCommand escribe un comando BEGIN.
+func WriteBeginCommand(w io.Writer) error {
+	if _, err := w.Write([]byte{byte(CmdBegin)}); err != nil {
+		return fmt.Errorf("failed to write command type (begin): %w", err)
+	}
+	return nil
+}
+
+// WriteCommitCommand escribe un comando COMMIT.
+func WriteCommitCommand(w io.Writer) error {
+	if _, err := w.Write([]byte{byte(CmdCommit)}); err != nil {
+		return fmt.Errorf("failed to write command type (commit): %w", err)
+	}
+	return nil
+}
+
+// WriteRollbackCommand escribe un comando ROLLBACK.
+func WriteRollbackCommand(w io.Writer) error {
+	if _, err := w.Write([]byte{byte(CmdRollback)}); err != nil {
+		return fmt.Errorf("failed to write command type (rollback): %w", err)
+	}
+	return nil
+}
 
 // WriteBackupCommand writes a BACKUP command.
 func WriteBackupCommand(w io.Writer) error {

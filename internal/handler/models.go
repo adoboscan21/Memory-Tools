@@ -1,5 +1,7 @@
 package handler
 
+import "sync"
+
 type LookupClause struct {
 	FromCollection string `json:"from"`         // The collection to join with
 	LocalField     string `json:"localField"`   // Field from the input documents
@@ -41,4 +43,26 @@ type OrderByClause struct {
 type Aggregation struct {
 	Func  string `json:"func"`  // "sum", "avg", "min", "max", "count"
 	Field string `json:"field"` // Field to aggregate on, "*" for count
+}
+
+//Reset limpia la estructura Query para su reutilización.
+func (q *Query) Reset() {
+	q.Filter = nil
+	q.OrderBy = nil
+	q.Limit = nil
+	q.Offset = 0
+	q.Count = false
+	q.Aggregations = nil
+	q.GroupBy = nil
+	q.Having = nil
+	q.Distinct = ""
+	q.Projection = nil
+	q.Lookups = nil
+}
+
+// NUEVO POOL: Pool para objetos Query.
+var queryPool = sync.Pool{
+	New: func() any {
+		return new(Query)
+	},
 }

@@ -495,6 +495,11 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
+	if ownerTxID, isLocked := shard.keyLocks[key]; isLocked {
+		slog.Warn("Set operation rejected: key is locked by an active transaction", "key", key, "txID", ownerTxID)
+		return
+	}
+
 	// 1. Capture the old state BEFORE any modifications.
 	//    This is crucial so the index update knows what to delete.
 	var oldDataForIndex map[string]any
@@ -617,6 +622,12 @@ func (s *InMemStore) GetMany(keys []string) map[string][]byte {
 func (s *InMemStore) Delete(key string) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
+
+	if ownerTxID, isLocked := shard.keyLocks[key]; isLocked {
+		slog.Warn("Delete operation rejected: key is locked by an active transaction", "key", key, "txID", ownerTxID)
+		shard.mu.Unlock()
+		return
+	}
 
 	var data map[string]any
 	if item, exists := shard.data[key]; exists {

@@ -118,9 +118,27 @@ func (c *cli) handleCommit(args string) error {
 		return fmt.Errorf("could not send commit command: %w", err)
 	}
 
-	c.inTransaction = false
+	status, msg, _, err := c.readRawResponse()
+	if err != nil {
 
-	return c.readResponse("commit")
+		return err
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Status", "Message"})
+	table.Append([]string{getStatusString(status), msg})
+	table.Render()
+	fmt.Println("---")
+
+	if status == protocol.StatusOk {
+		c.inTransaction = false
+		fmt.Println(colorOK("√ Transaction committed successfully."))
+	} else {
+		c.inTransaction = false
+		fmt.Println(colorErr("Transaction failed on the server and was rolled back."))
+	}
+
+	return nil
 }
 
 func (c *cli) handleRollback(args string) error {
@@ -137,9 +155,24 @@ func (c *cli) handleRollback(args string) error {
 		return fmt.Errorf("could not send rollback command: %w", err)
 	}
 
+	status, msg, _, err := c.readRawResponse()
+	if err != nil {
+		return err
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Status", "Message"})
+	table.Append([]string{getStatusString(status), msg})
+	table.Render()
+	fmt.Println("---")
+
 	c.inTransaction = false
 
-	return c.readResponse("rollback")
+	if status == protocol.StatusOk {
+		fmt.Println(colorInfo("√ Transaction rolled back."))
+	}
+
+	return nil
 }
 
 func (c *cli) handleLogin(args string) error {

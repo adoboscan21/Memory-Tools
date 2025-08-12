@@ -19,34 +19,35 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 type TransactionState int
 
 const (
-	StateActive    TransactionState = iota // La transacción está en curso.
-	StatePreparing                         // Fase 1 de 2PC (votación) iniciada.
-	StateCommitted                         // La transacción se confirmó con éxito.
-	StateAborted                           // La transacción se abortó (rollback).
+	StateActive TransactionState = iota
+	StatePreparing
+	StateCommitted
+	StateAborted
 )
 
-// WriteOperation representa una única operación de escritura dentro de una transacción.
 type WriteOperation struct {
 	Collection string
 	Key        string
-	Value      []byte // Será nil para operaciones de DELETE.
+	Value      []byte
 	IsDelete   bool
 }
 
-// Transaction mantiene el estado y las operaciones de una transacción.
 type Transaction struct {
 	ID        string
 	State     TransactionState
-	WriteSet  []WriteOperation // El "diario" de operaciones de la transacción.
+	WriteSet  []WriteOperation
 	startTime time.Time
 	mu        sync.RWMutex
 }
 
 // TransactionManager es el coordinador central de todas las transacciones.
 type TransactionManager struct {
-	transactions map[string]*Transaction // Mapa de ID de transacción -> *Transaction
+	transactions map[string]*Transaction
 	mu           sync.RWMutex
-	cm           *CollectionManager // Referencia al CollectionManager para acceder a los shards.
+	cm           *CollectionManager
+	// NUEVO: Canales y WaitGroup para el ciclo de vida del recolector de basura (GC).
+	gcQuitChan chan struct{}
+	wg         sync.WaitGroup
 }
 
 // NewTransactionManager crea una nueva instancia del gestor de transacciones.
@@ -54,6 +55,66 @@ func NewTransactionManager(cm *CollectionManager) *TransactionManager {
 	return &TransactionManager{
 		transactions: make(map[string]*Transaction),
 		cm:           cm,
+		// NUEVO: Inicializar el canal de cierre del GC.
+		gcQuitChan: make(chan struct{}),
+	}
+}
+
+// NUEVO: StartGC inicia el goroutine del recolector de basura.
+func (tm *TransactionManager) StartGC(timeout, interval time.Duration) {
+	tm.wg.Add(1)
+	go tm.runGC(timeout, interval)
+	slog.Info("Transaction garbage collector started", "timeout", timeout, "interval", interval)
+}
+
+// NUEVO: StopGC detiene el recolector de basura y espera a que termine.
+func (tm *TransactionManager) StopGC() {
+	close(tm.gcQuitChan)
+	tm.wg.Wait()
+	slog.Info("Transaction garbage collector stopped.")
+}
+
+// NUEVO: runGC es el bucle principal del recolector de basura.
+func (tm *TransactionManager) runGC(timeout, interval time.Duration) {
+	defer tm.wg.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			slog.Debug("Running transaction garbage collection scan...")
+
+			var txIDsToRollback []string
+
+			// Primero, identificamos las transacciones a eliminar con un lock de solo lectura.
+			tm.mu.RLock()
+			for txID, tx := range tm.transactions {
+				tx.mu.RLock()
+				// Comprobamos si la transacción está activa y ha superado el tiempo de vida.
+				if tx.State == StateActive && time.Since(tx.startTime) > timeout {
+					txIDsToRollback = append(txIDsToRollback, txID)
+				}
+				tx.mu.RUnlock()
+			}
+			tm.mu.RUnlock()
+
+			// Ahora, si encontramos transacciones para eliminar, las procesamos.
+			if len(txIDsToRollback) > 0 {
+				slog.Warn("Found abandoned transactions to roll back", "count", len(txIDsToRollback))
+				for _, txID := range txIDsToRollback {
+					slog.Info("Rolling back abandoned transaction", "txID", txID)
+					// Rollback ya maneja sus propios locks, por lo que es seguro llamarlo aquí.
+					if err := tm.Rollback(txID); err != nil {
+						slog.Error("Error rolling back abandoned transaction", "txID", txID, "error", err)
+					}
+				}
+			}
+
+		case <-tm.gcQuitChan:
+			// Se recibió la señal de parada.
+			return
+		}
 	}
 }
 
@@ -126,7 +187,6 @@ func (tm *TransactionManager) Commit(txID string) error {
 	}
 	tx.mu.Unlock()
 
-	// CORRECCIÓN: Inicio de la lógica de enriquecimiento para añadir timestamps.
 	slog.Debug("TransactionManager: enriching WriteSet with timestamps", "txID", txID)
 	enrichedWriteSet := make([]WriteOperation, 0, len(tx.WriteSet))
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -167,7 +227,6 @@ func (tm *TransactionManager) Commit(txID string) error {
 	tx.WriteSet = enrichedWriteSet
 	tx.State = StatePreparing
 	tx.mu.Unlock()
-	// CORRECCIÓN: Fin de la lógica de enriquecimiento.
 
 	slog.Debug("TransactionManager: entering Prepare Phase", "txID", txID)
 
@@ -205,8 +264,6 @@ func (tm *TransactionManager) Commit(txID string) error {
 	tx.State = StateCommitted
 	tx.mu.Unlock()
 
-	// CORRECCIÓN: La lógica de persistencia se mueve aquí, DESPUÉS de aplicar los cambios en memoria.
-	// 1. Aplicar cambios a la memoria RAM.
 	for shard := range keysByShard {
 		var associatedIndexManager *IndexManager
 		if len(opsByShard[shard]) > 0 {
@@ -217,7 +274,6 @@ func (tm *TransactionManager) Commit(txID string) error {
 		shard.commitAppliedChanges(txID, associatedIndexManager)
 	}
 
-	// 2. Encolar las tareas de guardado en disco ahora que la memoria está actualizada.
 	collectionsToSave := make(map[string]DataStore)
 	for _, op := range tx.WriteSet {
 		if _, exists := collectionsToSave[op.Collection]; !exists {

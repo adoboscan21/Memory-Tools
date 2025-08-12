@@ -88,6 +88,7 @@ func main() {
 	collectionPersister := &persistence.CollectionPersisterImpl{}
 	collectionManager := store.NewCollectionManager(collectionPersister, cfg.NumShards)
 	transactionManager := store.NewTransactionManager(collectionManager)
+	transactionManager.StartGC(5*time.Minute, 10*time.Minute)
 
 	// Load persistent data for the main store and all collections.
 	if err := persistence.LoadData(mainInMemStore); err != nil {
@@ -350,6 +351,7 @@ func main() {
 	snapshotManager.Stop()
 	close(ttlCleanStopChan)
 	close(idleMemoryCleanerStopChan)
+	transactionManager.StopGC()
 	// Stop the new workers.
 	if cfg.ColdStorageMonths > 0 {
 		close(evictionStopChan)

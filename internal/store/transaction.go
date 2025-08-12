@@ -8,10 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"memory-tools/internal/globalconst"
+
 	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
 )
 
-// TransactionState define los posibles estados de una transacción.
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
 type TransactionState int
 
 const (
@@ -108,6 +112,7 @@ func (tm *TransactionManager) removeTransaction(txID string) {
 	delete(tm.transactions, txID)
 }
 
+// Commit procesa el guardado final de la transacción.
 func (tm *TransactionManager) Commit(txID string) error {
 	tx, err := tm.getTransaction(txID)
 	if err != nil {
@@ -119,8 +124,50 @@ func (tm *TransactionManager) Commit(txID string) error {
 		tx.mu.Unlock()
 		return fmt.Errorf("cannot commit transaction %s; state is not active", txID)
 	}
+	tx.mu.Unlock()
+
+	// CORRECCIÓN: Inicio de la lógica de enriquecimiento para añadir timestamps.
+	slog.Debug("TransactionManager: enriching WriteSet with timestamps", "txID", txID)
+	enrichedWriteSet := make([]WriteOperation, 0, len(tx.WriteSet))
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	for _, op := range tx.WriteSet {
+		if op.IsDelete {
+			enrichedWriteSet = append(enrichedWriteSet, op)
+			continue
+		}
+
+		col := tm.cm.GetCollection(op.Collection)
+
+		var data map[string]any
+		if err := json.Unmarshal(op.Value, &data); err != nil {
+			slog.Warn("Could not unmarshal value during transaction commit, skipping timestamp enrichment", "txID", txID, "key", op.Key, "error", err)
+			enrichedWriteSet = append(enrichedWriteSet, op)
+			continue
+		}
+
+		data[globalconst.UPDATED_AT] = now
+		if _, found := col.Get(op.Key); !found {
+			data[globalconst.CREATED_AT] = now
+		}
+
+		enrichedValue, err := json.Marshal(data)
+		if err != nil {
+			slog.Error("Could not marshal enriched value during transaction commit", "txID", txID, "key", op.Key, "error", err)
+			tm.Rollback(txID)
+			return fmt.Errorf("failed to marshal enriched data for key %s: %w", op.Key, err)
+		}
+
+		enrichedOp := op
+		enrichedOp.Value = enrichedValue
+		enrichedWriteSet = append(enrichedWriteSet, enrichedOp)
+	}
+
+	tx.mu.Lock()
+	tx.WriteSet = enrichedWriteSet
 	tx.State = StatePreparing
 	tx.mu.Unlock()
+	// CORRECCIÓN: Fin de la lógica de enriquecimiento.
 
 	slog.Debug("TransactionManager: entering Prepare Phase", "txID", txID)
 
@@ -134,7 +181,6 @@ func (tm *TransactionManager) Commit(txID string) error {
 		keysByShard[shard] = append(keysByShard[shard], op.Key)
 	}
 
-	// Versión corregida sin la variable innecesaria:
 	for shard, keys := range keysByShard {
 		if err := shard.lockKeys(txID, keys); err != nil {
 			slog.Warn("TransactionManager: lock failed during Prepare Phase, initiating rollback", "txID", txID, "shard", shard, "error", err)
@@ -159,21 +205,28 @@ func (tm *TransactionManager) Commit(txID string) error {
 	tx.State = StateCommitted
 	tx.mu.Unlock()
 
-	indexManagers := make(map[*IndexManager]bool)
-
-	for _, op := range tx.WriteSet {
-		col := tm.cm.GetCollection(op.Collection).(*InMemStore)
-		tm.cm.EnqueueSaveTask(op.Collection, col)
-		indexManagers[col.indexes] = true
-	}
-
+	// CORRECCIÓN: La lógica de persistencia se mueve aquí, DESPUÉS de aplicar los cambios en memoria.
+	// 1. Aplicar cambios a la memoria RAM.
 	for shard := range keysByShard {
 		var associatedIndexManager *IndexManager
-		for im := range indexManagers {
-			associatedIndexManager = im
-			break
+		if len(opsByShard[shard]) > 0 {
+			firstOp := opsByShard[shard][0]
+			col := tm.cm.GetCollection(firstOp.Collection).(*InMemStore)
+			associatedIndexManager = col.indexes
 		}
 		shard.commitAppliedChanges(txID, associatedIndexManager)
+	}
+
+	// 2. Encolar las tareas de guardado en disco ahora que la memoria está actualizada.
+	collectionsToSave := make(map[string]DataStore)
+	for _, op := range tx.WriteSet {
+		if _, exists := collectionsToSave[op.Collection]; !exists {
+			collectionsToSave[op.Collection] = tm.cm.GetCollection(op.Collection)
+		}
+	}
+
+	for name, store := range collectionsToSave {
+		tm.cm.EnqueueSaveTask(name, store)
 	}
 
 	tm.removeTransaction(txID)
@@ -184,21 +237,19 @@ func (tm *TransactionManager) Commit(txID string) error {
 func (tm *TransactionManager) Rollback(txID string) error {
 	tx, err := tm.getTransaction(txID)
 	if err != nil {
-		// Es posible que ya se haya eliminado, por lo que no es un error fatal.
 		return nil
 	}
 
 	tx.mu.Lock()
 	if tx.State == StateCommitted || tx.State == StateAborted {
 		tx.mu.Unlock()
-		return nil // La transacción ya está finalizada.
+		return nil
 	}
 	tx.State = StateAborted
 	tx.mu.Unlock()
 
 	slog.Debug("TransactionManager: rolling back transaction", "txID", txID)
 
-	// Agrupar operaciones por shard para saber a quién notificar.
 	keysByShard := make(map[*Shard][]string)
 	for _, op := range tx.WriteSet {
 		col := tm.cm.GetCollection(op.Collection).(*InMemStore)
@@ -206,12 +257,10 @@ func (tm *TransactionManager) Rollback(txID string) error {
 		keysByShard[shard] = append(keysByShard[shard], op.Key)
 	}
 
-	// Notificar a cada shard involucrado que debe revertir los cambios.
 	for shard := range keysByShard {
 		shard.rollbackChanges(txID)
 	}
 
-	// Limpiar la transacción del gestor.
 	tm.removeTransaction(txID)
 	return nil
 }

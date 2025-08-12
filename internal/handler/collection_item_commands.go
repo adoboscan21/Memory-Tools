@@ -33,12 +33,27 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 		return
 	}
 
-	if key == "" {
-		key = uuid.New().String()
-	}
-
-	// --- LÓGICA TRANSACCIONAL ---
+	// --- LÓGICA TRANSACCIONAL (CORREGIDA) ---
 	if h.CurrentTransactionID != "" {
+		// 1. Generamos el UUID para la clave si es necesario.
+		if key == "" {
+			key = uuid.New().String()
+		}
+
+		// 2. (CRÍTICO) Inyectamos el _id en el documento JSON.
+		var data map[string]any
+		if err := json.Unmarshal(value, &data); err == nil {
+			data[globalconst.ID] = key
+			newValue, marshalErr := json.Marshal(data)
+			if marshalErr == nil {
+				value = newValue // Sobrescribimos el 'value' con la versión que incluye el _id.
+			} else {
+				slog.Warn("Could not marshal enriched value in transaction SET", "key", key, "error", marshalErr)
+			}
+		} else {
+			slog.Warn("Could not unmarshal value in transaction SET to inject _id", "key", key, "error", err)
+		}
+
 		op := store.WriteOperation{
 			Collection: collectionName,
 			Key:        key,
@@ -54,13 +69,17 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	}
 	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original para operaciones no transaccionales
+	// Lógica original para operaciones no transaccionales (esta ya funcionaba bien)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var data map[string]any
 	if err := json.Unmarshal(value, &data); err != nil {
 		slog.Warn("Failed to unmarshal item data for SET", "error", err, "collection", collectionName, "user", h.AuthenticatedUser)
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid value. Must be a JSON object.", nil)
 		return
+	}
+
+	if key == "" {
+		key = uuid.New().String()
 	}
 
 	existingValue, found := colStore.Get(key)
@@ -484,7 +503,8 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	slog.Info("All items listed from collection", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", len(allData))
 }
 
-// handleCollectionItemSetMany processes the CmdCollectionItemSetMany command.
+// handleCollectionItemSetMany procesa el comando para insertar múltiples ítems en una colección,
+// con lógica diferenciada para operaciones transaccionales y no transaccionales.
 func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 	collectionName, value, err := protocol.ReadCollectionItemSetManyCommand(conn)
 	if err != nil {
@@ -511,12 +531,23 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {
 		for _, record := range records {
-			// El ID y los timestamps se aplicarán en el commit.
-			valBytes, _ := json.Marshal(record)
+			// Extrae la clave del documento; puede estar vacía.
 			key, _ := record[globalconst.ID].(string)
+
+			// Si no hay clave, se genera una y se inyecta de vuelta en el documento.
 			if key == "" {
-				key = uuid.New().String() // Generar clave si no se proporciona.
+				key = uuid.New().String()
+				record[globalconst.ID] = key
 			}
+
+			// Se serializa el documento (ya con su _id) a formato JSON.
+			valBytes, err := json.Marshal(record)
+			if err != nil {
+				slog.Warn("Failed to marshal record in SET_MANY (transaction)", "key", key, "error", err)
+				continue // Salta este registro si hay un error y continúa con el siguiente.
+			}
+
+			// Se crea la operación de escritura y se registra en la transacción.
 			op := store.WriteOperation{Collection: collectionName, Key: key, Value: valBytes, IsDelete: false}
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record set-many op in transaction: "+err.Error(), nil)
@@ -534,22 +565,28 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, record := range records {
 		var key string
+		// Genera una clave si el documento no la tiene.
 		if id, ok := record[globalconst.ID].(string); ok && id != "" {
 			key = id
 		} else {
 			key = uuid.New().String()
 		}
+		// Inyecta la clave y las marcas de tiempo en el documento.
 		record[globalconst.ID] = key
 		record[globalconst.CREATED_AT] = now
 		record[globalconst.UPDATED_AT] = now
+
 		updatedValue, err := json.Marshal(record)
 		if err != nil {
 			slog.Warn("Failed to marshal record in SET_MANY batch", "key", key, "collection", collectionName, "error", err)
 			continue
 		}
+		// Guarda el ítem en el almacén de memoria.
 		colStore.Set(key, updatedValue, 0)
 		insertedCount++
 	}
+
+	// Si se insertó al menos un ítem, se encola una tarea para persistir los cambios.
 	if insertedCount > 0 {
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	}

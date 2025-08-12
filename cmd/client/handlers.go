@@ -461,16 +461,18 @@ func (c *cli) handleItemSet(args string) error {
 	}
 
 	parts := strings.SplitN(remainingArgs, " ", 2)
-	key, jsonArg := "", ""
-	if len(parts) == 0 || parts[0] == "" {
-		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl]")
+	if len(parts) == 0 || remainingArgs == "" {
+		return errors.New("usage: collection item set <coll> [<key>] <value_json|path>")
 	}
+	var key, jsonArg string
 
 	if len(parts) == 1 {
 		key = uuid.New().String()
 		jsonArg = parts[0]
 	} else {
-		if strings.HasPrefix(parts[1], "{") || strings.HasPrefix(parts[1], "[") {
+		isFirstArgKeyLike := !strings.HasPrefix(parts[0], "{") && !strings.HasPrefix(parts[0], "[")
+
+		if isFirstArgKeyLike {
 			key = parts[0]
 			jsonArg = parts[1]
 		} else {
@@ -569,12 +571,7 @@ func (c *cli) handleQuery(args string) error {
 		return errors.New("usage: collection query <coll> <query_json|path>")
 	}
 
-	var jsonPayload []byte
-	if remainingArgs == "interactive" {
-		jsonPayload, err = c.getInteractiveJSONPayload()
-	} else {
-		jsonPayload, err = c.getJSONPayload(remainingArgs)
-	}
+	jsonPayload, err := c.getJSONPayload(remainingArgs)
 	if err != nil {
 		return err
 	}

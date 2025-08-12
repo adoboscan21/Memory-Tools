@@ -265,48 +265,6 @@ func printDynamicTable(dataBytes []byte) error {
 	return initialErr
 }
 
-func (c *cli) getInteractiveJSONPayload() ([]byte, error) {
-	fmt.Println(colorInfo("Enter JSON key-value pairs (e.g., key=value). Type 'done' to finish or 'cancel' to abort."))
-	var pairs []string
-	for {
-		c.rl.SetPrompt(colorPrompt("JSON> "))
-		input, err := c.rl.Readline()
-		if err != nil {
-			return nil, err
-		}
-		input = strings.TrimSpace(input)
-		if input == "done" {
-			break
-		}
-		if input == "cancel" {
-			return nil, errors.New("JSON input cancelled")
-		}
-		if input != "" {
-			pairs = append(pairs, input)
-		}
-	}
-
-	if len(pairs) == 0 {
-		return nil, errors.New("no JSON data provided")
-	}
-
-	jsonMap := make(map[string]interface{})
-	for _, pair := range pairs {
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid pair format: %s (use key=value)", pair)
-		}
-		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		var jsonValue interface{}
-		if err := json.Unmarshal([]byte(value), &jsonValue); err != nil {
-			jsonValue = value
-		}
-		jsonMap[key] = jsonValue
-	}
-
-	return json.Marshal(jsonMap)
-}
-
 // readRawResponse reads the raw components of a response from the server.
 func (c *cli) readRawResponse() (protocol.ResponseStatus, string, []byte, error) {
 	c.connMutex.Lock()

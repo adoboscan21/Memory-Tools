@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -75,7 +74,6 @@ func (c *cli) run(user, pass *string) error {
 		fmt.Println(colorInfo("Attempting automatic login for user ", *user))
 		if err := c.handleLogin(fmt.Sprintf("%s %s", *user, *pass)); err != nil {
 			fmt.Println(colorErr("Automatic login failed. Please login manually."))
-			os.Exit(1)
 		}
 	}
 

@@ -17,9 +17,13 @@ func main() {
 	passwordPtr := flag.String("p", "", "Password for authentication")
 	flag.Parse()
 
-	addr := "localhost:5876" // Default address
+	addr := "localhost:5876"
 	if flag.NArg() > 0 {
 		addr = flag.Arg(0)
+	}
+
+	if !strings.Contains(addr, ":") {
+		log.Fatal(colorErr("Error: La dirección del servidor debe tener el formato 'host:puerto'. Proporcionado: ", addr))
 	}
 
 	// TLS Connection Configuration

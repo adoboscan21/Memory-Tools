@@ -500,36 +500,31 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 		return
 	}
 
-	// 1. Capture the old state BEFORE any modifications.
-	//    This is crucial so the index update knows what to delete.
-	var oldDataForIndex map[string]any
-	var oldCreatedAt time.Time
-	isUpdate := false
-	if oldItem, exists := shard.data[key]; exists {
-		oldDataForIndex = tryUnmarshal(oldItem.Value)
-		oldCreatedAt = oldItem.CreatedAt // We preserve the original creation date on an update.
-		isUpdate = true
-	}
+	// 1. Obtener la versión ANTIGUA del ítem de forma clara.
+	oldItem, isUpdate := shard.data[key]
 
-	// 2. Prepare the new item's data.
-	//    If it's an update, use the original creation date.
-	newItemCreatedAt := time.Now()
+	// 2. Preparar el NUEVO ítem. Se preserva la fecha de creación en las actualizaciones.
+	createdAt := time.Now()
 	if isUpdate {
-		newItemCreatedAt = oldCreatedAt
+		createdAt = oldItem.CreatedAt
 	}
-
 	newItem := Item{
 		Value:     value,
-		CreatedAt: newItemCreatedAt,
+		CreatedAt: createdAt,
 		TTL:       ttl,
 	}
 
-	// 3. Commit the new item to the main data store.
-	//    Now, shard.data[] holds the most recent information.
+	// 3. Escribir el nuevo ítem en el almacén. Este es el punto exacto de la modificación.
 	shard.data[key] = newItem
 
-	// 4. Finally, update the index to reflect the change.
-	newDataForIndex := tryUnmarshal(value)
+	// 4. Preparar los datos para el índice a partir de los ítems "antes" y "después".
+	var oldDataForIndex map[string]any
+	if isUpdate {
+		oldDataForIndex = tryUnmarshal(oldItem.Value)
+	}
+	newDataForIndex := tryUnmarshal(newItem.Value)
+
+	// 5. Actualizar el índice solo si hay algo que indexar, pasando la información vieja y nueva.
 	if oldDataForIndex != nil || newDataForIndex != nil {
 		s.indexes.Update(key, oldDataForIndex, newDataForIndex)
 	}

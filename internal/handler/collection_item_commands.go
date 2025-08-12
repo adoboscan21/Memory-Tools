@@ -33,7 +33,21 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 		return
 	}
 
-	// --- LÓGICA TRANSACCIONAL (CORREGIDA) ---
+	// --- INICIO DE LA MEJORA ---
+	// Previene la creación implícita de colecciones para operaciones no transaccionales.
+	if h.CurrentTransactionID == "" {
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Set item failed because collection does not exist",
+				"user", h.AuthenticatedUser,
+				"collection", collectionName,
+			)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist. Please create it first.", collectionName), nil)
+			return
+		}
+	}
+	// --- FIN DE LA MEJORA ---
+
+	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {
 		// 1. Generamos el UUID para la clave si es necesario.
 		if key == "" {
@@ -69,7 +83,7 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	}
 	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original para operaciones no transaccionales (esta ya funcionaba bien)
+	// Lógica original para operaciones no transaccionales
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var data map[string]any
 	if err := json.Unmarshal(value, &data); err != nil {
@@ -132,6 +146,18 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
+
+	// --- INICIO DE LA MEJORA ---
+	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Update item failed because collection does not exist",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+		)
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+		return
+	}
+	// --- FIN DE LA MEJORA ---
 
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {
@@ -246,6 +272,18 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format. Expected an array of `{\"_id\": \"...\", \"patch\": {...}}`.", nil)
 		return
 	}
+
+	// --- INICIO DE LA MEJORA ---
+	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Update-many failed because collection does not exist",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+		)
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+		return
+	}
+	// --- FIN DE LA MEJORA ---
 
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {
@@ -527,6 +565,20 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format", nil)
 		return
 	}
+
+	// --- INICIO DE LA MEJORA ---
+	// Previene la creación implícita de colecciones para operaciones no transaccionales.
+	if h.CurrentTransactionID == "" {
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Set-many operation failed because collection does not exist",
+				"user", h.AuthenticatedUser,
+				"collection", collectionName,
+			)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist. Please create it first.", collectionName), nil)
+			return
+		}
+	}
+	// --- FIN DE LA MEJORA ---
 
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {

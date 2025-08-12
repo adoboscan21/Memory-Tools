@@ -98,10 +98,13 @@ func (c *cli) fetchCollectionNames(line string) []string {
 			continue
 		}
 
-		parts := strings.Fields(line)
-		prefix := ""
-		if len(parts) > 0 {
-			if len(parts) > 1 {
+		var prefix string
+
+		if strings.HasSuffix(line, " ") {
+			prefix = ""
+		} else {
+			parts := strings.Fields(line)
+			if len(parts) > 0 {
 				prefix = parts[len(parts)-1]
 			}
 		}

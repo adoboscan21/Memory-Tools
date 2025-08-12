@@ -93,14 +93,19 @@ func (c *cli) getJSONPayload(payload string) ([]byte, error) {
 
 // resolveCollectionName is the new simplified version that requires an explicit collection name.
 func (c *cli) resolveCollectionName(args string, commandName string) (string, string, error) {
-	parts := strings.Fields(args)
-	if len(parts) == 0 {
+	args = strings.TrimSpace(args)
+	if args == "" {
 		usage := fmt.Sprintf("usage: %s <collection_name> [other_args...]", commandName)
 		return "", "", errors.New("no collection name provided. " + usage)
 	}
 
+	parts := strings.SplitN(args, " ", 2)
 	collectionName := parts[0]
-	remainingArgs := strings.Join(parts[1:], " ")
+
+	var remainingArgs string
+	if len(parts) > 1 {
+		remainingArgs = parts[1]
+	}
 
 	return collectionName, remainingArgs, nil
 }

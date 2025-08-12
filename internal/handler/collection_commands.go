@@ -27,6 +27,16 @@ func (h *ConnectionHandler) handleCollectionCreate(conn net.Conn) {
 		return
 	}
 
+	// --- INICIO DE LA MEJORA ---
+	// Comprobar si la colección ya existe antes de crearla.
+	if h.CollectionManager.CollectionExists(collectionName) {
+		slog.Info("Collection create command on existing collection", "user", h.AuthenticatedUser, "collection", collectionName)
+		// Devuelve un mensaje claro indicando que la colección ya existía.
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' already exists.", collectionName), nil)
+		return
+	}
+	// --- FIN DE LA MEJORA ---
+
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 

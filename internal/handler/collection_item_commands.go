@@ -439,6 +439,18 @@ func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
 		return
 	}
 
+	// --- INICIO DE LA MEJORA ---
+	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Delete item failed because collection does not exist",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+		)
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+		return
+	}
+	// --- FIN DE LA MEJORA ---
+
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {
 		op := store.WriteOperation{Collection: collectionName, Key: key, IsDelete: true}
@@ -663,6 +675,18 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
 		return
 	}
+
+	// --- INICIO DE LA MEJORA ---
+	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
+	if !h.CollectionManager.CollectionExists(collectionName) {
+		slog.Warn("Delete-many failed because collection does not exist",
+			"user", h.AuthenticatedUser,
+			"collection", collectionName,
+		)
+		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+		return
+	}
+	// --- FIN DE LA MEJORA ---
 
 	// --- LÓGICA TRANSACCIONAL ---
 	if h.CurrentTransactionID != "" {

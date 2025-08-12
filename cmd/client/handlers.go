@@ -10,6 +10,7 @@ import (
 	"memory-tools/internal/protocol"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -352,11 +353,30 @@ func (c *cli) handleRestore(args string) error {
 func (c *cli) handleMainSet(args string) error {
 	parts := strings.SplitN(args, " ", 2)
 	if len(parts) < 2 {
-		return errors.New("usage: set <key> <value_json> [ttl]")
+		return errors.New("usage: set <key> <value_json> [ttl_seconds]")
+	}
+	key := parts[0]
+	valueAndTTL := parts[1]
+
+	var value []byte
+	var ttl time.Duration
+
+	lastSpaceIndex := strings.LastIndex(valueAndTTL, " ")
+
+	if lastSpaceIndex != -1 && lastSpaceIndex < len(valueAndTTL)-1 {
+		potentialTTL := valueAndTTL[lastSpaceIndex+1:]
+		if ttlSeconds, err := strconv.Atoi(potentialTTL); err == nil {
+			value = []byte(valueAndTTL[:lastSpaceIndex])
+			ttl = time.Duration(ttlSeconds) * time.Second
+		} else {
+			value = []byte(valueAndTTL)
+		}
+	} else {
+		value = []byte(valueAndTTL)
 	}
 
 	var cmdBuf bytes.Buffer
-	protocol.WriteSetCommand(&cmdBuf, parts[0], []byte(parts[1]), 0)
+	protocol.WriteSetCommand(&cmdBuf, key, value, ttl)
 	c.conn.Write(cmdBuf.Bytes())
 	return c.readResponse("set")
 }
@@ -460,26 +480,52 @@ func (c *cli) handleItemSet(args string) error {
 		return err
 	}
 
-	parts := strings.SplitN(remainingArgs, " ", 2)
-	if len(parts) == 0 || remainingArgs == "" {
-		return errors.New("usage: collection item set <coll> [<key>] <value_json|path>")
+	// --- INICIO DE LA LÓGICA MEJORADA PARA PARSEAR KEY, JSON Y TTL ---
+
+	parts := strings.Fields(remainingArgs)
+	if len(parts) == 0 {
+		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl_seconds]")
 	}
+
 	var key, jsonArg string
+	var ttl time.Duration // Por defecto es 0
 
-	if len(parts) == 1 {
-		key = uuid.New().String()
-		jsonArg = parts[0]
-	} else {
-		isFirstArgKeyLike := !strings.HasPrefix(parts[0], "{") && !strings.HasPrefix(parts[0], "[")
-
-		if isFirstArgKeyLike {
-			key = parts[0]
-			jsonArg = parts[1]
-		} else {
-			key = uuid.New().String()
-			jsonArg = remainingArgs
+	// Intenta parsear el último argumento como un entero para el TTL.
+	if len(parts) > 1 {
+		// Comprueba si el último "campo" es un número válido.
+		if ttlSeconds, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			ttl = time.Duration(ttlSeconds) * time.Second
+			parts = parts[:len(parts)-1] // Elimina el TTL de los argumentos para seguir procesando.
 		}
 	}
+
+	// El resto de la lógica para determinar la clave y el JSON se aplica a los argumentos restantes.
+	remainingArgsAfterTTL := strings.Join(parts, " ")
+	jsonParts := strings.SplitN(remainingArgsAfterTTL, " ", 2)
+
+	if len(jsonParts) == 0 || remainingArgsAfterTTL == "" {
+		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl_seconds]")
+	}
+
+	if len(jsonParts) == 1 {
+		// Caso: Solo hay JSON (y quizás un TTL ya parseado). Se autogenera la clave.
+		key = uuid.New().String()
+		jsonArg = jsonParts[0]
+	} else {
+		// Caso: Hay al menos dos "partes" restantes (podrían ser clave + JSON).
+		isFirstArgKeyLike := !strings.HasPrefix(jsonParts[0], "{") && !strings.HasPrefix(jsonParts[0], "[")
+
+		if isFirstArgKeyLike {
+			// El primer argumento parece una clave.
+			key = jsonParts[0]
+			jsonArg = jsonParts[1]
+		} else {
+			// El primer argumento ya parece JSON, así que no hay clave explícita.
+			key = uuid.New().String()
+			jsonArg = remainingArgsAfterTTL
+		}
+	}
+	// --- FIN DE LA LÓGICA MEJORADA ---
 
 	jsonPayload, err := c.getJSONPayload(jsonArg)
 	if err != nil {
@@ -494,7 +540,8 @@ func (c *cli) handleItemSet(args string) error {
 	}
 
 	var cmdBuf bytes.Buffer
-	protocol.WriteCollectionItemSetCommand(&cmdBuf, collName, key, jsonPayload, 0*time.Second)
+	// Se envía el TTL parseado (será 0 si no se especificó).
+	protocol.WriteCollectionItemSetCommand(&cmdBuf, collName, key, jsonPayload, ttl)
 	c.conn.Write(cmdBuf.Bytes())
 	return c.readResponse("collection item set")
 }

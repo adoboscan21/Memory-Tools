@@ -6,26 +6,30 @@
 
 ## ✨ Features
 
-- 🚀 **High-Performance Concurrent Architecture:** At its core, Memory Tools uses an efficient **sharding design** to distribute data and minimize lock contention, allowing for massive concurrency across CPU cores. Collection writes are handled by an **asynchronous persistence queue**, resulting in non-blocking, lightning-fast write operations for the client.
-- 🧠 **Hot/Cold Data Tiering:** Manage datasets far larger than the available RAM. Memory Tools keeps recent and frequently accessed ("hot") data in memory for maximum speed, while older ("cold") data resides on disk. Query and modification operations **transparently access both tiers**, and cold data can be updated or deleted on-disk without needing to be loaded into memory.
-- 💾 **Robust Data Persistence:** Data is atomically saved to disk in an optimized binary format. The use of the **write-to-`.tmp`-and-rename strategy** ensures that your data files are never corrupted, even in the event of a crash. The system reloads all "hot" data on startup for complete durability.
+- 🚀 **High-Performance Concurrent Architecture:** At its core, Memory Tools uses an efficient **sharding design** to distribute data and minimize lock contention, allowing for massive concurrency. Client write operations are lightning-fast as the persistence to disk is handled by an **asynchronous queue**.
+- 📦 **ACID-Compliant Transactions:** Go beyond simple atomic operations with full transactional guarantees. Memory Tools supports `BEGIN`, `COMMIT`, and `ROLLBACK` commands, using an internal **Two-Phase Commit (2PC) protocol** across its data shards. This ensures that complex, multi-key operations are truly **atomic**—they either all succeed or none do, maintaining perfect data integrity. An automatic **garbage collector** cleans up abandoned transactions to prevent deadlocks.
+- 💾 **Unbreakable Durability & Persistence:** Your data is safe, always.
+  - **Write-Ahead Log (WAL):** For maximum durability, every write command is first recorded in a high-speed WAL _before_ being applied to memory. In the event of a crash, the server replays the log to recover to its exact state, ensuring **zero data loss** for acknowledged writes.
+  - **Atomic Snapshots:** The server periodically takes **checkpoints** of all in-memory data, saving it to disk in an optimized binary format. The use of the **write-to-`.tmp`-and-rename strategy** ensures that snapshot files are never corrupted. Successful snapshots allow the WAL to be safely rotated.
+- 🧠 **Hot/Cold Data Tiering:** Manage datasets far larger than the available RAM. Memory Tools keeps recent ("hot") data in memory for maximum speed, while older ("cold") data resides on disk. Query and modification operations **transparently access both tiers**, and cold data can be updated on-disk without needing to be loaded into memory.
 - 🛡️ **Automated Backup & Restore System:** Go beyond simple persistence with a full-featured backup system. It performs **periodic, verifiable backups** to timestamped directories, manages a **retention policy** to clean up old files, and allows for a full manual **restore** from any backup point.
-- 📈 **High-Performance B-Tree Indexing:** Drastically accelerate query performance by creating indexes on any field within your JSON documents. Unlike simple hash indexes, the use of **B-Trees** enables extremely fast **range scans (`>`, `<`, `between`)** in addition to equality lookups. This avoids costly full-collection scans for filtered queries.
-- 🔍 **Advanced Query Engine:** Don't just get keys; query your JSON documents like a relational database. The engine is backed by a **query optimizer** that leverages available indexes to execute operations in the most efficient way possible. It supports:
+- 📈 **High-Performance B-Tree Indexing:** Drastically accelerate query performance by creating indexes on any field. Unlike simple hash maps, the use of **B-Trees** enables extremely fast **range scans (`>`, `<`, `between`)** in addition to equality lookups, avoiding costly full-collection scans.
+- 🔍 **Advanced SQL-like Query Engine:** Query your JSON documents with the power and flexibility of a relational database. The engine is backed by a **query optimizer** that intelligently leverages available indexes to execute commands in the most efficient way possible. It supports:
   - **Rich Filtering**: `WHERE`, `AND`, `OR`, `NOT`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`.
-  - **Data Shaping**: `ORDER BY`, `LIMIT`, `OFFSET`, and `DISTINCT`.
   - **Powerful Aggregations**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY`.
   - **Post-Aggregation Filtering**: A full `HAVING` clause to filter your grouped results.
-- ⚡ **Efficient Batch Operations:** Execute commands on multiple items at once for greater efficiency and reduced network latency. `set many`, `update many`, and `delete many` commands are fully supported and optimized to work with both hot and cold data.
+  - **Data Shaping**: `ORDER BY`, `LIMIT`, `OFFSET`, `DISTINCT`, and field `Projection`.
+  - **Cross-Collection Joins**: A powerful `lookups` pipeline to join documents from different collections.
+- ⚡ **Efficient Batch Operations:** Execute commands on multiple items at once for greater efficiency. `set many`, `update many`, and `delete many` commands are fully supported and optimized to work with transactions and both hot and cold data tiers.
 - 🔐 **Full Security Suite:** Security is built-in, not an afterthought.
   - **TLS Encryption:** All communication is encrypted with TLS 1.2+, protecting data in transit.
   - **Strong Authentication:** Passwords are never stored in plain text, using `bcrypt` hashing.
-  - **Granular Permissions:** A robust user management system allows for creating users and assigning specific `read`/`write` permissions per collection, with wildcard support.
-  - **Restricted Superuser**: A `root` user with administrative privileges is restricted to **localhost connections only**, preventing remote admin access.
+  - **Granular Permissions:** A robust user management system allows for creating users and assigning specific `read`/`write` permissions per collection.
+  - **Restricted Superuser**: The `root` user is restricted to **localhost connections only**.
 - 🧹 **Automatic Data & Memory Management:** The engine works for you in the background.
-  - **TTL (Time-to-Live):** Assign a time-to-live to keys so they expire automatically. A background cleaner periodically purges them.
-  - **Data Compaction:** Deletes on "cold" storage use tombstones. A background compaction worker rewrites data files to permanently remove these records and reclaim disk space.
-  - **Idle Memory Release:** The server monitors for periods of inactivity and automatically releases unused memory back to the operating system.
+  - **TTL (Time-to-Live):** Assign a time-to-live to keys so they expire automatically.
+  - **Data Compaction:** A background worker rewrites cold data files to permanently remove deleted records and reclaim disk space.
+  - **Idle Memory Release:** The server monitors for inactivity and automatically releases unused memory back to the OS.
 
 ---
 

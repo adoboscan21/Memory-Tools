@@ -180,28 +180,38 @@ func (tm *TransactionManager) Commit(txID string) error {
 		return err
 	}
 
+	// --- LÓGICA DE BLOQUEO CORREGIDA ---
+	// 1. Bloqueamos la transacción para leer su estado y tomar posesión de sus operaciones.
 	tx.mu.Lock()
 	if tx.State != StateActive {
-		tx.mu.Unlock()
+		tx.mu.Unlock() // Liberamos el bloqueo si ya no está activa.
 		return fmt.Errorf("cannot commit transaction %s; state is not active", txID)
 	}
+
+	// 2. Tomamos posesión del WriteSet y cambiamos el estado.
+	// TODO ESTO OCURRE DENTRO DE UN ÚNICO BLOQUEO.
+	writeSetToProcess := tx.WriteSet
+	tx.WriteSet = nil         // Limpiamos el original.
+	tx.State = StatePreparing // Cambiamos el estado a "Preparing".
+
+	// 3. Ahora que el estado es seguro, podemos liberar el bloqueo.
 	tx.mu.Unlock()
+	// --- FIN DE LA LÓGICA DE BLOQUEO ---
 
 	slog.Debug("TransactionManager: enriching WriteSet with timestamps", "txID", txID)
-	enrichedWriteSet := make([]WriteOperation, 0, len(tx.WriteSet))
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	for _, op := range tx.WriteSet {
+	enrichedWriteSet := make([]WriteOperation, 0, len(writeSetToProcess))
+	for _, op := range writeSetToProcess {
 		if op.IsDelete {
 			enrichedWriteSet = append(enrichedWriteSet, op)
 			continue
 		}
 
 		col := tm.cm.GetCollection(op.Collection)
-
 		var data map[string]any
 		if err := json.Unmarshal(op.Value, &data); err != nil {
-			slog.Warn("Could not unmarshal value during transaction commit, skipping timestamp enrichment", "txID", txID, "key", op.Key, "error", err)
+			slog.Warn("Could not unmarshal value during commit, skipping enrichment", "key", op.Key)
 			enrichedWriteSet = append(enrichedWriteSet, op)
 			continue
 		}
@@ -213,27 +223,20 @@ func (tm *TransactionManager) Commit(txID string) error {
 
 		enrichedValue, err := json.Marshal(data)
 		if err != nil {
-			slog.Error("Could not marshal enriched value during transaction commit", "txID", txID, "key", op.Key, "error", err)
+			slog.Error("Could not marshal enriched value during commit", "key", op.Key, "error", err)
 			tm.Rollback(txID)
 			return fmt.Errorf("failed to marshal enriched data for key %s: %w", op.Key, err)
 		}
 
-		enrichedOp := op
-		enrichedOp.Value = enrichedValue
-		enrichedWriteSet = append(enrichedWriteSet, enrichedOp)
+		op.Value = enrichedValue
+		enrichedWriteSet = append(enrichedWriteSet, op)
 	}
 
-	tx.mu.Lock()
-	tx.WriteSet = enrichedWriteSet
-	tx.State = StatePreparing
-	tx.mu.Unlock()
-
-	slog.Debug("TransactionManager: entering Prepare Phase", "txID", txID)
-
+	slog.Debug("TransactionManager: entering Prepare Phase", "txID", txID, "op_count", len(enrichedWriteSet))
 	opsByShard := make(map[*Shard][]WriteOperation)
 	keysByShard := make(map[*Shard][]string)
 
-	for _, op := range tx.WriteSet {
+	for _, op := range enrichedWriteSet {
 		col := tm.cm.GetCollection(op.Collection).(*InMemStore)
 		shard := col.getShard(op.Key)
 		opsByShard[shard] = append(opsByShard[shard], op)
@@ -242,7 +245,7 @@ func (tm *TransactionManager) Commit(txID string) error {
 
 	for shard, keys := range keysByShard {
 		if err := shard.lockKeys(txID, keys); err != nil {
-			slog.Warn("TransactionManager: lock failed during Prepare Phase, initiating rollback", "txID", txID, "shard", shard, "error", err)
+			slog.Warn("TransactionManager: lock failed during Prepare Phase, initiating rollback", "txID", txID, "error", err)
 			tm.Rollback(txID)
 			return fmt.Errorf("prepare failed: %w", err)
 		}
@@ -251,7 +254,7 @@ func (tm *TransactionManager) Commit(txID string) error {
 	for shard, ops := range opsByShard {
 		for _, op := range ops {
 			if err := shard.prepareWrite(txID, op); err != nil {
-				slog.Warn("TransactionManager: prepareWrite failed, initiating rollback", "txID", txID, "shard", shard, "error", err)
+				slog.Warn("TransactionManager: prepareWrite failed, initiating rollback", "txID", txID, "error", err)
 				tm.Rollback(txID)
 				return fmt.Errorf("prepare failed: %w", err)
 			}
@@ -275,7 +278,7 @@ func (tm *TransactionManager) Commit(txID string) error {
 	}
 
 	collectionsToSave := make(map[string]DataStore)
-	for _, op := range tx.WriteSet {
+	for _, op := range enrichedWriteSet {
 		if _, exists := collectionsToSave[op.Collection]; !exists {
 			collectionsToSave[op.Collection] = tm.cm.GetCollection(op.Collection)
 		}

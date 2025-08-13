@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -809,4 +810,90 @@ func ReadCollectionIndexListCommand(r io.Reader) (collectionName string, err err
 		return "", fmt.Errorf("failed to read collection name: %w", err)
 	}
 	return collectionName, nil
+}
+
+func ReadCommandPayload(r io.Reader, cmdType CommandType) ([]byte, error) {
+	// Usamos un buffer para reconstruir el payload.
+	var buf bytes.Buffer
+
+	// Un mapa para saber cuántos strings y cuántos []byte leer para cada comando.
+	// Formato: {numStrings, numByteSlices, hasTTL, hasKeysArray}
+	structure := map[CommandType]struct {
+		numStr, numBytes int
+		hasTTL, hasKeys  bool
+	}{
+		CmdSet:                      {1, 1, true, false},
+		CmdGet:                      {1, 0, false, false},
+		CmdCollectionCreate:         {1, 0, false, false},
+		CmdCollectionDelete:         {1, 0, false, false},
+		CmdCollectionList:           {0, 0, false, false},
+		CmdCollectionIndexCreate:    {2, 0, false, false},
+		CmdCollectionIndexDelete:    {2, 0, false, false},
+		CmdCollectionIndexList:      {1, 0, false, false},
+		CmdCollectionItemSet:        {2, 1, true, false},
+		CmdCollectionItemSetMany:    {1, 1, false, false},
+		CmdCollectionItemGet:        {2, 0, false, false},
+		CmdCollectionItemDelete:     {2, 0, false, false},
+		CmdCollectionItemList:       {1, 0, false, false},
+		CmdCollectionQuery:          {1, 1, false, false},
+		CmdCollectionItemDeleteMany: {1, 0, false, true},
+		CmdCollectionItemUpdate:     {2, 1, false, false},
+		CmdCollectionItemUpdateMany: {1, 1, false, false},
+		CmdAuthenticate:             {2, 0, false, false},
+		CmdChangeUserPassword:       {2, 0, false, false},
+		CmdUserCreate:               {2, 1, false, false},
+		CmdUserUpdate:               {1, 1, false, false},
+		CmdUserDelete:               {1, 0, false, false},
+		CmdBackup:                   {0, 0, false, false},
+		CmdRestore:                  {1, 0, false, false},
+		CmdBegin:                    {0, 0, false, false},
+		CmdCommit:                   {0, 0, false, false},
+		CmdRollback:                 {0, 0, false, false},
+	}
+
+	spec, ok := structure[cmdType]
+	if !ok {
+		return nil, fmt.Errorf("unknown command type for payload reading: %d", cmdType)
+	}
+
+	for i := 0; i < spec.numStr; i++ {
+		s, err := ReadString(r)
+		if err != nil {
+			return nil, err
+		}
+		WriteString(&buf, s)
+	}
+
+	for i := 0; i < spec.numBytes; i++ {
+		b, err := ReadBytes(r)
+		if err != nil {
+			return nil, err
+		}
+		WriteBytes(&buf, b)
+	}
+
+	if spec.hasTTL {
+		var ttlSeconds int64
+		if err := binary.Read(r, ByteOrder, &ttlSeconds); err != nil {
+			return nil, err
+		}
+		binary.Write(&buf, ByteOrder, ttlSeconds)
+	}
+
+	if spec.hasKeys {
+		var keysCount uint32
+		if err := binary.Read(r, ByteOrder, &keysCount); err != nil {
+			return nil, err
+		}
+		binary.Write(&buf, ByteOrder, keysCount)
+		for i := 0; i < int(keysCount); i++ {
+			key, err := ReadString(r)
+			if err != nil {
+				return nil, err
+			}
+			WriteString(&buf, key)
+		}
+	}
+
+	return buf.Bytes(), nil
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"memory-tools/internal/globalconst"
@@ -19,11 +20,11 @@ import (
 
 // ./internal/handler/query_commands.go
 
-// handleCollectionQuery processes the CmdCollectionQuery command, now using a pool for Query structs.
-func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
-	collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(conn)
+func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
+	// La lectura del comando ahora usa el io.Reader genérico.
+	collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(r)
 	if err != nil {
-		slog.Error("Failed to read COLLECTION_QUERY command", "error", err, "remote_addr", conn.RemoteAddr().String())
+		slog.Error("Failed to read COLLECTION_QUERY command payload", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_QUERY command format", nil)
 		return
 	}
@@ -32,7 +33,7 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 		return
 	}
 
-	// Authorization check
+	// La lógica de autorización y comprobación no cambia.
 	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized query attempt",
 			"user", h.AuthenticatedUser,
@@ -48,23 +49,12 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 		return
 	}
 
-	// =========================================================================
-	// INICIO DE LOS CAMBIOS (sync.Pool)
-	// =========================================================================
-
-	// 1. Obtener un objeto Query del pool en lugar de crear uno nuevo.
+	// La lógica del pool de objetos Query no cambia.
 	query := queryPool.Get().(*Query)
-
-	// 2. Usar 'defer' para garantizar que el objeto se limpie y se devuelva al pool
-	//    sin importar cómo salga de la función (éxito o error).
 	defer func() {
 		query.Reset()
 		queryPool.Put(query)
 	}()
-
-	// =========================================================================
-	// FIN DE LOS CAMBIOS (sync.Pool)
-	// =========================================================================
 
 	if err := json.Unmarshal(queryJSONBytes, query); err != nil {
 		slog.Warn("Failed to unmarshal query JSON",
@@ -78,8 +68,7 @@ func (h *ConnectionHandler) handleCollectionQuery(conn net.Conn) {
 
 	slog.Debug("Processing collection query", "user", h.AuthenticatedUser, "collection", collectionName, "query", string(queryJSONBytes))
 
-	// 3. Pasar el puntero a la función para evitar copiar la estructura.
-	//    (Asegúrate de que la firma de processCollectionQuery ahora sea `*Query`)
+	// La llamada a la lógica de procesamiento y el manejo de la respuesta no cambian.
 	results, err := h.processCollectionQuery(collectionName, query)
 	if err != nil {
 		slog.Error("Error processing collection query",

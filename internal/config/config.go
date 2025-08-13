@@ -15,6 +15,7 @@ type Config struct {
 	ShutdownTimeout      time.Duration
 	SnapshotInterval     time.Duration
 	EnableSnapshots      bool
+	EnableWal            bool
 	TtlCleanInterval     time.Duration
 	BackupInterval       time.Duration
 	BackupRetention      time.Duration
@@ -33,6 +34,7 @@ func NewDefaultConfig() Config {
 		ShutdownTimeout:      10 * time.Second,
 		SnapshotInterval:     5 * time.Minute,
 		EnableSnapshots:      true,
+		EnableWal:            false,
 		TtlCleanInterval:     1 * time.Minute,
 		BackupInterval:       1 * time.Hour,
 		BackupRetention:      7 * 24 * time.Hour,
@@ -113,6 +115,15 @@ func applyEnvConfig(cfg *Config) {
 			slog.Info("Overriding WorkerPoolSize from environment", "value", i)
 		} else {
 			slog.Warn("Invalid MEMORYTOOLS_WORKER_POOL_SIZE env var, using default", "value", workerPoolEnv)
+		}
+	}
+
+	if enableWalEnv := os.Getenv("MEMORYTOOLS_ENABLE_WAL"); enableWalEnv != "" {
+		if b, err := strconv.ParseBool(enableWalEnv); err == nil {
+			cfg.EnableWal = b
+			slog.Info("Overriding EnableWal from environment", "value", b)
+		} else {
+			slog.Warn("Invalid MEMORYTOOLS_ENABLE_WAL env var, using default", "value", enableWalEnv)
 		}
 	}
 

@@ -2,71 +2,101 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"net"
 )
 
-// handleBackup handles the command for a manual backup.
-func (h *ConnectionHandler) handleBackup(conn net.Conn) {
+// handleBackup maneja el comando para un backup manual.
+// Esta operación no modifica el estado de los datos, por lo que no se registra en el WAL.
+// El lector 'r' no se utiliza, pero se mantiene en la firma por consistencia.
+func (h *ConnectionHandler) handleBackup(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
 	if !h.IsRoot {
 		slog.Warn("Unauthorized backup attempt",
 			"user", h.AuthenticatedUser,
-			"remote_addr", conn.RemoteAddr().String(),
+			"remote_addr", remoteAddr,
 		)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a manual backup.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a manual backup.", nil)
+		}
 		return
 	}
 
-	slog.Info("Manual backup initiated", "user", h.AuthenticatedUser, "remote_addr", conn.RemoteAddr().String())
+	slog.Info("Manual backup initiated", "user", h.AuthenticatedUser, "remote_addr", remoteAddr)
 	if err := h.BackupManager.PerformBackup(); err != nil {
 		slog.Error("Manual backup failed", "user", h.AuthenticatedUser, "error", err)
-		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Backup failed: %v", err), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Backup failed: %v", err), nil)
+		}
 		return
 	}
 
 	slog.Info("Manual backup completed successfully", "user", h.AuthenticatedUser)
-	protocol.WriteResponse(conn, protocol.StatusOk, "OK: Manual backup completed successfully.", nil)
+	if conn != nil {
+		protocol.WriteResponse(conn, protocol.StatusOk, "OK: Manual backup completed successfully.", nil)
+	}
 }
 
-// handleRestore handles the command to restore from a backup.
-func (h *ConnectionHandler) handleRestore(conn net.Conn) {
-	if !h.IsRoot {
-		slog.Warn("Unauthorized restore attempt",
-			"user", h.AuthenticatedUser,
-			"remote_addr", conn.RemoteAddr().String(),
-		)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a restore.", nil)
-		return
+// handleRestore maneja el comando para restaurar desde un backup.
+// Esta es una operación de escritura masiva y se registra en el WAL.
+func (h *ConnectionHandler) HandleRestore(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
 	}
 
-	backupName, err := protocol.ReadRestoreCommand(conn)
+	// Durante la recuperación del WAL, conn es nil y la autorización se salta.
+	if conn != nil {
+		if !h.IsRoot {
+			slog.Warn("Unauthorized restore attempt",
+				"user", h.AuthenticatedUser,
+				"remote_addr", remoteAddr,
+			)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can trigger a restore.", nil)
+			return
+		}
+	}
+
+	backupName, err := protocol.ReadRestoreCommand(r)
 	if err != nil {
-		slog.Error("Failed to read RESTORE command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid RESTORE command format.", nil)
+		slog.Error("Failed to read RESTORE command payload", "remote_addr", remoteAddr, "error", err)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid RESTORE command format.", nil)
+		}
 		return
 	}
 	if backupName == "" {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Backup name cannot be empty.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Backup name cannot be empty.", nil)
+		}
 		return
 	}
 
 	slog.Warn("DESTRUCTIVE ACTION: Restore initiated",
 		"user", h.AuthenticatedUser,
 		"backup_name", backupName,
-		"remote_addr", conn.RemoteAddr().String(),
+		"remote_addr", remoteAddr,
 	)
 
 	err = persistence.PerformRestore(backupName, h.MainStore, h.CollectionManager)
 	if err != nil {
 		slog.Error("Restore failed", "backup_name", backupName, "user", h.AuthenticatedUser, "error", err)
-		protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Restore failed: %v. Server might be in an inconsistent state.", err), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Restore failed: %v. Server might be in an inconsistent state.", err), nil)
+		}
 		return
 	}
 
 	slog.Info("Restore complete. Enqueuing persistence tasks for all restored collections.")
 
+	// Después de una restauración, es vital guardar el nuevo estado en los snapshots.
 	if err := persistence.SaveData(h.MainStore); err != nil {
 		slog.Error("Failed to persist main store after restore", "error", err)
 	}
@@ -78,6 +108,8 @@ func (h *ConnectionHandler) handleRestore(conn net.Conn) {
 	}
 
 	slog.Info("Restore completed successfully", "backup_name", backupName, "user", h.AuthenticatedUser)
-	msg := fmt.Sprintf("OK: Restore from '%s' completed successfully. A server restart is recommended to ensure consistency.", backupName)
-	protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
+	if conn != nil {
+		msg := fmt.Sprintf("OK: Restore from '%s' completed successfully. A server restart is recommended to ensure consistency.", backupName)
+		protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
+	}
 }

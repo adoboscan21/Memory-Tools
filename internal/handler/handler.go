@@ -1,14 +1,14 @@
-// ./internal/handler/handler.go
-
 package handler
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
 	"memory-tools/internal/persistence"
 	"memory-tools/internal/protocol"
 	"memory-tools/internal/store"
+	"memory-tools/internal/wal"
 	"net"
 	"sync"
 
@@ -17,28 +17,25 @@ import (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-// ActivityUpdater es una interfaz para actualizar los timestamps de actividad.
 type ActivityUpdater interface {
 	UpdateActivity()
 }
 
-// ConnectionHandler contiene las dependencias necesarias para manejar las conexiones de los clientes.
 type ConnectionHandler struct {
-	MainStore         store.DataStore
-	CollectionManager *store.CollectionManager
-	BackupManager     *persistence.BackupManager
-	ActivityUpdater   ActivityUpdater
-	IsAuthenticated   bool
-	AuthenticatedUser string
-	IsLocalhostConn   bool
-	IsRoot            bool
-	Permissions       map[string]string
-	// --- NUEVOS CAMPOS PARA TRANSACCIONES ---
+	Wal                  *wal.WAL
+	MainStore            store.DataStore
+	CollectionManager    *store.CollectionManager
+	BackupManager        *persistence.BackupManager
+	ActivityUpdater      ActivityUpdater
+	IsAuthenticated      bool
+	AuthenticatedUser    string
+	IsLocalhostConn      bool
+	IsRoot               bool
+	Permissions          map[string]string
 	TransactionManager   *store.TransactionManager
 	CurrentTransactionID string
 }
 
-// connectionHandlerPool aloja objetos ConnectionHandler para su reutilización.
 var connectionHandlerPool = sync.Pool{
 	New: func() any {
 		return &ConnectionHandler{
@@ -47,8 +44,8 @@ var connectionHandlerPool = sync.Pool{
 	},
 }
 
-// Reset prepara el ConnectionHandler para ser reutilizado por una nueva conexión.
 func (h *ConnectionHandler) Reset() {
+	h.Wal = nil
 	h.MainStore = nil
 	h.CollectionManager = nil
 	h.BackupManager = nil
@@ -58,43 +55,42 @@ func (h *ConnectionHandler) Reset() {
 	h.IsLocalhostConn = false
 	h.IsRoot = false
 	clear(h.Permissions)
-	// --- Limpiar campos de la transacción ---
 	h.TransactionManager = nil
 	h.CurrentTransactionID = ""
 }
 
-// GetConnectionHandlerFromPool obtiene un handler del pool y lo inicializa con los datos de la nueva conexión.
-// NOTA: La firma ha cambiado para aceptar el TransactionManager. ¡Asegúrate de actualizar la llamada en main.go!
 func GetConnectionHandlerFromPool(
+	wal *wal.WAL,
 	mainStore store.DataStore,
 	colManager *store.CollectionManager,
 	backupManager *persistence.BackupManager,
-	txManager *store.TransactionManager, // Nuevo parámetro
+	txManager *store.TransactionManager,
 	updater ActivityUpdater,
 	conn net.Conn,
 ) *ConnectionHandler {
 	h := connectionHandlerPool.Get().(*ConnectionHandler)
 
 	isLocal := false
-	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
-		if host == "127.0.0.1" || host == "::1" || host == "localhost" {
-			isLocal = true
+	if conn != nil {
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+			if host == "127.0.0.1" || host == "::1" || host == "localhost" {
+				isLocal = true
+			}
 		}
 	}
 
+	h.Wal = wal
 	h.MainStore = mainStore
 	h.CollectionManager = colManager
 	h.BackupManager = backupManager
-	h.TransactionManager = txManager // Inyectar el gestor de transacciones
+	h.TransactionManager = txManager
 	h.ActivityUpdater = updater
 	h.IsLocalhostConn = isLocal
 
 	return h
 }
 
-// PutConnectionHandlerToPool resetea y devuelve un handler al pool para que pueda ser reutilizado.
 func PutConnectionHandlerToPool(h *ConnectionHandler) {
-	// Si una conexión se cierra a mitad de una transacción, asegúrate de que se aborte.
 	if h.CurrentTransactionID != "" {
 		slog.Warn("Connection closed mid-transaction, rolling back.", "txID", h.CurrentTransactionID)
 		h.TransactionManager.Rollback(h.CurrentTransactionID)
@@ -103,7 +99,32 @@ func PutConnectionHandlerToPool(h *ConnectionHandler) {
 	connectionHandlerPool.Put(h)
 }
 
-// HandleConnection procesa los comandos entrantes de un cliente TCP.
+func isWriteCommand(cmdType protocol.CommandType) bool {
+	switch cmdType {
+	case
+		protocol.CmdSet,
+		protocol.CmdCollectionCreate,
+		protocol.CmdCollectionDelete,
+		protocol.CmdCollectionIndexCreate,
+		protocol.CmdCollectionIndexDelete,
+		protocol.CmdCollectionItemSet,
+		protocol.CmdCollectionItemSetMany,
+		protocol.CmdCollectionItemDelete,
+		protocol.CmdCollectionItemDeleteMany,
+		protocol.CmdCollectionItemUpdate,
+		protocol.CmdCollectionItemUpdateMany,
+		protocol.CmdChangeUserPassword,
+		protocol.CmdUserCreate,
+		protocol.CmdUserUpdate,
+		protocol.CmdUserDelete,
+		protocol.CmdCommit,
+		protocol.CmdRestore:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	slog.Info("New client connected", "remote_addr", conn.RemoteAddr().String(), "is_localhost", h.IsLocalhostConn)
@@ -111,96 +132,108 @@ func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 	for {
 		cmdType, err := protocol.ReadCommandType(conn)
 		if err != nil {
-			if err == io.EOF {
-				slog.Info("Client disconnected", "remote_addr", conn.RemoteAddr().String())
-			} else {
+			if err != io.EOF {
 				slog.Error("Failed to read command type", "remote_addr", conn.RemoteAddr().String(), "error", err)
+			} else {
+				slog.Info("Client disconnected", "remote_addr", conn.RemoteAddr().String())
 			}
 			return
 		}
 
 		h.ActivityUpdater.UpdateActivity()
 
+		var reader io.Reader = conn
+
+		if h.Wal != nil && isWriteCommand(cmdType) {
+			payload, err := protocol.ReadCommandPayload(conn, cmdType)
+			if err != nil {
+				slog.Error("Failed to read command payload for WAL", "error", err, "command_type", cmdType)
+				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error reading command", nil)
+				continue
+			}
+
+			entry := wal.WalEntry{
+				CommandType: cmdType,
+				Payload:     payload,
+			}
+
+			if err := h.Wal.Write(entry); err != nil {
+				slog.Error("CRITICAL: Failed to write to WAL", "error", err)
+				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error: could not persist command", nil)
+				continue
+			}
+			reader = bytes.NewReader(payload)
+		}
+
 		if cmdType == protocol.CmdAuthenticate {
-			h.handleAuthenticate(conn)
+			h.handleAuthenticate(reader, conn)
 			continue
 		}
 
 		if !h.IsAuthenticated {
 			slog.Warn("Unauthorized access attempt", "remote_addr", conn.RemoteAddr().String(), "command_type", cmdType)
 			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Please authenticate first.", nil)
+			io.Copy(io.Discard, reader)
 			continue
 		}
 
 		switch cmdType {
-		// --- NUEVOS COMANDOS DE TRANSACCIÓN ---
 		case protocol.CmdBegin:
-			h.handleBegin(conn)
+			h.handleBegin(reader, conn)
 		case protocol.CmdCommit:
-			h.handleCommit(conn)
+			h.HandleCommit(reader, conn)
 		case protocol.CmdRollback:
-			h.handleRollback(conn)
-
-		// Comandos del Almacén Principal
+			h.handleRollback(reader, conn)
 		case protocol.CmdSet:
-			h.handleMainStoreSet(conn)
+			h.HandleMainStoreSet(reader, conn)
 		case protocol.CmdGet:
-			h.handleMainStoreGet(conn)
-
-		// Comandos de Gestión de Colecciones
+			h.handleMainStoreGet(reader, conn)
 		case protocol.CmdCollectionCreate:
-			h.handleCollectionCreate(conn)
+			h.HandleCollectionCreate(reader, conn)
 		case protocol.CmdCollectionDelete:
-			h.handleCollectionDelete(conn)
+			h.HandleCollectionDelete(reader, conn)
 		case protocol.CmdCollectionList:
-			h.handleCollectionList(conn)
+			h.handleCollectionList(reader, conn)
 		case protocol.CmdCollectionIndexCreate:
-			h.handleCollectionIndexCreate(conn)
+			h.HandleCollectionIndexCreate(reader, conn)
 		case protocol.CmdCollectionIndexDelete:
-			h.handleCollectionIndexDelete(conn)
+			h.HandleCollectionIndexDelete(reader, conn)
 		case protocol.CmdCollectionIndexList:
-			h.handleCollectionIndexList(conn)
-
-		// Comandos de Items de Colección
+			h.handleCollectionIndexList(reader, conn)
 		case protocol.CmdCollectionItemSet:
-			h.handleCollectionItemSet(conn)
+			h.HandleCollectionItemSet(reader, conn)
 		case protocol.CmdCollectionItemSetMany:
-			h.handleCollectionItemSetMany(conn)
+			h.HandleCollectionItemSetMany(reader, conn)
 		case protocol.CmdCollectionItemDeleteMany:
-			h.handleCollectionItemDeleteMany(conn)
+			h.HandleCollectionItemDeleteMany(reader, conn)
 		case protocol.CmdCollectionItemGet:
-			h.handleCollectionItemGet(conn)
+			h.handleCollectionItemGet(reader, conn)
 		case protocol.CmdCollectionItemDelete:
-			h.handleCollectionItemDelete(conn)
+			h.HandleCollectionItemDelete(reader, conn)
 		case protocol.CmdCollectionItemList:
-			h.handleCollectionItemList(conn)
+			h.handleCollectionItemList(reader, conn)
 		case protocol.CmdCollectionItemUpdate:
-			h.handleCollectionItemUpdate(conn)
+			h.HandleCollectionItemUpdate(reader, conn)
 		case protocol.CmdCollectionItemUpdateMany:
-			h.handleCollectionItemUpdateMany(conn)
-
-		// Comando de Consulta de Colección
+			h.HandleCollectionItemUpdateMany(reader, conn)
 		case protocol.CmdCollectionQuery:
-			h.handleCollectionQuery(conn)
-
-		// Comandos de Gestión de Usuarios
+			h.handleCollectionQuery(reader, conn)
 		case protocol.CmdChangeUserPassword:
-			h.handleChangeUserPassword(conn)
+			h.HandleChangeUserPassword(reader, conn)
 		case protocol.CmdUserCreate:
-			h.handleUserCreate(conn)
+			h.HandleUserCreate(reader, conn)
 		case protocol.CmdUserUpdate:
-			h.handleUserUpdate(conn)
+			h.HandleUserUpdate(reader, conn)
 		case protocol.CmdUserDelete:
-			h.handleUserDelete(conn)
-
+			h.HandleUserDelete(reader, conn)
 		case protocol.CmdBackup:
-			h.handleBackup(conn)
+			h.handleBackup(reader, conn)
 		case protocol.CmdRestore:
-			h.handleRestore(conn)
-
+			h.HandleRestore(reader, conn)
 		default:
 			slog.Warn("Received unhandled command type", "command_type", cmdType, "remote_addr", conn.RemoteAddr().String())
 			protocol.WriteResponse(conn, protocol.StatusBadCommand, fmt.Sprintf("BAD COMMAND: Unhandled or unknown command type %d", cmdType), nil)
+			io.Copy(io.Discard, reader)
 		}
 	}
 }

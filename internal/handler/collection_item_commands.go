@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"memory-tools/internal/globalconst"
 	"memory-tools/internal/persistence"
@@ -10,57 +11,61 @@ import (
 	"net"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
-// handleCollectionItemSet procesa el CmdCollectionItemSet. Ahora es consciente de las transacciones.
-func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
-	collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(conn)
+// handleCollectionItemSet procesa el CmdCollectionItemSet. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, key, value, ttl, err := protocol.ReadCollectionItemSetCommand(r)
 	if err != nil {
-		slog.Error("Failed to read COLLECTION_ITEM_SET command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_SET command format", nil)
-		return
-	}
-	if collectionName == "" || len(value) == 0 {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
-		return
-	}
-
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item set attempt", "user", h.AuthenticatedUser, "collection", collectionName)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		slog.Error("Failed to read COLLECTION_ITEM_SET command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_SET command format", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Previene la creación implícita de colecciones para operaciones no transaccionales.
-	if h.CurrentTransactionID == "" {
-		if !h.CollectionManager.CollectionExists(collectionName) {
-			slog.Warn("Set item failed because collection does not exist",
-				"user", h.AuthenticatedUser,
-				"collection", collectionName,
-			)
+	// --- INICIO DE LA CORRECCIÓN ---
+	if key == "" {
+		slog.Error("CRITICAL: SET command received with an empty key. This is now a rejected operation.", "collection", collectionName, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "BAD_REQUEST: Key cannot be empty for a SET operation.", nil)
+		}
+		return
+	}
+	// --- FIN DE LA CORRECCIÓN ---
+
+	if conn != nil {
+		if collectionName == "" || len(value) == 0 {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item set attempt", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if h.CurrentTransactionID == "" && !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Set item failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist. Please create it first.", collectionName), nil)
 			return
 		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
-		// 1. Generamos el UUID para la clave si es necesario.
-		if key == "" {
-			key = uuid.New().String()
-		}
-
-		// 2. (CRÍTICO) Inyectamos el _id en el documento JSON.
+		// La lógica de enriquecer el documento con el _id puede permanecer como una
+		// salvaguarda, pero ya no genera la clave.
 		var data map[string]any
 		if err := json.Unmarshal(value, &data); err == nil {
 			data[globalconst.ID] = key
 			newValue, marshalErr := json.Marshal(data)
 			if marshalErr == nil {
-				value = newValue // Sobrescribimos el 'value' con la versión que incluye el _id.
+				value = newValue
 			} else {
 				slog.Warn("Could not marshal enriched value in transaction SET", "key", key, "error", marshalErr)
 			}
@@ -75,30 +80,31 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 			IsDelete:   false,
 		}
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record operation in transaction: "+err.Error(), nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record operation in transaction: "+err.Error(), nil)
+			}
 			return
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, "OK: Operation queued in transaction.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, "OK: Operation queued in transaction.", nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original para operaciones no transaccionales
+	// Lógica no transaccional
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var data map[string]any
 	if err := json.Unmarshal(value, &data); err != nil {
 		slog.Warn("Failed to unmarshal item data for SET", "error", err, "collection", collectionName, "user", h.AuthenticatedUser)
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid value. Must be a JSON object.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid value. Must be a JSON object.", nil)
+		}
 		return
 	}
 
-	if key == "" {
-		key = uuid.New().String()
-	}
-
+	// Ya no se genera el `key` aquí. Se asume que es válido.
 	existingValue, found := colStore.Get(key)
 	now := time.Now().UTC().Format(time.RFC3339)
-
 	data[globalconst.ID] = key
 	data[globalconst.UPDATED_AT] = now
 
@@ -118,7 +124,9 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	finalValue, err := json.Marshal(data)
 	if err != nil {
 		slog.Error("Failed to marshal final value with timestamps", "key", key, "collection", collectionName, "error", err)
-		protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value with timestamps", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusError, "Failed to process value with timestamps", nil)
+		}
 		return
 	}
 
@@ -126,58 +134,65 @@ func (h *ConnectionHandler) handleCollectionItemSet(conn net.Conn) {
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 
 	slog.Info("Item set in collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "operation", boolToString(found, "update", "create"))
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), nil)
+	if conn != nil {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), nil)
+	}
 }
 
-// handleCollectionItemUpdate procesa el CmdCollectionItemUpdate. Ahora es consciente de las transacciones.
-func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
-	collectionName, key, patchValue, err := protocol.ReadCollectionItemUpdateCommand(conn)
+// handleCollectionItemUpdate procesa el CmdCollectionItemUpdate. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, key, patchValue, err := protocol.ReadCollectionItemUpdateCommand(r)
 	if err != nil {
-		slog.Error("Failed to read COLLECTION_ITEM_UPDATE command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_UPDATE command format", nil)
-		return
-	}
-	if collectionName == "" || key == "" || len(patchValue) == 0 {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name, key, or patch value cannot be empty", nil)
-		return
-	}
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item update attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		slog.Error("Failed to read COLLECTION_ITEM_UPDATE command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_UPDATE command format", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
-	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Update item failed because collection does not exist",
-			"user", h.AuthenticatedUser,
-			"collection", collectionName,
-		)
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
-		return
+	if conn != nil {
+		if collectionName == "" || key == "" || len(patchValue) == 0 {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name, key, or patch value cannot be empty", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item update attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Update item failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+			return
+		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
-		// Nota: Para esta versión, los updates transaccionales solo funcionan en datos 'hot' (en RAM).
 		colStore := h.CollectionManager.GetCollection(collectionName)
 		existingValue, found := colStore.Get(key)
 		if !found {
-			msg := "Item not found in memory. Updates inside a transaction currently only support hot data."
-			protocol.WriteResponse(conn, protocol.StatusNotFound, msg, nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusNotFound, "Item not found in memory. Updates inside a transaction currently only support hot data.", nil)
+			}
 			return
 		}
-
-		var existingData map[string]any
+		var existingData, patchData map[string]any
 		if err := json.Unmarshal(existingValue, &existingData); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document for update.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document for update.", nil)
+			}
 			return
 		}
-		var patchData map[string]any
 		if err := json.Unmarshal(patchValue, &patchData); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
+			}
 			return
 		}
 		for k, v := range patchData {
@@ -185,30 +200,34 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 				existingData[k] = v
 			}
 		}
-		// El timestamp de UPDATED_AT se aplicará en el momento del commit.
 		finalValue, _ := json.Marshal(existingData)
-
 		op := store.WriteOperation{Collection: collectionName, Key: key, Value: finalValue, IsDelete: false}
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update in transaction: "+err.Error(), nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update in transaction: "+err.Error(), nil)
+			}
 			return
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, "OK: Update operation queued in transaction.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, "OK: Update operation queued in transaction.", nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original no transaccional (hot/cold)
+	// Lógica no transaccional (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	if existingValue, found := colStore.Get(key); found {
-		slog.Debug("Updating hot item in RAM", "collection", collectionName, "key", key)
 		var existingData, patchData map[string]any
 		if err := json.Unmarshal(existingValue, &existingData); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document. Cannot apply patch.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "Failed to unmarshal existing document. Cannot apply patch.", nil)
+			}
 			return
 		}
 		if err := json.Unmarshal(patchValue, &patchData); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid patch JSON format.", nil)
+			}
 			return
 		}
 		for k, v := range patchData {
@@ -221,27 +240,35 @@ func (h *ConnectionHandler) handleCollectionItemUpdate(conn net.Conn) {
 		colStore.Set(key, updatedValue, 0)
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 		slog.Info("Item updated in collection (hot)", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' updated in collection '%s'", key, collectionName), updatedValue)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' updated in collection '%s'", key, collectionName), updatedValue)
+		}
 		return
 	}
 
-	slog.Debug("Item not in RAM, attempting to update in cold storage", "collection", collectionName, "key", key)
 	fileLock := h.CollectionManager.GetFileLock(collectionName)
 	fileLock.Lock()
 	updated, err := persistence.UpdateColdItem(collectionName, key, patchValue)
 	fileLock.Unlock()
+
 	if err != nil {
 		slog.Error("Failed to update cold item on disk", "collection", collectionName, "key", key, "error", err)
-		protocol.WriteResponse(conn, protocol.StatusError, "Failed to update item on disk", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusError, "Failed to update item on disk", nil)
+		}
 		return
 	}
 	if !updated {
 		slog.Warn("Item update failed: key not found in hot or cold storage", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection '%s'", key, collectionName), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection '%s'", key, collectionName), nil)
+		}
 		return
 	}
 	slog.Info("Item updated in collection (cold)", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Cold item '%s' updated in collection '%s'", key, collectionName), nil)
+	if conn != nil {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Cold item '%s' updated in collection '%s'", key, collectionName), nil)
+	}
 }
 
 type updateManyPayload struct {
@@ -249,50 +276,57 @@ type updateManyPayload struct {
 	Patch map[string]any `json:"patch"`
 }
 
-// handleCollectionItemUpdateMany processes the CmdCollectionItemUpdateMany command.
-func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
-	collectionName, value, err := protocol.ReadCollectionItemUpdateManyCommand(conn)
+// handleCollectionItemUpdateMany procesa el CmdCollectionItemUpdateMany. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, value, err := protocol.ReadCollectionItemUpdateManyCommand(r)
 	if err != nil {
-		slog.Error("Failed to read UPDATE_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid UPDATE_COLLECTION_ITEMS_MANY command format", nil)
+		slog.Error("Failed to read UPDATE_MANY command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid UPDATE_COLLECTION_ITEMS_MANY command format", nil)
+		}
 		return
 	}
-	if collectionName == "" || len(value) == 0 {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
-		return
-	}
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item update-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
-		return
-	}
+
 	var payloads []updateManyPayload
 	if err := json.Unmarshal(value, &payloads); err != nil {
 		slog.Warn("Failed to unmarshal JSON array for UPDATE_MANY", "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format. Expected an array of `{\"_id\": \"...\", \"patch\": {...}}`.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format. Expected an array of `{\"_id\": \"...\", \"patch\": {...}}`.", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
-	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Update-many failed because collection does not exist",
-			"user", h.AuthenticatedUser,
-			"collection", collectionName,
-		)
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
-		return
+	if conn != nil {
+		if collectionName == "" || len(value) == 0 {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item update-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Update-many failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+			return
+		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
 		colStore := h.CollectionManager.GetCollection(collectionName)
 		for _, p := range payloads {
 			existingValue, found := colStore.Get(p.ID)
 			if !found {
-				msg := fmt.Sprintf("Item '%s' not found in memory for transactional update.", p.ID)
-				protocol.WriteResponse(conn, protocol.StatusNotFound, msg, nil)
+				if conn != nil {
+					protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("Item '%s' not found in memory for transactional update.", p.ID), nil)
+				}
 				return
 			}
 			var existingData map[string]any
@@ -305,16 +339,19 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 			finalValue, _ := json.Marshal(existingData)
 			op := store.WriteOperation{Collection: collectionName, Key: p.ID, Value: finalValue, IsDelete: false}
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update-many op: "+err.Error(), nil)
+				if conn != nil {
+					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update-many op: "+err.Error(), nil)
+				}
 				return
 			}
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d update operations queued in transaction.", len(payloads)), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d update operations queued in transaction.", len(payloads)), nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original no transaccional (hot/cold)
+	// Lógica no transaccional (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var hotPayloads []updateManyPayload
 	var coldPayloads []persistence.ColdUpdatePayload
@@ -361,7 +398,9 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 		fileLock.Unlock()
 		if err != nil {
 			slog.Error("Failed to update cold items batch", "collection", collectionName, "error", err)
-			protocol.WriteResponse(conn, protocol.StatusError, "An error occurred during the cold batch update.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "An error occurred during the cold batch update.", nil)
+			}
 			return
 		}
 		updatedColdCount = count
@@ -369,23 +408,25 @@ func (h *ConnectionHandler) handleCollectionItemUpdateMany(conn net.Conn) {
 	totalUpdated := updatedHotCount + updatedColdCount
 	totalFailed := (len(payloads) - totalUpdated)
 	slog.Info("Update-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "updated_count", totalUpdated, "failed_count", totalFailed)
-	summary := fmt.Sprintf("OK: %d items updated. %d items failed or not found.", totalUpdated, totalFailed)
-	var responseData []byte
-	if len(failedHotKeys) > 0 {
-		responseData, _ = json.Marshal(map[string][]string{"failed_hot_keys": failedHotKeys})
+	if conn != nil {
+		summary := fmt.Sprintf("OK: %d items updated. %d items failed or not found.", totalUpdated, totalFailed)
+		var responseData []byte
+		if len(failedHotKeys) > 0 {
+			responseData, _ = json.Marshal(map[string][]string{"failed_hot_keys": failedHotKeys})
+		}
+		protocol.WriteResponse(conn, protocol.StatusOk, summary, responseData)
 	}
-	protocol.WriteResponse(conn, protocol.StatusOk, summary, responseData)
 }
 
-// handleCollectionItemGet processes the CmdCollectionItemGet command.
-func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
+// handleCollectionItemGet procesa el CmdCollectionItemGet. Es una operación de solo lectura.
+func (h *ConnectionHandler) handleCollectionItemGet(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID != "" {
 		protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Read operations like GET are not supported inside a transaction in this version.", nil)
 		return
 	}
-	collectionName, key, err := protocol.ReadCollectionItemGetCommand(conn)
+	collectionName, key, err := protocol.ReadCollectionItemGetCommand(r)
 	if err != nil {
-		slog.Error("Failed to read GET_ITEM command", "error", err, "remote_addr", conn.RemoteAddr().String())
+		slog.Error("Failed to read GET_ITEM command payload", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_GET command format", nil)
 		return
 	}
@@ -421,85 +462,99 @@ func (h *ConnectionHandler) handleCollectionItemGet(conn net.Conn) {
 	}
 }
 
-// handleCollectionItemDelete processes the CmdCollectionItemDelete command.
-func (h *ConnectionHandler) handleCollectionItemDelete(conn net.Conn) {
-	collectionName, key, err := protocol.ReadCollectionItemDeleteCommand(conn)
+// handleCollectionItemDelete procesa el CmdCollectionItemDelete. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, key, err := protocol.ReadCollectionItemDeleteCommand(r)
 	if err != nil {
-		slog.Error("Failed to read DELETE_ITEM command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_DELETE command format", nil)
-		return
-	}
-	if collectionName == "" || key == "" {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
-		return
-	}
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		slog.Error("Failed to read DELETE_ITEM command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_DELETE command format", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
-	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Delete item failed because collection does not exist",
-			"user", h.AuthenticatedUser,
-			"collection", collectionName,
-		)
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
-		return
+	if conn != nil {
+		if collectionName == "" || key == "" {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or key cannot be empty", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item delete attempt", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Delete item failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+			return
+		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
 		op := store.WriteOperation{Collection: collectionName, Key: key, IsDelete: true}
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-			protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete in transaction: "+err.Error(), nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete in transaction: "+err.Error(), nil)
+			}
 			return
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, "OK: Delete operation queued in transaction.", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, "OK: Delete operation queued in transaction.", nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original no transaccional (hot/cold)
+	// Lógica no transaccional (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	if _, foundInRam := colStore.Get(key); foundInRam {
-		slog.Debug("Deleting hot item from RAM", "collection", collectionName, "key", key)
 		colStore.Delete(key)
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 		slog.Info("Item deleted from collection (hot)", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s'", key, collectionName), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' deleted from collection '%s'", key, collectionName), nil)
+		}
 		return
 	}
-	slog.Debug("Item not in RAM, attempting to mark for deletion in cold storage", "collection", collectionName, "key", key)
+
 	fileLock := h.CollectionManager.GetFileLock(collectionName)
 	fileLock.Lock()
 	marked, err := persistence.DeleteColdItem(collectionName, key)
 	fileLock.Unlock()
+
 	if err != nil {
 		slog.Error("Failed to mark item as deleted on disk", "collection", collectionName, "key", key, "error", err)
-		protocol.WriteResponse(conn, protocol.StatusError, "Failed to perform delete operation on disk", nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusError, "Failed to perform delete operation on disk", nil)
+		}
 		return
 	}
 	if !marked {
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection", key), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection", key), nil)
+		}
 		return
 	}
 	slog.Info("Item marked for deletion in collection (cold)", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' marked for deletion from collection '%s'", key, collectionName), nil)
+	if conn != nil {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' marked for deletion from collection '%s'", key, collectionName), nil)
+	}
 }
 
-// handleCollectionItemList processes the CmdCollectionItemList command.
-func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
+// handleCollectionItemList procesa el CmdCollectionItemList. Es una operación de solo lectura.
+func (h *ConnectionHandler) handleCollectionItemList(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID != "" {
 		protocol.WriteResponse(conn, protocol.StatusError, "ERROR: LIST command is not allowed inside a transaction in this version.", nil)
 		return
 	}
-	collectionName, err := protocol.ReadCollectionItemListCommand(conn)
+	collectionName, err := protocol.ReadCollectionItemListCommand(r)
 	if err != nil {
-		slog.Error("Failed to read LIST_ITEMS command", "error", err, "remote_addr", conn.RemoteAddr().String())
+		slog.Error("Failed to read LIST_ITEMS command payload", "error", err, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid COLLECTION_ITEM_LIST command format", nil)
 		return
 	}
@@ -509,7 +564,7 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	}
 	if !h.IsRoot || !h.IsLocalhostConn {
 		slog.Warn("Unauthorized list-all-items attempt", "user", h.AuthenticatedUser, "collection", collectionName, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Listing all items is a privileged operation for root@localhost. Please use 'collection query' with limit/offset for data retrieval.", nil)
+		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Listing all items is a privileged operation for root@localhost. Please use 'collection query' for data retrieval.", nil)
 		return
 	}
 	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
@@ -553,90 +608,102 @@ func (h *ConnectionHandler) handleCollectionItemList(conn net.Conn) {
 	slog.Info("All items listed from collection", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", len(allData))
 }
 
-// handleCollectionItemSetMany procesa el comando para insertar múltiples ítems en una colección,
-// con lógica diferenciada para operaciones transaccionales y no transaccionales.
-func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
-	collectionName, value, err := protocol.ReadCollectionItemSetManyCommand(conn)
+// handleCollectionItemSetMany procesa el CmdCollectionItemSetMany. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, value, err := protocol.ReadCollectionItemSetManyCommand(r)
 	if err != nil {
-		slog.Error("Failed to read SET_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET_COLLECTION_ITEMS_MANY command format", nil)
-		return
-	}
-	if collectionName == "" || len(value) == 0 {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
-		return
-	}
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item set-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
-		return
-	}
-	var records []map[string]any
-	if err := json.Unmarshal(value, &records); err != nil {
-		slog.Warn("Failed to unmarshal JSON array for SET_MANY", "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format", nil)
+		slog.Error("Failed to read SET_MANY command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid SET_COLLECTION_ITEMS_MANY command format", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Previene la creación implícita de colecciones para operaciones no transaccionales.
-	if h.CurrentTransactionID == "" {
-		if !h.CollectionManager.CollectionExists(collectionName) {
-			slog.Warn("Set-many operation failed because collection does not exist",
-				"user", h.AuthenticatedUser,
-				"collection", collectionName,
-			)
+	var records []map[string]any
+	if err := json.Unmarshal(value, &records); err != nil {
+		slog.Warn("Failed to unmarshal JSON array for SET_MANY", "collection", collectionName, "error", err, "user", h.AuthenticatedUser)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Invalid JSON array format", nil)
+		}
+		return
+	}
+
+	if conn != nil {
+		if collectionName == "" || len(value) == 0 {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item set-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if h.CurrentTransactionID == "" && !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Set-many operation failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist. Please create it first.", collectionName), nil)
 			return
 		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// --- INICIO DE LA CORRECCIÓN ---
+	validRecords := make([]map[string]any, 0, len(records))
+	for i, record := range records {
+		key, ok := record[globalconst.ID].(string)
+		if !ok || key == "" {
+			slog.Warn("Skipping record in SET_MANY batch due to missing or empty _id", "collection", collectionName, "record_index", i)
+			continue
+		}
+		validRecords = append(validRecords, record)
+	}
+
+	if len(validRecords) == 0 {
+		slog.Warn("SET_MANY operation contained no records with a valid _id.", "collection", collectionName, "total_records_received", len(records))
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, "OK: 0 items processed. All records were missing a valid _id.", nil)
+		}
+		return
+	}
+	// --- FIN DE LA CORRECCIÓN ---
+
+	// Lógica transaccional (ahora itera sobre `validRecords`)
 	if h.CurrentTransactionID != "" {
-		for _, record := range records {
-			// Extrae la clave del documento; puede estar vacía.
-			key, _ := record[globalconst.ID].(string)
+		for _, record := range validRecords {
+			// Ya no hay que generar UUID, sabemos que la clave existe.
+			key := record[globalconst.ID].(string)
 
-			// Si no hay clave, se genera una y se inyecta de vuelta en el documento.
-			if key == "" {
-				key = uuid.New().String()
-				record[globalconst.ID] = key
-			}
-
-			// Se serializa el documento (ya con su _id) a formato JSON.
 			valBytes, err := json.Marshal(record)
 			if err != nil {
 				slog.Warn("Failed to marshal record in SET_MANY (transaction)", "key", key, "error", err)
-				continue // Salta este registro si hay un error y continúa con el siguiente.
+				continue
 			}
-
-			// Se crea la operación de escritura y se registra en la transacción.
 			op := store.WriteOperation{Collection: collectionName, Key: key, Value: valBytes, IsDelete: false}
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record set-many op in transaction: "+err.Error(), nil)
+				if conn != nil {
+					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record set-many op in transaction: "+err.Error(), nil)
+				}
 				return
 			}
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d set operations queued in transaction.", len(records)), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d set operations queued in transaction.", len(validRecords)), nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original no transaccional
+	// Lógica no transaccional (ahora itera sobre `validRecords`)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	insertedCount := 0
 	now := time.Now().UTC().Format(time.RFC3339)
-	for _, record := range records {
-		var key string
-		// Genera una clave si el documento no la tiene.
-		if id, ok := record[globalconst.ID].(string); ok && id != "" {
-			key = id
-		} else {
-			key = uuid.New().String()
-		}
-		// Inyecta la clave y las marcas de tiempo en el documento.
-		record[globalconst.ID] = key
+	for _, record := range validRecords {
+		// La lógica de generación de UUID se elimina. Se asume que la clave existe.
+		key := record[globalconst.ID].(string)
+
+		// Enriquecemos el documento con las fechas.
 		record[globalconst.CREATED_AT] = now
 		record[globalconst.UPDATED_AT] = now
 
@@ -645,67 +712,73 @@ func (h *ConnectionHandler) handleCollectionItemSetMany(conn net.Conn) {
 			slog.Warn("Failed to marshal record in SET_MANY batch", "key", key, "collection", collectionName, "error", err)
 			continue
 		}
-		// Guarda el ítem en el almacén de memoria.
 		colStore.Set(key, updatedValue, 0)
 		insertedCount++
 	}
 
-	// Si se insertó al menos un ítem, se encola una tarea para persistir los cambios.
 	if insertedCount > 0 {
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	}
 	slog.Info("Set-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", insertedCount)
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d items set in collection '%s' (persistence async)", insertedCount, collectionName), nil)
+	if conn != nil {
+		msg := fmt.Sprintf("OK: %d items set in collection '%s' (persistence async). %d records were skipped due to missing _id.", insertedCount, collectionName, len(records)-insertedCount)
+		protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
+	}
 }
 
-// handleCollectionItemDeleteMany processes the CmdCollectionItemDeleteMany command.
-func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
-	collectionName, keys, err := protocol.ReadCollectionItemDeleteManyCommand(conn)
+// handleCollectionItemDeleteMany procesa el CmdCollectionItemDeleteMany. Es una operación de escritura.
+func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net.Conn) {
+	remoteAddr := "recovery"
+	if conn != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+
+	collectionName, keys, err := protocol.ReadCollectionItemDeleteManyCommand(r)
 	if err != nil {
-		slog.Error("Failed to read DELETE_MANY command", "error", err, "remote_addr", conn.RemoteAddr().String())
-		protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_ITEMS_MANY command format", nil)
-		return
-	}
-	if collectionName == "" || len(keys) == 0 {
-		protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty and keys must be provided", nil)
-		return
-	}
-	if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
-		slog.Warn("Unauthorized collection item delete-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
-		protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+		slog.Error("Failed to read DELETE_MANY command payload", "error", err, "remote_addr", remoteAddr)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusBadCommand, "Invalid DELETE_COLLECTION_ITEMS_MANY command format", nil)
+		}
 		return
 	}
 
-	// --- INICIO DE LA MEJORA ---
-	// Se añade una comprobación explícita para dar un error más claro si la colección no existe.
-	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Delete-many failed because collection does not exist",
-			"user", h.AuthenticatedUser,
-			"collection", collectionName,
-		)
-		protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
-		return
+	if conn != nil {
+		if collectionName == "" || len(keys) == 0 {
+			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name cannot be empty and keys must be provided", nil)
+			return
+		}
+		if !h.hasPermission(collectionName, globalconst.PermissionWrite) {
+			slog.Warn("Unauthorized collection item delete-many attempt", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusUnauthorized, fmt.Sprintf("UNAUTHORIZED: You do not have write permission for collection '%s'", collectionName), nil)
+			return
+		}
+		if !h.CollectionManager.CollectionExists(collectionName) {
+			slog.Warn("Delete-many failed because collection does not exist", "user", h.AuthenticatedUser, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist.", collectionName), nil)
+			return
+		}
 	}
-	// --- FIN DE LA MEJORA ---
 
-	// --- LÓGICA TRANSACCIONAL ---
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
 		for _, key := range keys {
 			op := store.WriteOperation{Collection: collectionName, Key: key, IsDelete: true}
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete-many op in transaction: "+err.Error(), nil)
+				if conn != nil {
+					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete-many op in transaction: "+err.Error(), nil)
+				}
 				return
 			}
 		}
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d delete operations queued in transaction.", len(keys)), nil)
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d delete operations queued in transaction.", len(keys)), nil)
+		}
 		return
 	}
-	// --- FIN LÓGICA TRANSACCIONAL ---
 
-	// Lógica original no transaccional (hot/cold)
+	// Lógica no transaccional (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
-	var hotKeysToDelete []string
-	var coldKeysToTombstone []string
+	var hotKeysToDelete, coldKeysToTombstone []string
 	for _, key := range keys {
 		if _, foundInRam := colStore.Get(key); foundInRam {
 			hotKeysToDelete = append(hotKeysToDelete, key)
@@ -714,7 +787,6 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 		}
 	}
 	if len(hotKeysToDelete) > 0 {
-		slog.Debug("Deleting hot items from RAM in batch", "count", len(hotKeysToDelete))
 		for _, key := range hotKeysToDelete {
 			colStore.Delete(key)
 		}
@@ -722,23 +794,26 @@ func (h *ConnectionHandler) handleCollectionItemDeleteMany(conn net.Conn) {
 	}
 	var markedCount int
 	if len(coldKeysToTombstone) > 0 {
-		slog.Debug("Marking cold items for deletion in batch", "count", len(coldKeysToTombstone))
 		fileLock := h.CollectionManager.GetFileLock(collectionName)
 		fileLock.Lock()
 		markedCount, err = persistence.DeleteManyColdItems(collectionName, coldKeysToTombstone)
 		fileLock.Unlock()
 		if err != nil {
 			slog.Error("Failed to mark items for deletion in cold storage", "collection", collectionName, "error", err)
-			protocol.WriteResponse(conn, protocol.StatusError, "An error occurred during the batch delete operation.", nil)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "An error occurred during the batch delete operation.", nil)
+			}
 			return
 		}
 	}
 	totalProcessed := len(hotKeysToDelete) + markedCount
 	slog.Info("Delete-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "processed_count", totalProcessed)
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys processed for deletion from collection '%s'.", totalProcessed, collectionName), nil)
+	if conn != nil {
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d keys processed for deletion from collection '%s'.", totalProcessed, collectionName), nil)
+	}
 }
 
-// boolToString is a small helper for clearer logs.
+// boolToString es un pequeño helper para logs más claros.
 func boolToString(b bool, trueStr, falseStr string) string {
 	if b {
 		return trueStr

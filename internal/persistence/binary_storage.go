@@ -184,7 +184,6 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 	}
 	defer file.Close()
 
-	// Write index metadata header
 	if err := binary.Write(file, binary.LittleEndian, uint32(len(indexedFields))); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to write index count for collection '%s': %w", collectionName, err)
@@ -200,7 +199,6 @@ func (p *CollectionPersisterImpl) SaveCollectionData(collectionName string, s st
 		}
 	}
 
-	// Write data
 	if err := binary.Write(file, binary.LittleEndian, uint32(len(data))); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to write data count for collection '%s': %w", collectionName, err)
@@ -266,13 +264,12 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 	if err != nil {
 		if os.IsNotExist(err) {
 			slog.Info("Collection file not found, initializing empty collection", "collection", collectionName, "path", filePath)
-			return nil // No data to load, which is fine.
+			return nil
 		}
 		return fmt.Errorf("failed to open collection file '%s': %w", filePath, err)
 	}
 	defer file.Close()
 
-	// ... (reading index metadata does not change) ...
 	var numIndexes uint32
 	if err := binary.Read(file, binary.LittleEndian, &numIndexes); err != nil {
 		slog.Warn("Could not read index header, assuming old file format", "collection", collectionName, "error", err)
@@ -305,7 +302,6 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 	coldDataCount := 0
 
 	for i := 0; i < int(numEntries); i++ {
-		// ... (reading key and value bytes does not change) ...
 		var keyLen uint32
 		if err := binary.Read(file, binary.LittleEndian, &keyLen); err != nil {
 			return fmt.Errorf("failed to read key length for entry %d in collection '%s': %w", i, collectionName, err)
@@ -325,24 +321,19 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 			return fmt.Errorf("failed to read value for key '%s' in collection '%s': %w", key, collectionName, err)
 		}
 
-		// --- NEW HOT/COLD FILTERING LOGIC ---
-		// If hotThreshold is zero (disabled), we load everything.
 		if !hotThreshold.IsZero() {
 			var doc map[string]any
-			// We inspect the document's timestamp without storing it in memory yet.
 			if err := jsoniter.Unmarshal(valBytes, &doc); err == nil {
 				if createdAtStr, ok := doc[globalconst.CREATED_AT].(string); ok {
 					createdAt, err := time.Parse(time.RFC3339, createdAtStr)
-					// If the document is older than the threshold, we consider it "cold" and don't load it into RAM.
 					if err == nil && createdAt.Before(hotThreshold) {
 						coldDataCount++
-						continue // Skip to the next iteration of the loop.
+						continue
 					}
 				}
 			}
 		}
 
-		// If we get here, the data is "hot" and is loaded into the map.
 		collectionData[key] = valBytes
 		hotDataCount++
 	}
@@ -354,11 +345,10 @@ func LoadCollectionData(collectionName string, s store.DataStore, hotThreshold t
 		"hot_items_in_ram", hotDataCount,
 		"cold_items_on_disk", coldDataCount)
 
-	// Index rebuilding should only happen on the hot data that is in RAM.
 	if len(indexedFields) > 0 {
 		slog.Info("Rebuilding indexes for hot data in collection", "collection", collectionName, "index_count", len(indexedFields))
 		for _, field := range indexedFields {
-			s.CreateIndex(field) // CreateIndex will now operate only on the in-memory data.
+			s.CreateIndex(field)
 		}
 		slog.Info("Finished rebuilding indexes for hot data", "collection", collectionName)
 	}
@@ -394,7 +384,6 @@ func LoadAllCollectionsIntoManager(cm *store.CollectionManager, coldStorageMonth
 		return fmt.Errorf("failed to get list of collection files: %w", err)
 	}
 
-	// --- NEW THRESHOLD LOGIC ---
 	var hotThreshold time.Time
 	if coldStorageMonths > 0 {
 		hotThreshold = time.Now().AddDate(0, -coldStorageMonths, 0)
@@ -405,7 +394,6 @@ func LoadAllCollectionsIntoManager(cm *store.CollectionManager, coldStorageMonth
 
 	for _, colName := range collectionNames {
 		colStore := cm.GetCollection(colName)
-		// Pass the threshold to the loading function.
 		if err := LoadCollectionData(colName, colStore, hotThreshold); err != nil {
 			slog.Warn("Failed to load data for collection, skipping", "collection", colName, "error", err)
 			continue
@@ -421,33 +409,45 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 	activeCollections := cm.ListCollections()
 	persister := &CollectionPersisterImpl{}
 
+	activeMap := make(map[string]bool)
+	var finalErr error
+
+	// 1. Guardar todas las colecciones que están actualmente activas en memoria.
 	for _, colName := range activeCollections {
+		activeMap[colName] = true
 		colStore := cm.GetCollection(colName)
 		if err := persister.SaveCollectionData(colName, colStore); err != nil {
-			slog.Error("Error saving collection during shutdown", "collection", colName, "error", err)
+			slog.Error("Error saving collection during shutdown/checkpoint", "collection", colName, "error", err)
+			// Guardamos el error pero continuamos para intentar guardar/limpiar el resto.
+			finalErr = err
 		}
 	}
 
-	existingFiles, err := filepath.Glob(filepath.Join(globalconst.CollectionsDirName, "*"+globalconst.DBFileExtension))
+	// 2. Limpiar archivos de colecciones que ya no están activas (huérfanos).
+	slog.Debug("Checking for orphaned collection files to clean up...")
+	existingFiles, err := ListCollectionFiles()
 	if err != nil {
-		slog.Warn("Failed to list existing collection files for cleanup during shutdown", "error", err)
-	} else {
-		activeFileMap := make(map[string]bool)
-		for _, name := range activeCollections {
-			activeFileMap[name] = true
-		}
+		slog.Warn("Failed to list existing collection files for cleanup", "error", err)
+		return err
+	}
 
-		for _, f := range existingFiles {
-			baseName := filepath.Base(f)
-			colName := baseName[:len(baseName)-len(globalconst.DBFileExtension)]
-			if !activeFileMap[colName] {
-				if err := persister.DeleteCollectionFile(colName); err != nil {
-					slog.Warn("Failed to remove old collection file during shutdown", "collection", colName, "error", err)
-				}
+	deletedCount := 0
+	for _, fileName := range existingFiles {
+		if _, isActive := activeMap[fileName]; !isActive {
+			// Este archivo existe en disco pero no en la memoria del manager, debe ser eliminado.
+			if err := persister.DeleteCollectionFile(fileName); err != nil {
+				slog.Warn("Failed to remove orphaned collection file", "collection", fileName, "error", err)
+				finalErr = err
+			} else {
+				slog.Info("Cleaned up orphaned collection file", "collection", fileName)
+				deletedCount++
 			}
 		}
 	}
+	if deletedCount > 0 {
+		slog.Info("Orphaned file cleanup complete", "deleted_count", deletedCount)
+	}
 
-	slog.Info("All active collections from manager successfully saved to disk.")
-	return nil
+	slog.Info("All active collections from manager successfully synchronized to disk.")
+	return finalErr
 }

@@ -21,6 +21,7 @@ logs
 cat.log
 cat_command.sh
 json/
+data/
 
 # Code coverage profiles and other test artifacts
 *.out

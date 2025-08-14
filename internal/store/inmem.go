@@ -947,6 +947,7 @@ func (cm *CollectionManager) GetCollection(name string) DataStore {
 	}
 
 	newCol := NewInMemStoreWithShards(cm.numShards)
+	newCol.CreateIndex(globalconst.ID)
 	cm.collections[name] = newCol
 	slog.Info("Collection created", "name", name, "num_shards", cm.numShards)
 	return newCol

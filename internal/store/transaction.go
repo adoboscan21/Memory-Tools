@@ -25,11 +25,20 @@ const (
 	StateAborted
 )
 
+// NUEVO: Un enum para el tipo de operación
+type TransactionOpType int
+
+const (
+	OpTypeSet TransactionOpType = iota
+	OpTypeUpdate
+	OpTypeDelete
+)
+
 type WriteOperation struct {
 	Collection string
 	Key        string
 	Value      []byte
-	IsDelete   bool
+	OpType     TransactionOpType // Campo actualizado
 }
 
 type Transaction struct {
@@ -45,9 +54,8 @@ type TransactionManager struct {
 	transactions map[string]*Transaction
 	mu           sync.RWMutex
 	cm           *CollectionManager
-	// NUEVO: Canales y WaitGroup para el ciclo de vida del recolector de basura (GC).
-	gcQuitChan chan struct{}
-	wg         sync.WaitGroup
+	gcQuitChan   chan struct{}
+	wg           sync.WaitGroup
 }
 
 // NewTransactionManager crea una nueva instancia del gestor de transacciones.
@@ -55,26 +63,25 @@ func NewTransactionManager(cm *CollectionManager) *TransactionManager {
 	return &TransactionManager{
 		transactions: make(map[string]*Transaction),
 		cm:           cm,
-		// NUEVO: Inicializar el canal de cierre del GC.
-		gcQuitChan: make(chan struct{}),
+		gcQuitChan:   make(chan struct{}),
 	}
 }
 
-// NUEVO: StartGC inicia el goroutine del recolector de basura.
+// StartGC inicia el goroutine del recolector de basura.
 func (tm *TransactionManager) StartGC(timeout, interval time.Duration) {
 	tm.wg.Add(1)
 	go tm.runGC(timeout, interval)
 	slog.Info("Transaction garbage collector started", "timeout", timeout, "interval", interval)
 }
 
-// NUEVO: StopGC detiene el recolector de basura y espera a que termine.
+// StopGC detiene el recolector de basura y espera a que termine.
 func (tm *TransactionManager) StopGC() {
 	close(tm.gcQuitChan)
 	tm.wg.Wait()
 	slog.Info("Transaction garbage collector stopped.")
 }
 
-// NUEVO: runGC es el bucle principal del recolector de basura.
+// runGC es el bucle principal del recolector de basura.
 func (tm *TransactionManager) runGC(timeout, interval time.Duration) {
 	defer tm.wg.Done()
 	ticker := time.NewTicker(interval)
@@ -84,35 +91,26 @@ func (tm *TransactionManager) runGC(timeout, interval time.Duration) {
 		select {
 		case <-ticker.C:
 			slog.Debug("Running transaction garbage collection scan...")
-
 			var txIDsToRollback []string
-
-			// Primero, identificamos las transacciones a eliminar con un lock de solo lectura.
 			tm.mu.RLock()
 			for txID, tx := range tm.transactions {
 				tx.mu.RLock()
-				// Comprobamos si la transacción está activa y ha superado el tiempo de vida.
 				if tx.State == StateActive && time.Since(tx.startTime) > timeout {
 					txIDsToRollback = append(txIDsToRollback, txID)
 				}
 				tx.mu.RUnlock()
 			}
 			tm.mu.RUnlock()
-
-			// Ahora, si encontramos transacciones para eliminar, las procesamos.
 			if len(txIDsToRollback) > 0 {
 				slog.Warn("Found abandoned transactions to roll back", "count", len(txIDsToRollback))
 				for _, txID := range txIDsToRollback {
 					slog.Info("Rolling back abandoned transaction", "txID", txID)
-					// Rollback ya maneja sus propios locks, por lo que es seguro llamarlo aquí.
 					if err := tm.Rollback(txID); err != nil {
 						slog.Error("Error rolling back abandoned transaction", "txID", txID, "error", err)
 					}
 				}
 			}
-
 		case <-tm.gcQuitChan:
-			// Se recibió la señal de parada.
 			return
 		}
 	}
@@ -180,30 +178,48 @@ func (tm *TransactionManager) Commit(txID string) error {
 		return err
 	}
 
-	// --- LÓGICA DE BLOQUEO CORREGIDA ---
-	// 1. Bloqueamos la transacción para leer su estado y tomar posesión de sus operaciones.
 	tx.mu.Lock()
 	if tx.State != StateActive {
-		tx.mu.Unlock() // Liberamos el bloqueo si ya no está activa.
+		tx.mu.Unlock()
 		return fmt.Errorf("cannot commit transaction %s; state is not active", txID)
 	}
-
-	// 2. Tomamos posesión del WriteSet y cambiamos el estado.
-	// TODO ESTO OCURRE DENTRO DE UN ÚNICO BLOQUEO.
 	writeSetToProcess := tx.WriteSet
-	tx.WriteSet = nil         // Limpiamos el original.
-	tx.State = StatePreparing // Cambiamos el estado a "Preparing".
-
-	// 3. Ahora que el estado es seguro, podemos liberar el bloqueo.
+	tx.State = StatePreparing
 	tx.mu.Unlock()
-	// --- FIN DE LA LÓGICA DE BLOQUEO ---
+
+	// --- INICIO DE LA MODIFICACIÓN CLAVE: BARRIDO DE PRE-VALIDACIÓN ---
+	slog.Debug("TransactionManager: starting pre-commit validation", "txID", txID)
+	for _, op := range writeSetToProcess {
+		col := tm.cm.GetCollection(op.Collection)
+		_, keyExists := col.Get(op.Key)
+
+		// Regla 1: Si la operación es un SET, la clave NO debe existir.
+		if op.OpType == OpTypeSet && keyExists {
+			slog.Warn("Commit failed: attempt to SET a key that already exists", "txID", txID, "key", op.Key)
+			tm.Rollback(txID) // Deshacer la transacción
+			return fmt.Errorf("commit failed: key '%s' in collection '%s' already exists. Use update instead", op.Key, op.Collection)
+		}
+
+		// Regla 2: Si la operación es un UPDATE o DELETE, la clave SÍ debe existir.
+		if (op.OpType == OpTypeUpdate || op.OpType == OpTypeDelete) && !keyExists {
+			slog.Warn("Commit failed: attempt to UPDATE/DELETE a key that does not exist", "txID", txID, "key", op.Key)
+			tm.Rollback(txID) // Deshacer la transacción
+			return fmt.Errorf("commit failed: key '%s' in collection '%s' does not exist to be updated or deleted", op.Key, op.Collection)
+		}
+	}
+	slog.Debug("TransactionManager: pre-commit validation successful", "txID", txID)
+	// --- FIN DE LA MODIFICACIÓN CLAVE ---
+
+	tx.mu.Lock()
+	tx.WriteSet = nil
+	tx.mu.Unlock()
 
 	slog.Debug("TransactionManager: enriching WriteSet with timestamps", "txID", txID)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	enrichedWriteSet := make([]WriteOperation, 0, len(writeSetToProcess))
 	for _, op := range writeSetToProcess {
-		if op.IsDelete {
+		if op.OpType == OpTypeDelete {
 			enrichedWriteSet = append(enrichedWriteSet, op)
 			continue
 		}

@@ -1119,15 +1119,15 @@ func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
 		return fmt.Errorf("cannot prepare write for key '%s': not locked by transaction '%s'", op.Key, txID)
 	}
 
-	// CORRECCIÓN: Crear el mapa interno para la transacción si es la primera operación.
 	if _, exists := s.pendingWrites[txID]; !exists {
 		s.pendingWrites[txID] = make(map[string]Item)
 	}
 
 	var pendingItem Item
-	if op.IsDelete {
+	// MODIFICACIÓN: Se comprueba el tipo de operación en lugar del booleano.
+	if op.OpType == OpTypeDelete {
 		pendingItem = Item{Value: nil} // nil marca una eliminación.
-	} else {
+	} else { // Esto cubre tanto OpTypeSet como OpTypeUpdate
 		createdAt := time.Now()
 		if existingItem, exists := s.data[op.Key]; exists {
 			createdAt = existingItem.CreatedAt
@@ -1139,7 +1139,6 @@ func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
 		}
 	}
 
-	// Ahora asignamos el Item al mapa interno de la transacción.
 	s.pendingWrites[txID][op.Key] = pendingItem
 	return nil
 }

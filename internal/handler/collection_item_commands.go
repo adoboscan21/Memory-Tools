@@ -11,6 +11,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // handleCollectionItemSet procesa el CmdCollectionItemSet. Es una operación de escritura.
@@ -29,15 +31,45 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		return
 	}
 
-	// --- INICIO DE LA CORRECCIÓN ---
+	wasKeyGenerated := false
 	if key == "" {
-		slog.Error("CRITICAL: SET command received with an empty key. This is now a rejected operation.", "collection", collectionName, "remote_addr", remoteAddr)
-		if conn != nil {
-			protocol.WriteResponse(conn, protocol.StatusBadRequest, "BAD_REQUEST: Key cannot be empty for a SET operation.", nil)
+		if conn == nil {
+			slog.Error("CRITICAL: SET command with empty key received during WAL replay.", "collection", collectionName)
+			return
 		}
-		return
+
+		wasKeyGenerated = true
+		const maxGenerateRetries = 5
+		colStore := h.CollectionManager.GetCollection(collectionName)
+
+		for i := range maxGenerateRetries {
+			newKey := uuid.New().String()
+			if _, found := colStore.Get(newKey); !found {
+				key = newKey
+				break
+			}
+			slog.Warn("UUID collision detected during server-side generation. This is extremely rare. Retrying...", "attempt", i+1, "collection", collectionName)
+		}
+
+		if key == "" {
+			errMessage := "Failed to generate a unique ID after several attempts. This indicates a highly unusual system state."
+			slog.Error(errMessage, "collection", collectionName)
+			protocol.WriteResponse(conn, protocol.StatusError, errMessage, nil)
+
+			return
+		}
 	}
-	// --- FIN DE LA CORRECCIÓN ---
+	// --- FIN: LÓGICA DE GENERACIÓN DE ID ---
+
+	// Validación de existencia para claves PROPORCIONADAS POR EL CLIENTE en operaciones NO transaccionales.
+	if conn != nil && !wasKeyGenerated && h.CurrentTransactionID == "" {
+		colStore := h.CollectionManager.GetCollection(collectionName)
+		if _, found := colStore.Get(key); found {
+			slog.Warn("Set item failed because key already exists", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+			protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Key '%s' already exists in collection '%s'. Use 'collection item update' to modify.", key, collectionName), nil)
+			return
+		}
+	}
 
 	if conn != nil {
 		if collectionName == "" || len(value) == 0 {
@@ -56,43 +88,6 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		}
 	}
 
-	// Lógica transaccional
-	if h.CurrentTransactionID != "" {
-		// La lógica de enriquecer el documento con el _id puede permanecer como una
-		// salvaguarda, pero ya no genera la clave.
-		var data map[string]any
-		if err := json.Unmarshal(value, &data); err == nil {
-			data[globalconst.ID] = key
-			newValue, marshalErr := json.Marshal(data)
-			if marshalErr == nil {
-				value = newValue
-			} else {
-				slog.Warn("Could not marshal enriched value in transaction SET", "key", key, "error", marshalErr)
-			}
-		} else {
-			slog.Warn("Could not unmarshal value in transaction SET to inject _id", "key", key, "error", err)
-		}
-
-		op := store.WriteOperation{
-			Collection: collectionName,
-			Key:        key,
-			Value:      value,
-			IsDelete:   false,
-		}
-		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
-			if conn != nil {
-				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record operation in transaction: "+err.Error(), nil)
-			}
-			return
-		}
-		if conn != nil {
-			protocol.WriteResponse(conn, protocol.StatusOk, "OK: Operation queued in transaction.", nil)
-		}
-		return
-	}
-
-	// Lógica no transaccional
-	colStore := h.CollectionManager.GetCollection(collectionName)
 	var data map[string]any
 	if err := json.Unmarshal(value, &data); err != nil {
 		slog.Warn("Failed to unmarshal item data for SET", "error", err, "collection", collectionName, "user", h.AuthenticatedUser)
@@ -101,25 +96,43 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		}
 		return
 	}
-
-	// Ya no se genera el `key` aquí. Se asume que es válido.
-	existingValue, found := colStore.Get(key)
-	now := time.Now().UTC().Format(time.RFC3339)
 	data[globalconst.ID] = key
-	data[globalconst.UPDATED_AT] = now
 
-	if !found {
-		data[globalconst.CREATED_AT] = now
-	} else {
-		var existingData map[string]any
-		if err := json.Unmarshal(existingValue, &existingData); err == nil {
-			if originalCreatedAt, ok := existingData[globalconst.CREATED_AT]; ok {
-				data[globalconst.CREATED_AT] = originalCreatedAt
-			} else {
-				data[globalconst.CREATED_AT] = now
+	// Lógica transaccional
+	if h.CurrentTransactionID != "" {
+		finalValueForTx, err := json.Marshal(data)
+		if err != nil {
+			slog.Error("Failed to marshal enriched value for transaction", "key", key, "error", err)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error preparing data for transaction", nil)
 			}
+			return
 		}
+
+		op := store.WriteOperation{
+			Collection: collectionName,
+			Key:        key,
+			Value:      finalValueForTx,
+			OpType:     store.OpTypeSet,
+		}
+
+		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record operation in transaction: "+err.Error(), nil)
+			}
+			return
+		}
+		if conn != nil {
+			protocol.WriteResponse(conn, protocol.StatusOk, "OK: Operation queued in transaction.", finalValueForTx)
+		}
+		return
 	}
+
+	// Lógica no transaccional
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	now := time.Now().UTC().Format(time.RFC3339)
+	data[globalconst.UPDATED_AT] = now
+	data[globalconst.CREATED_AT] = now
 
 	finalValue, err := json.Marshal(data)
 	if err != nil {
@@ -133,9 +146,9 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 	colStore.Set(key, finalValue, ttl)
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 
-	slog.Info("Item set in collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "operation", boolToString(found, "update", "create"))
+	slog.Info("Item set in collection", "user", h.AuthenticatedUser, "collection", collectionName, "key", key, "operation", "create")
 	if conn != nil {
-		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), nil)
+		protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Key '%s' set in collection '%s' (persistence async)", key, collectionName), finalValue)
 	}
 }
 
@@ -201,7 +214,16 @@ func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Con
 			}
 		}
 		finalValue, _ := json.Marshal(existingData)
-		op := store.WriteOperation{Collection: collectionName, Key: key, Value: finalValue, IsDelete: false}
+
+		// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
+		op := store.WriteOperation{
+			Collection: collectionName,
+			Key:        key,
+			Value:      finalValue,
+			OpType:     store.OpTypeUpdate,
+		}
+		// --- FIN DE LA MODIFICACIÓN ---
+
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 			if conn != nil {
 				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update in transaction: "+err.Error(), nil)
@@ -337,7 +359,16 @@ func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net
 				}
 			}
 			finalValue, _ := json.Marshal(existingData)
-			op := store.WriteOperation{Collection: collectionName, Key: p.ID, Value: finalValue, IsDelete: false}
+
+			// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
+			op := store.WriteOperation{
+				Collection: collectionName,
+				Key:        p.ID,
+				Value:      finalValue,
+				OpType:     store.OpTypeUpdate,
+			}
+			// --- FIN DE LA MODIFICACIÓN ---
+
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				if conn != nil {
 					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record update-many op: "+err.Error(), nil)
@@ -497,7 +528,14 @@ func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Con
 
 	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
-		op := store.WriteOperation{Collection: collectionName, Key: key, IsDelete: true}
+		// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
+		op := store.WriteOperation{
+			Collection: collectionName,
+			Key:        key,
+			OpType:     store.OpTypeDelete,
+		}
+		// --- FIN DE LA MODIFICACIÓN ---
+
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 			if conn != nil {
 				protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete in transaction: "+err.Error(), nil)
@@ -650,38 +688,75 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		}
 	}
 
-	// --- INICIO DE LA CORRECCIÓN ---
-	validRecords := make([]map[string]any, 0, len(records))
-	for i, record := range records {
+	// --- INICIO: LÓGICA DE GENERACIÓN Y VALIDACIÓN DE IDs ---
+	colStore := h.CollectionManager.GetCollection(collectionName)
+	recordsToProcess := make([]map[string]any, 0, len(records))
+	duplicateKeys := make([]string, 0)
+	invalidRecordsCount := 0
+
+	for _, record := range records {
 		key, ok := record[globalconst.ID].(string)
+
+		// Caso 1: El cliente no proporciona ID, el servidor lo genera.
 		if !ok || key == "" {
-			slog.Warn("Skipping record in SET_MANY batch due to missing or empty _id", "collection", collectionName, "record_index", i)
+			if conn == nil { // No se puede generar ID durante el replay de WAL.
+				slog.Error("CRITICAL: SET_MANY record with empty key received during WAL replay.", "collection", collectionName)
+				invalidRecordsCount++
+				continue
+			}
+
+			const maxGenerateRetries = 5
+			generatedKey := ""
+			for i := 0; i < maxGenerateRetries; i++ {
+				newKey := uuid.New().String()
+				if _, found := colStore.Get(newKey); !found {
+					generatedKey = newKey
+					break
+				}
+			}
+
+			if generatedKey == "" {
+				slog.Error("Failed to generate unique ID for a record in SET_MANY batch.", "collection", collectionName)
+				invalidRecordsCount++
+				continue
+			}
+			record[globalconst.ID] = generatedKey
+			recordsToProcess = append(recordsToProcess, record)
 			continue
 		}
-		validRecords = append(validRecords, record)
+
+		// Caso 2: El cliente proporciona ID. Validamos si ya existe (solo para no-transaccional).
+		if h.CurrentTransactionID == "" {
+			if _, found := colStore.Get(key); found {
+				duplicateKeys = append(duplicateKeys, key)
+			} else {
+				recordsToProcess = append(recordsToProcess, record)
+			}
+		} else {
+			// En una transacción, todos los registros con ID pasan al commit para su validación final.
+			recordsToProcess = append(recordsToProcess, record)
+		}
 	}
 
-	if len(validRecords) == 0 {
-		slog.Warn("SET_MANY operation contained no records with a valid _id.", "collection", collectionName, "total_records_received", len(records))
-		if conn != nil {
-			protocol.WriteResponse(conn, protocol.StatusOk, "OK: 0 items processed. All records were missing a valid _id.", nil)
-		}
+	if len(recordsToProcess) == 0 && conn != nil && h.CurrentTransactionID == "" {
+		msg := fmt.Sprintf("OK: 0 items processed. %d records were skipped due to existing keys and %d were invalid or failed ID generation.", len(duplicateKeys), invalidRecordsCount)
+		protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
 		return
 	}
-	// --- FIN DE LA CORRECCIÓN ---
+	// --- FIN DE LA LÓGICA DE GENERACIÓN Y VALIDACIÓN ---
 
-	// Lógica transaccional (ahora itera sobre `validRecords`)
+	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
-		for _, record := range validRecords {
-			// Ya no hay que generar UUID, sabemos que la clave existe.
+		for _, record := range recordsToProcess {
 			key := record[globalconst.ID].(string)
-
 			valBytes, err := json.Marshal(record)
 			if err != nil {
 				slog.Warn("Failed to marshal record in SET_MANY (transaction)", "key", key, "error", err)
-				continue
+				continue // Skip this record if it can't be marshaled
 			}
-			op := store.WriteOperation{Collection: collectionName, Key: key, Value: valBytes, IsDelete: false}
+			op := store.WriteOperation{
+				Collection: collectionName, Key: key, Value: valBytes, OpType: store.OpTypeSet,
+			}
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				if conn != nil {
 					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record set-many op in transaction: "+err.Error(), nil)
@@ -690,39 +765,34 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 			}
 		}
 		if conn != nil {
-			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d set operations queued in transaction.", len(validRecords)), nil)
+			finalDocsBytes, _ := json.Marshal(recordsToProcess)
+			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: %d set operations queued in transaction.", len(recordsToProcess)), finalDocsBytes)
 		}
 		return
 	}
 
-	// Lógica no transaccional (ahora itera sobre `validRecords`)
-	colStore := h.CollectionManager.GetCollection(collectionName)
-	insertedCount := 0
+	// Lógica no transaccional
 	now := time.Now().UTC().Format(time.RFC3339)
-	for _, record := range validRecords {
-		// La lógica de generación de UUID se elimina. Se asume que la clave existe.
-		key := record[globalconst.ID].(string)
-
-		// Enriquecemos el documento con las fechas.
+	for _, record := range recordsToProcess {
+		// El ID ya está garantizado en el record
 		record[globalconst.CREATED_AT] = now
 		record[globalconst.UPDATED_AT] = now
-
 		updatedValue, err := json.Marshal(record)
 		if err != nil {
-			slog.Warn("Failed to marshal record in SET_MANY batch", "key", key, "collection", collectionName, "error", err)
+			slog.Warn("Failed to marshal record in SET_MANY batch, skipping", "key", record[globalconst.ID], "error", err)
 			continue
 		}
-		colStore.Set(key, updatedValue, 0)
-		insertedCount++
+		colStore.Set(record[globalconst.ID].(string), updatedValue, 0)
 	}
 
-	if insertedCount > 0 {
+	if len(recordsToProcess) > 0 {
 		h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 	}
-	slog.Info("Set-many operation completed", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", insertedCount)
+	slog.Info("Set-many operation completed", "user", h.AuthenticatedUser, "inserted_count", len(recordsToProcess), "duplicates_skipped", len(duplicateKeys), "invalid_skipped", invalidRecordsCount)
 	if conn != nil {
-		msg := fmt.Sprintf("OK: %d items set in collection '%s' (persistence async). %d records were skipped due to missing _id.", insertedCount, collectionName, len(records)-insertedCount)
-		protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
+		finalDocsBytes, _ := json.Marshal(recordsToProcess)
+		msg := fmt.Sprintf("OK: %d items set in collection '%s'. %d records were skipped due to existing keys. %d were invalid or failed ID generation.", len(recordsToProcess), collectionName, len(duplicateKeys), invalidRecordsCount)
+		protocol.WriteResponse(conn, protocol.StatusOk, msg, finalDocsBytes)
 	}
 }
 
@@ -762,7 +832,14 @@ func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net
 	// Lógica transaccional
 	if h.CurrentTransactionID != "" {
 		for _, key := range keys {
-			op := store.WriteOperation{Collection: collectionName, Key: key, IsDelete: true}
+			// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
+			op := store.WriteOperation{
+				Collection: collectionName,
+				Key:        key,
+				OpType:     store.OpTypeDelete,
+			}
+			// --- FIN DE LA MODIFICACIÓN ---
+
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				if conn != nil {
 					protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Failed to record delete-many op in transaction: "+err.Error(), nil)

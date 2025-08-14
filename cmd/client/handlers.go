@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/olekukonko/tablewriter"
 )
 
@@ -33,11 +32,10 @@ func (c *cli) getCommands() map[string]command {
 		"user delete":     {help: "user delete <username> - Delete a user", handler: (*cli).handleUserDelete, category: "User Management"},
 		"update password": {help: "update password <user> <new_pass> - Change a user's password", handler: (*cli).handleChangePassword, category: "User Management"},
 
-		// --- NUEVA CATEGORÍA: TRANSACCIONES ---
+		// Transactions
 		"begin":    {help: "begin - Starts a new transaction", handler: (*cli).handleBegin, category: "Transactions"},
 		"commit":   {help: "commit - Commits the current transaction", handler: (*cli).handleCommit, category: "Transactions"},
 		"rollback": {help: "rollback - Rolls back the current transaction", handler: (*cli).handleRollback, category: "Transactions"},
-		// ------------------------------------
 
 		// Server Operations (Root only)
 		"backup":  {help: "backup - Triggers a manual server backup (root only)", handler: (*cli).handleBackup, category: "Server Operations"},
@@ -74,34 +72,26 @@ func (c *cli) handleBegin(args string) error {
 	if c.inTransaction {
 		return errors.New("a transaction is already in progress")
 	}
-
 	var cmdBuf bytes.Buffer
 	if err := protocol.WriteBeginCommand(&cmdBuf); err != nil {
 		return fmt.Errorf("could not build begin command: %w", err)
 	}
-
 	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
 		return fmt.Errorf("could not send begin command: %w", err)
 	}
-
-	// Leemos la respuesta para confirmar que el servidor inició la transacción
 	status, msg, _, err := c.readRawResponse()
 	if err != nil {
 		return err
 	}
-
-	// Renderizar la respuesta simple
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
 	table.Render()
 	fmt.Println("---")
-
 	if status == protocol.StatusOk {
 		c.inTransaction = true
 		fmt.Println(colorOK("√ Transaction started."))
 	}
-
 	return nil
 }
 
@@ -109,28 +99,22 @@ func (c *cli) handleCommit(args string) error {
 	if !c.inTransaction {
 		return errors.New("no transaction is in progress to commit")
 	}
-
 	var cmdBuf bytes.Buffer
 	if err := protocol.WriteCommitCommand(&cmdBuf); err != nil {
 		return fmt.Errorf("could not build commit command: %w", err)
 	}
-
 	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
 		return fmt.Errorf("could not send commit command: %w", err)
 	}
-
 	status, msg, _, err := c.readRawResponse()
 	if err != nil {
-
 		return err
 	}
-
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
 	table.Render()
 	fmt.Println("---")
-
 	if status == protocol.StatusOk {
 		c.inTransaction = false
 		fmt.Println(colorOK("√ Transaction committed successfully."))
@@ -138,7 +122,6 @@ func (c *cli) handleCommit(args string) error {
 		c.inTransaction = false
 		fmt.Println(colorErr("Transaction failed on the server and was rolled back."))
 	}
-
 	return nil
 }
 
@@ -146,33 +129,26 @@ func (c *cli) handleRollback(args string) error {
 	if !c.inTransaction {
 		return errors.New("no transaction is in progress to roll back")
 	}
-
 	var cmdBuf bytes.Buffer
 	if err := protocol.WriteRollbackCommand(&cmdBuf); err != nil {
 		return fmt.Errorf("could not build rollback command: %w", err)
 	}
-
 	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
 		return fmt.Errorf("could not send rollback command: %w", err)
 	}
-
 	status, msg, _, err := c.readRawResponse()
 	if err != nil {
 		return err
 	}
-
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
 	table.Render()
 	fmt.Println("---")
-
 	c.inTransaction = false
-
 	if status == protocol.StatusOk {
 		fmt.Println(colorInfo("√ Transaction rolled back."))
 	}
-
 	return nil
 }
 
@@ -185,25 +161,20 @@ func (c *cli) handleLogin(args string) error {
 		return errors.New("usage: login <username> <password>")
 	}
 	username, password := parts[0], parts[1]
-
 	var cmdBuf bytes.Buffer
 	protocol.WriteAuthenticateCommand(&cmdBuf, username, password)
-
 	if _, err := c.conn.Write(cmdBuf.Bytes()); err != nil {
 		return fmt.Errorf("could not send login command: %w", err)
 	}
-
 	status, msg, _, err := c.readRawResponse()
 	if err != nil {
 		return err
 	}
-
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Status", "Message"})
 	table.Append([]string{getStatusString(status), msg})
 	table.Render()
 	fmt.Println("---")
-
 	if status == protocol.StatusOk {
 		c.isAuthenticated = true
 		c.currentUser = username
@@ -212,7 +183,6 @@ func (c *cli) handleLogin(args string) error {
 		fmt.Printf(colorOK("√ Login successful. Welcome, %s!\n"), c.currentUser)
 		return nil
 	}
-
 	return errors.New("authentication failed")
 }
 
@@ -221,7 +191,6 @@ func (c *cli) handleHelp(args string) error {
 	fmt.Println("---------------------")
 	fmt.Println("All commands require their full name. The collection must be specified as the first argument where required.")
 	fmt.Println("---------------------")
-
 	categories := make(map[string][]string)
 	for cmdName, cmdDetails := range c.commands {
 		if cmdDetails.category == "" {
@@ -232,22 +201,18 @@ func (c *cli) handleHelp(args string) error {
 		}
 		categories[cmdDetails.category] = append(categories[cmdDetails.category], cmdName)
 	}
-
 	categoryNames := make([]string, 0, len(categories))
 	for name := range categories {
 		categoryNames = append(categoryNames, name)
 	}
 	sort.Strings(categoryNames)
-
 	for _, category := range categoryNames {
 		fmt.Printf("\n%s%s%s\n", colorOK("== "), colorOK(category), colorOK(" =="))
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"Command", "Description"})
 		table.SetAutoWrapText(false)
-
 		cmds := categories[category]
 		sort.Strings(cmds)
-
 		for _, cmd := range cmds {
 			if details, exists := c.commands[cmd]; exists {
 				table.Append([]string{cmd, details.help})
@@ -274,7 +239,6 @@ func (c *cli) handleUserCreate(args string) error {
 		return errors.New("usage: user create <username> <password> <permissions_json|path>")
 	}
 	username, password, jsonArg := parts[0], parts[1], parts[2]
-
 	jsonPayload, err := c.getJSONPayload(jsonArg)
 	if err != nil {
 		return err
@@ -282,7 +246,6 @@ func (c *cli) handleUserCreate(args string) error {
 	if !json.Valid(jsonPayload) {
 		return errors.New("invalid permissions JSON format")
 	}
-
 	var cmdBuf bytes.Buffer
 	protocol.WriteUserCreateCommand(&cmdBuf, username, password, jsonPayload)
 	c.conn.Write(cmdBuf.Bytes())
@@ -295,7 +258,6 @@ func (c *cli) handleUserUpdate(args string) error {
 		return errors.New("usage: user update <username> <permissions_json|path>")
 	}
 	username, jsonArg := parts[0], parts[1]
-
 	jsonPayload, err := c.getJSONPayload(jsonArg)
 	if err != nil {
 		return err
@@ -303,7 +265,6 @@ func (c *cli) handleUserUpdate(args string) error {
 	if !json.Valid(jsonPayload) {
 		return errors.New("invalid permissions JSON format")
 	}
-
 	var cmdBuf bytes.Buffer
 	protocol.WriteUserUpdateCommand(&cmdBuf, username, jsonPayload)
 	c.conn.Write(cmdBuf.Bytes())
@@ -357,12 +318,9 @@ func (c *cli) handleMainSet(args string) error {
 	}
 	key := parts[0]
 	valueAndTTL := parts[1]
-
 	var value []byte
 	var ttl time.Duration
-
 	lastSpaceIndex := strings.LastIndex(valueAndTTL, " ")
-
 	if lastSpaceIndex != -1 && lastSpaceIndex < len(valueAndTTL)-1 {
 		potentialTTL := valueAndTTL[lastSpaceIndex+1:]
 		if ttlSeconds, err := strconv.Atoi(potentialTTL); err == nil {
@@ -374,7 +332,6 @@ func (c *cli) handleMainSet(args string) error {
 	} else {
 		value = []byte(valueAndTTL)
 	}
-
 	var cmdBuf bytes.Buffer
 	protocol.WriteSetCommand(&cmdBuf, key, value, ttl)
 	c.conn.Write(cmdBuf.Bytes())
@@ -408,9 +365,7 @@ func (c *cli) handleCollectionDelete(args string) error {
 	if err != nil {
 		return err
 	}
-
 	fmt.Println(colorInfo("Are you sure you want to delete collection? (y/N): "), collName)
-
 	input, err := c.rl.Readline()
 	if err != nil {
 		return err
@@ -419,7 +374,6 @@ func (c *cli) handleCollectionDelete(args string) error {
 		fmt.Println(colorInfo("Deletion cancelled."))
 		return nil
 	}
-
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionDeleteCommand(&cmdBuf, collName)
 	c.conn.Write(cmdBuf.Bytes())
@@ -480,52 +434,44 @@ func (c *cli) handleItemSet(args string) error {
 		return err
 	}
 
-	// --- INICIO DE LA LÓGICA MEJORADA PARA PARSEAR KEY, JSON Y TTL ---
-
 	parts := strings.Fields(remainingArgs)
 	if len(parts) == 0 {
 		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl_seconds]")
 	}
 
+	// --- INICIO DE LA LÓGICA MODIFICADA PARA DELEGAR LA CREACIÓN DE ID ---
 	var key, jsonArg string
-	var ttl time.Duration // Por defecto es 0
+	var ttl time.Duration = 0
 
 	// Intenta parsear el último argumento como un entero para el TTL.
 	if len(parts) > 1 {
-		// Comprueba si el último "campo" es un número válido.
 		if ttlSeconds, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
 			ttl = time.Duration(ttlSeconds) * time.Second
-			parts = parts[:len(parts)-1] // Elimina el TTL de los argumentos para seguir procesando.
+			parts = parts[:len(parts)-1] // Elimina el TTL para seguir procesando.
 		}
 	}
 
-	// El resto de la lógica para determinar la clave y el JSON se aplica a los argumentos restantes.
 	remainingArgsAfterTTL := strings.Join(parts, " ")
-	jsonParts := strings.SplitN(remainingArgsAfterTTL, " ", 2)
-
-	if len(jsonParts) == 0 || remainingArgsAfterTTL == "" {
+	if remainingArgsAfterTTL == "" {
 		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl_seconds]")
 	}
 
+	jsonParts := strings.SplitN(remainingArgsAfterTTL, " ", 2)
+
+	isFirstArgKeyLike := !strings.HasPrefix(jsonParts[0], "{") && !strings.HasPrefix(jsonParts[0], "[")
+
 	if len(jsonParts) == 1 {
-		// Caso: Solo hay JSON (y quizás un TTL ya parseado). Se autogenera la clave.
-		key = uuid.New().String()
+		key = ""
 		jsonArg = jsonParts[0]
 	} else {
-		// Caso: Hay al menos dos "partes" restantes (podrían ser clave + JSON).
-		isFirstArgKeyLike := !strings.HasPrefix(jsonParts[0], "{") && !strings.HasPrefix(jsonParts[0], "[")
-
 		if isFirstArgKeyLike {
-			// El primer argumento parece una clave.
 			key = jsonParts[0]
 			jsonArg = jsonParts[1]
 		} else {
-			// El primer argumento ya parece JSON, así que no hay clave explícita.
-			key = uuid.New().String()
+			key = ""
 			jsonArg = remainingArgsAfterTTL
 		}
 	}
-	// --- FIN DE LA LÓGICA MEJORADA ---
 
 	jsonPayload, err := c.getJSONPayload(jsonArg)
 	if err != nil {
@@ -534,13 +480,11 @@ func (c *cli) handleItemSet(args string) error {
 	if !json.Valid(jsonPayload) {
 		return errors.New("invalid JSON format for value")
 	}
-
 	if len(strings.TrimSpace(string(jsonPayload))) == 0 {
 		return errors.New("JSON payload cannot be empty")
 	}
 
 	var cmdBuf bytes.Buffer
-	// Se envía el TTL parseado (será 0 si no se especificó).
 	protocol.WriteCollectionItemSetCommand(&cmdBuf, collName, key, jsonPayload, ttl)
 	c.conn.Write(cmdBuf.Bytes())
 	return c.readResponse("collection item set")

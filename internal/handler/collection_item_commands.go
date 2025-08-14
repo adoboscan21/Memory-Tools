@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// handleCollectionItemSet procesa el CmdCollectionItemSet. Es una operación de escritura.
 func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -31,7 +30,10 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		return
 	}
 
+	colStore := h.CollectionManager.GetCollection(collectionName)
 	wasKeyGenerated := false
+
+	// --- INICIO: LÓGICA DE GENERACIÓN DE ID MODIFICADA ---
 	if key == "" {
 		if conn == nil {
 			slog.Error("CRITICAL: SET command with empty key received during WAL replay.", "collection", collectionName)
@@ -40,36 +42,60 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 
 		wasKeyGenerated = true
 		const maxGenerateRetries = 5
-		colStore := h.CollectionManager.GetCollection(collectionName)
-
-		for i := range maxGenerateRetries {
+		for range maxGenerateRetries {
 			newKey := uuid.New().String()
-			if _, found := colStore.Get(newKey); !found {
-				key = newKey
-				break
+
+			// 1. Verificar en memoria (RAM)
+			_, foundInMem := colStore.Get(newKey)
+			if foundInMem {
+				continue // La clave ya existe en memoria, intentar de nuevo.
 			}
-			slog.Warn("UUID collision detected during server-side generation. This is extremely rare. Retrying...", "attempt", i+1, "collection", collectionName)
+
+			// 2. Verificar en disco (Almacenamiento Frío)
+			foundInCold, err := persistence.CheckColdKeyExists(collectionName, newKey)
+			if err != nil {
+				slog.Error("Failed to check key existence in cold storage", "collection", collectionName, "key", newKey, "error", err)
+				// ADVERTENCIA CORREGIDA: Se eliminó el `if conn != nil` redundante.
+				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error during key uniqueness check.", nil)
+				return
+			}
+			if foundInCold {
+				continue // La clave ya existe en disco, intentar de nuevo.
+			}
+
+			// Si no se encontró ni en memoria ni en disco, la clave es única.
+			key = newKey
+			break
 		}
 
 		if key == "" {
-			errMessage := "Failed to generate a unique ID after several attempts. This indicates a highly unusual system state."
+			errMessage := "Failed to generate a unique ID after several attempts. This indicates a highly unusual system state or high key collision rate."
 			slog.Error(errMessage, "collection", collectionName)
+			// ADVERTENCIA CORREGIDA: Se eliminó el `if conn != nil` redundante.
 			protocol.WriteResponse(conn, protocol.StatusError, errMessage, nil)
-
 			return
 		}
 	}
-	// --- FIN: LÓGICA DE GENERACIÓN DE ID ---
+	// --- FIN: LÓGICA DE GENERACIÓN DE ID MODIFICADA ---
 
+	// --- INICIO: LÓGICA DE VALIDACIÓN DE ID MODIFICADA ---
 	// Validación de existencia para claves PROPORCIONADAS POR EL CLIENTE en operaciones NO transaccionales.
 	if conn != nil && !wasKeyGenerated && h.CurrentTransactionID == "" {
-		colStore := h.CollectionManager.GetCollection(collectionName)
-		if _, found := colStore.Get(key); found {
-			slog.Warn("Set item failed because key already exists", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+		_, foundInMem := colStore.Get(key)
+		foundInCold, err := persistence.CheckColdKeyExists(collectionName, key)
+		if err != nil {
+			slog.Error("Failed to check key existence in cold storage for client-provided key", "collection", collectionName, "key", key, "error", err)
+			protocol.WriteResponse(conn, protocol.StatusError, "Internal server error during key validation.", nil)
+			return
+		}
+
+		if foundInMem || foundInCold {
+			slog.Warn("Set item failed because key already exists in RAM or on Disk", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 			protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Key '%s' already exists in collection '%s'. Use 'collection item update' to modify.", key, collectionName), nil)
 			return
 		}
 	}
+	// --- FIN: LÓGICA DE VALIDACIÓN DE ID MODIFICADA ---
 
 	if conn != nil {
 		if collectionName == "" || len(value) == 0 {
@@ -98,7 +124,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 	}
 	data[globalconst.ID] = key
 
-	// Lógica transaccional
+	// Lógica transaccional (sin cambios)
 	if h.CurrentTransactionID != "" {
 		finalValueForTx, err := json.Marshal(data)
 		if err != nil {
@@ -128,8 +154,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		return
 	}
 
-	// Lógica no transaccional
-	colStore := h.CollectionManager.GetCollection(collectionName)
+	// Lógica no transaccional (sin cambios)
 	now := time.Now().UTC().Format(time.RFC3339)
 	data[globalconst.UPDATED_AT] = now
 	data[globalconst.CREATED_AT] = now
@@ -671,6 +696,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		return
 	}
 
+	// Comprobaciones de permisos y existencia de la colección (sin cambios)
 	if conn != nil {
 		if collectionName == "" || len(value) == 0 {
 			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
@@ -688,28 +714,55 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		}
 	}
 
-	// --- INICIO: LÓGICA DE GENERACIÓN Y VALIDACIÓN DE IDs ---
+	// --- INICIO: LÓGICA DE VALIDACIÓN DE IDs MODIFICADA Y EFICIENTE ---
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	recordsToProcess := make([]map[string]any, 0, len(records))
 	duplicateKeys := make([]string, 0)
 	invalidRecordsCount := 0
 
+	// 1. Recolectar todas las claves proporcionadas por el cliente para verificarlas en lote.
+	clientProvidedKeys := make([]string, 0, len(records))
 	for _, record := range records {
-		key, ok := record[globalconst.ID].(string)
+		if key, ok := record[globalconst.ID].(string); ok && key != "" {
+			clientProvidedKeys = append(clientProvidedKeys, key)
+		}
+	}
+
+	// 2. Verificar todas las claves en disco en una sola pasada.
+	var foundInCold map[string]bool
+	if h.CurrentTransactionID == "" && len(clientProvidedKeys) > 0 {
+		var checkErr error
+		foundInCold, checkErr = persistence.CheckManyColdKeysExist(collectionName, clientProvidedKeys)
+		if checkErr != nil {
+			slog.Error("Failed to check batch key existence in cold storage", "collection", collectionName, "error", checkErr)
+			if conn != nil {
+				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error during batch key validation.", nil)
+			}
+			return
+		}
+	}
+
+	// 3. Procesar cada registro con la información de la validación en lote.
+	for _, record := range records {
+		key, clientProvidedKey := record[globalconst.ID].(string)
 
 		// Caso 1: El cliente no proporciona ID, el servidor lo genera.
-		if !ok || key == "" {
-			if conn == nil { // No se puede generar ID durante el replay de WAL.
+		if !clientProvidedKey || key == "" {
+			if conn == nil {
 				slog.Error("CRITICAL: SET_MANY record with empty key received during WAL replay.", "collection", collectionName)
 				invalidRecordsCount++
 				continue
 			}
 
-			const maxGenerateRetries = 5
+			// La generación de ID individual sigue siendo necesaria aquí, ya que no podemos predecir los UUIDs.
+			// La validación en disco se hace dentro del bucle.
 			generatedKey := ""
+			const maxGenerateRetries = 5
 			for i := 0; i < maxGenerateRetries; i++ {
 				newKey := uuid.New().String()
-				if _, found := colStore.Get(newKey); !found {
+				_, foundInMem := colStore.Get(newKey)
+				foundInColdGen, _ := persistence.CheckColdKeyExists(collectionName, newKey) // Error se ignora por simplicidad en bucle.
+				if !foundInMem && !foundInColdGen {
 					generatedKey = newKey
 					break
 				}
@@ -727,7 +780,10 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 
 		// Caso 2: El cliente proporciona ID. Validamos si ya existe (solo para no-transaccional).
 		if h.CurrentTransactionID == "" {
-			if _, found := colStore.Get(key); found {
+			_, existsInMem := colStore.Get(key)
+			_, existsInCold := foundInCold[key]
+
+			if existsInMem || existsInCold {
 				duplicateKeys = append(duplicateKeys, key)
 			} else {
 				recordsToProcess = append(recordsToProcess, record)
@@ -745,8 +801,9 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 	}
 	// --- FIN DE LA LÓGICA DE GENERACIÓN Y VALIDACIÓN ---
 
-	// Lógica transaccional
+	// Lógica transaccional (sin cambios)
 	if h.CurrentTransactionID != "" {
+		// ... (código existente de la lógica transaccional)
 		for _, record := range recordsToProcess {
 			key := record[globalconst.ID].(string)
 			valBytes, err := json.Marshal(record)
@@ -771,7 +828,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		return
 	}
 
-	// Lógica no transaccional
+	// Lógica no transaccional (sin cambios)
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, record := range recordsToProcess {
 		// El ID ya está garantizado en el record

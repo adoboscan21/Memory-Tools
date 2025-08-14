@@ -287,3 +287,128 @@ func DeleteManyColdItems(collectionName string, keys []string) (int, error) {
 
 	return markedCount, err
 }
+
+// CheckColdKeyExists verifica si una clave específica existe en el archivo de persistencia de una colección.
+// Es una operación optimizada que solo lee las claves y evita decodificar los valores.
+func CheckColdKeyExists(collectionName, keyToFind string) (bool, error) {
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // El archivo no existe, por lo tanto la clave tampoco.
+		}
+		return false, fmt.Errorf("failed to open cold data file '%s': %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Omitir cabecera de índices
+	var numIndexes uint32
+	if err := binary.Read(file, binary.LittleEndian, &numIndexes); err != nil {
+		return false, nil // Archivo vacío o corrupto, asumimos que la clave no existe.
+	}
+	for i := 0; i < int(numIndexes); i++ {
+		fieldBytes, err := readPrefixedBytes(file)
+		if err != nil {
+			return false, fmt.Errorf("could not read index field name: %w", err)
+		}
+		_ = fieldBytes // Descartamos el nombre del campo.
+	}
+
+	// Leer número de entradas
+	var numEntries uint32
+	if err := binary.Read(file, binary.LittleEndian, &numEntries); err != nil {
+		return false, nil // No hay entradas para leer.
+	}
+
+	// Iterar solo sobre las claves
+	for i := 0; i < int(numEntries); i++ {
+		keyBytes, err := readPrefixedBytes(file)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return false, fmt.Errorf("error reading key at position %d: %w", i, err)
+		}
+
+		if string(keyBytes) == keyToFind {
+			return true, nil // ¡Clave encontrada!
+		}
+
+		// Omitir el valor para pasar al siguiente registro rápidamente
+		var valLen uint32
+		if err := binary.Read(file, binary.LittleEndian, &valLen); err != nil {
+			return false, fmt.Errorf("error reading value length for key '%s': %w", string(keyBytes), err)
+		}
+		if _, err := file.Seek(int64(valLen), io.SeekCurrent); err != nil {
+			return false, fmt.Errorf("error seeking past value for key '%s': %w", string(keyBytes), err)
+		}
+	}
+
+	return false, nil // La clave no fue encontrada.
+}
+
+// CheckManyColdKeysExist verifica la existencia de múltiples claves en un archivo de colección en una sola pasada.
+// Devuelve un mapa con las claves que sí fueron encontradas.
+func CheckManyColdKeysExist(collectionName string, keysToFind []string) (map[string]bool, error) {
+	foundKeys := make(map[string]bool)
+	if len(keysToFind) == 0 {
+		return foundKeys, nil
+	}
+
+	keysMap := make(map[string]struct{}, len(keysToFind))
+	for _, k := range keysToFind {
+		keysMap[k] = struct{}{}
+	}
+
+	filePath := filepath.Join(globalconst.CollectionsDirName, collectionName+globalconst.DBFileExtension)
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return foundKeys, nil
+		}
+		return nil, fmt.Errorf("failed to open cold data file '%s': %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Omitir cabecera de índices (misma lógica que la función singular)
+	var numIndexes uint32
+	binary.Read(file, binary.LittleEndian, &numIndexes)
+	for i := 0; i < int(numIndexes); i++ {
+		fieldBytes, _ := readPrefixedBytes(file)
+		_ = fieldBytes
+	}
+
+	// Leer número de entradas
+	var numEntries uint32
+	if err := binary.Read(file, binary.LittleEndian, &numEntries); err != nil {
+		return foundKeys, nil
+	}
+
+	// Iterar una sola vez
+	for i := 0; i < int(numEntries); i++ {
+		keyBytes, err := readPrefixedBytes(file)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		keyStr := string(keyBytes)
+		if _, needed := keysMap[keyStr]; needed {
+			foundKeys[keyStr] = true
+		}
+
+		// Omitir valor
+		var valLen uint32
+		binary.Read(file, binary.LittleEndian, &valLen)
+		file.Seek(int64(valLen), io.SeekCurrent)
+
+		// Optimización: si ya encontramos todas las claves, salimos.
+		if len(foundKeys) == len(keysToFind) {
+			break
+		}
+	}
+
+	return foundKeys, nil
+}

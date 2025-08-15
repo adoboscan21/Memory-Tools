@@ -434,6 +434,7 @@ type DataStore interface {
 	GetMany(keys []string) map[string][]byte
 	Delete(key string)
 	GetAll() map[string][]byte
+	StreamAll(callback func(key string, value []byte) bool)
 	LoadData(data map[string][]byte)
 	CleanExpiredItems() bool
 	Size() int
@@ -1200,6 +1201,27 @@ func (s *Shard) rollbackChanges(txID string) {
 			if owner == txID {
 				delete(s.keyLocks, key)
 			}
+		}
+	}
+}
+
+func (s *InMemStore) StreamAll(callback func(key string, value []byte) bool) {
+	now := time.Now()
+
+	for _, shard := range s.shards {
+		keepGoing := true
+		shard.mu.RLock()
+		for k, item := range shard.data {
+			if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
+				if !callback(k, item.Value) {
+					keepGoing = false
+					break // Break inner loop (items in shard)
+				}
+			}
+		}
+		shard.mu.RUnlock()
+		if !keepGoing {
+			break // Break outer loop (shards)
 		}
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 
+	stdjson "encoding/json"
+
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -56,7 +58,7 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 		queryPool.Put(query)
 	}()
 
-	if err := json.Unmarshal(queryJSONBytes, query); err != nil {
+	if err := jsoniter.Unmarshal(queryJSONBytes, query); err != nil {
 		slog.Warn("Failed to unmarshal query JSON",
 			"user", h.AuthenticatedUser,
 			"collection", collectionName,
@@ -80,7 +82,7 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 		return
 	}
 
-	responseBytes, err := json.Marshal(results)
+	responseBytes, err := jsoniter.Marshal(results)
 	if err != nil {
 		slog.Error("Error marshalling query results",
 			"user", h.AuthenticatedUser,
@@ -100,8 +102,54 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 func (h *ConnectionHandler) processCollectionQuery(collectionName string, query *Query) (any, error) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 
+	// A "simple query" has no complex operations; it just retrieves data.
+	isSimpleQuery := len(query.Filter) == 0 && len(query.OrderBy) == 0 &&
+		len(query.Aggregations) == 0 && len(query.GroupBy) == 0 &&
+		query.Distinct == "" && len(query.Lookups) == 0 && len(query.Projection) == 0 && !query.Count
+
+	if isSimpleQuery {
+		slog.Debug("Executing simple query fast path with streaming", "collection", collectionName)
+
+		// Pre-allocate slice with a reasonable capacity. It will grow if needed.
+		capacity := 1024
+		if query.Limit != nil && *query.Limit > 0 {
+			capacity = *query.Limit
+		}
+		rawResults := make([]stdjson.RawMessage, 0, capacity)
+
+		var processedCount int = 0
+		limit := -1 // -1 signifies no limit
+		if query.Limit != nil {
+			limit = *query.Limit
+		}
+
+		// Use the new, efficient StreamAll method to avoid deep copies and GC pressure.
+		colStore.StreamAll(func(key string, value []byte) bool {
+			// Handle OFFSET: Skip items until the offset is reached
+			if processedCount < query.Offset {
+				processedCount++
+				return true // Continue to the next item
+			}
+
+			// Add the item's raw JSON to our results
+			rawResults = append(rawResults, value)
+
+			// Handle LIMIT: Stop streaming once we have enough items
+			if limit != -1 && len(rawResults) >= limit {
+				return false // Stop streaming
+			}
+
+			return true // Continue streaming
+		})
+
+		slog.Info("Simple query fast path finished", "collection", collectionName, "results_count", len(rawResults))
+		return rawResults, nil
+	}
+
+	// --- Original Logic for Complex Queries ---
+	slog.Debug("Executing complex query path", "collection", collectionName)
+
 	// --- HOT SEARCH (IN RAM) ---
-	slog.Debug("Executing query against hot data (RAM)...", "collection", collectionName)
 	candidateKeys, usedIndex, remainingFilter := h.findCandidateKeysFromFilter(colStore, query.Filter)
 
 	var itemsData map[string][]byte
@@ -110,14 +158,14 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		itemsData = colStore.GetMany(candidateKeys)
 	} else {
 		slog.Debug("Query optimizer NOT using index for hot data, falling back to full scan", "collection", collectionName)
-		itemsData = colStore.GetAll()
+		itemsData = colStore.GetAll() // The slow path still uses GetAll
 		remainingFilter = query.Filter
 	}
 
 	hotResultsMap := make(map[string]map[string]any)
 	for k, vBytes := range itemsData {
 		var val map[string]any
-		if err := json.Unmarshal(vBytes, &val); err != nil {
+		if err := jsoniter.Unmarshal(vBytes, &val); err != nil {
 			continue
 		}
 		if h.matchFilter(val, remainingFilter) {
@@ -126,29 +174,41 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	}
 	slog.Info("Hot data query finished", "collection", collectionName, "found_matches", len(hotResultsMap))
 
-	// --- COLD SEARCH (ON DISK) ---
-	slog.Debug("Executing query against cold data (Disk)...", "collection", collectionName)
-	coldMatcher := func(item map[string]any) bool {
-		if id, ok := item[globalconst.ID].(string); ok {
-			if _, existsInHot := hotResultsMap[id]; existsInHot {
-				return false
-			}
-		}
-		return h.matchFilter(item, query.Filter)
-	}
-	coldResults, err := persistence.SearchColdData(collectionName, coldMatcher)
-	if err != nil {
-		return nil, fmt.Errorf("error searching cold data: %w", err)
-	}
-	slog.Info("Cold data query finished", "collection", collectionName, "found_matches", len(coldResults))
-
-	// --- MERGE RESULTS ---
-	finalResults := make([]map[string]any, 0, len(hotResultsMap)+len(coldResults))
+	finalResults := make([]map[string]any, 0, len(hotResultsMap))
 	for _, hotItem := range hotResultsMap {
 		finalResults = append(finalResults, hotItem)
 	}
-	finalResults = append(finalResults, coldResults...)
-	slog.Info("Hot and Cold results merged", "total_results_before_processing", len(finalResults))
+
+	shouldSkipColdSearch := false
+	if query.Limit != nil && len(finalResults) >= *query.Limit {
+		slog.Debug("Skipping cold search: Limit met with hot data.", "collection", collectionName, "limit", *query.Limit, "hot_results", len(finalResults))
+		shouldSkipColdSearch = true
+	}
+
+	if !shouldSkipColdSearch {
+		// --- COLD SEARCH (ON DISK) ---
+		slog.Debug("Executing query against cold data (Disk)...", "collection", collectionName)
+		coldMatcher := func(item map[string]any) bool {
+			if id, ok := item[globalconst.ID].(string); ok {
+				if _, existsInHot := hotResultsMap[id]; existsInHot {
+					return false
+				}
+			}
+			return h.matchFilter(item, query.Filter)
+		}
+		coldResults, err := persistence.SearchColdData(collectionName, coldMatcher)
+		if err != nil {
+			return nil, fmt.Errorf("error searching cold data: %w", err)
+		}
+		slog.Info("Cold data query finished", "collection", collectionName, "found_matches", len(coldResults))
+
+		// --- MERGE RESULTS ---
+		if len(coldResults) > 0 {
+			finalResults = append(finalResults, coldResults...)
+		}
+	}
+
+	slog.Info("Total results before processing", "count", len(finalResults))
 
 	if query.Distinct != "" {
 		distinctValues := make(map[any]bool)
@@ -228,7 +288,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 			for _, doc := range currentResults {
 				localValue, ok := getNestedValue(doc, lookupSpec.LocalField)
 				if !ok {
-					doc[lookupSpec.As] = nil // Set joined field to nil if local key is missing
+					doc[lookupSpec.As] = nil
 					nextResults = append(nextResults, doc)
 					continue
 				}
@@ -241,7 +301,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 					},
 				}
 
-				// <-- CAMBIO AQUÍ: Se pasa la dirección de memoria con '&'
 				joinedData, err := h.processCollectionQuery(lookupSpec.FromCollection, &joinQuery)
 				if err != nil {
 					slog.Warn("Lookup sub-query failed", "error", err, "from", lookupSpec.FromCollection)

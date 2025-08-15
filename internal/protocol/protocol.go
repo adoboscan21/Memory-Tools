@@ -203,26 +203,37 @@ func ReadUserDeleteCommand(r io.Reader) (username string, err error) {
 
 // WriteResponse sends a structured binary response over the connection.
 func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) error {
-	// Write status (1 byte).
-	if _, err := w.Write([]byte{byte(status)}); err != nil {
-		return fmt.Errorf("failed to write status: %w", err)
+	// Pre-allocate a buffer with an estimated size to avoid reallocations.
+	// Size = 1 (status) + 4 (msg len) + len(msg) + 4 (data len) + len(data)
+	bufferSize := 1 + 4 + len(msg) + 4 + len(data)
+	buf := bytes.NewBuffer(make([]byte, 0, bufferSize))
+
+	// 1. Write status (1 byte) to the buffer.
+	if err := buf.WriteByte(byte(status)); err != nil {
+		return fmt.Errorf("failed to write status to buffer: %w", err)
 	}
 
-	// Write message length (4 bytes) and message.
-	if err := binary.Write(w, ByteOrder, uint32(len(msg))); err != nil {
-		return fmt.Errorf("failed to write message length: %w", err)
+	// 2. Write message length (4 bytes) and message to the buffer.
+	if err := binary.Write(buf, ByteOrder, uint32(len(msg))); err != nil {
+		return fmt.Errorf("failed to write message length to buffer: %w", err)
 	}
-	if _, err := w.Write([]byte(msg)); err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
+	if _, err := buf.WriteString(msg); err != nil {
+		return fmt.Errorf("failed to write message to buffer: %w", err)
 	}
 
-	// Write data length (4 bytes) and data.
-	if err := binary.Write(w, ByteOrder, uint32(len(data))); err != nil {
-		return fmt.Errorf("failed to write data length: %w", err)
+	// 3. Write data length (4 bytes) and data to the buffer.
+	if err := binary.Write(buf, ByteOrder, uint32(len(data))); err != nil {
+		return fmt.Errorf("failed to write data length to buffer: %w", err)
 	}
-	if _, err := w.Write(data); err != nil {
-		return fmt.Errorf("failed to write data: %w", err)
+	if _, err := buf.Write(data); err != nil {
+		return fmt.Errorf("failed to write data to buffer: %w", err)
 	}
+
+	// 4. Perform a SINGLE, efficient write to the network connection.
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write buffered response to network: %w", err)
+	}
+
 	return nil
 }
 

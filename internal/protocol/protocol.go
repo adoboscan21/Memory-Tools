@@ -44,11 +44,11 @@ const (
 	CmdUserUpdate // USER_UPDATE username, permissions_json
 	CmdUserDelete // USER_DELETE username
 
-	// --- NEW: Admin Commands ---
+	// Admin Commands
 	CmdBackup  // BACKUP
 	CmdRestore // RESTORE backup_name
 
-	// --- TRANSACTION COMMANDS ---
+	// Transaction Commands
 	CmdBegin
 	CmdCommit
 	CmdRollback
@@ -68,7 +68,7 @@ const (
 
 var ByteOrder = binary.LittleEndian
 
-// WriteBeginCommand escribe un comando BEGIN.
+// WriteBeginCommand writes a BEGIN command.
 func WriteBeginCommand(w io.Writer) error {
 	if _, err := w.Write([]byte{byte(CmdBegin)}); err != nil {
 		return fmt.Errorf("failed to write command type (begin): %w", err)
@@ -76,7 +76,7 @@ func WriteBeginCommand(w io.Writer) error {
 	return nil
 }
 
-// WriteCommitCommand escribe un comando COMMIT.
+// WriteCommitCommand writes a COMMIT command.
 func WriteCommitCommand(w io.Writer) error {
 	if _, err := w.Write([]byte{byte(CmdCommit)}); err != nil {
 		return fmt.Errorf("failed to write command type (commit): %w", err)
@@ -84,7 +84,7 @@ func WriteCommitCommand(w io.Writer) error {
 	return nil
 }
 
-// WriteRollbackCommand escribe un comando ROLLBACK.
+// WriteRollbackCommand writes a ROLLBACK command.
 func WriteRollbackCommand(w io.Writer) error {
 	if _, err := w.Write([]byte{byte(CmdRollback)}); err != nil {
 		return fmt.Errorf("failed to write command type (rollback): %w", err)
@@ -203,17 +203,13 @@ func ReadUserDeleteCommand(r io.Reader) (username string, err error) {
 
 // WriteResponse sends a structured binary response over the connection.
 func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) error {
-	// Pre-allocate a buffer with an estimated size to avoid reallocations.
-	// Size = 1 (status) + 4 (msg len) + len(msg) + 4 (data len) + len(data)
 	bufferSize := 1 + 4 + len(msg) + 4 + len(data)
 	buf := bytes.NewBuffer(make([]byte, 0, bufferSize))
 
-	// 1. Write status (1 byte) to the buffer.
 	if err := buf.WriteByte(byte(status)); err != nil {
 		return fmt.Errorf("failed to write status to buffer: %w", err)
 	}
 
-	// 2. Write message length (4 bytes) and message to the buffer.
 	if err := binary.Write(buf, ByteOrder, uint32(len(msg))); err != nil {
 		return fmt.Errorf("failed to write message length to buffer: %w", err)
 	}
@@ -221,7 +217,6 @@ func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) 
 		return fmt.Errorf("failed to write message to buffer: %w", err)
 	}
 
-	// 3. Write data length (4 bytes) and data to the buffer.
 	if err := binary.Write(buf, ByteOrder, uint32(len(data))); err != nil {
 		return fmt.Errorf("failed to write data length to buffer: %w", err)
 	}
@@ -229,7 +224,6 @@ func WriteResponse(w io.Writer, status ResponseStatus, msg string, data []byte) 
 		return fmt.Errorf("failed to write data to buffer: %w", err)
 	}
 
-	// 4. Perform a SINGLE, efficient write to the network connection.
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		return fmt.Errorf("failed to write buffered response to network: %w", err)
 	}
@@ -707,12 +701,10 @@ func WriteCollectionItemDeleteManyCommand(w io.Writer, collectionName string, ke
 		return fmt.Errorf("failed to write collection name: %w", err)
 	}
 
-	// Write the number of keys.
 	if err := binary.Write(w, ByteOrder, uint32(len(keys))); err != nil {
 		return fmt.Errorf("failed to write keys count: %w", err)
 	}
 
-	// Write each key as a length-prefixed string.
 	for _, key := range keys {
 		if err := WriteString(w, key); err != nil {
 			return fmt.Errorf("failed to write key '%s': %w", key, err)
@@ -746,10 +738,7 @@ func ReadCollectionItemDeleteManyCommand(r io.Reader) (collectionName string, ke
 	return collectionName, keys, nil
 }
 
-// --- Indexing Commands ---
-
 // WriteCollectionIndexCreateCommand writes a CREATE_COLLECTION_INDEX command.
-// Format: [CmdCollectionIndexCreate (1 byte)] [ColNameLength] [ColName] [FieldNameLength] [FieldName]
 func WriteCollectionIndexCreateCommand(w io.Writer, collectionName, fieldName string) error {
 	if _, err := w.Write([]byte{byte(CmdCollectionIndexCreate)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -776,7 +765,7 @@ func ReadCollectionIndexCreateCommand(r io.Reader) (collectionName, fieldName st
 	return collectionName, fieldName, nil
 }
 
-// NEW: WriteCollectionIndexDeleteCommand writes a DELETE_COLLECTION_INDEX command.
+// WriteCollectionIndexDeleteCommand writes a DELETE_COLLECTION_INDEX command.
 func WriteCollectionIndexDeleteCommand(w io.Writer, collectionName, fieldName string) error {
 	if _, err := w.Write([]byte{byte(CmdCollectionIndexDelete)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -790,7 +779,7 @@ func WriteCollectionIndexDeleteCommand(w io.Writer, collectionName, fieldName st
 	return nil
 }
 
-// NEW: ReadCollectionIndexDeleteCommand reads a DELETE_COLLECTION_INDEX command.
+// ReadCollectionIndexDeleteCommand reads a DELETE_COLLECTION_INDEX command.
 func ReadCollectionIndexDeleteCommand(r io.Reader) (collectionName, fieldName string, err error) {
 	collectionName, err = ReadString(r)
 	if err != nil {
@@ -803,7 +792,7 @@ func ReadCollectionIndexDeleteCommand(r io.Reader) (collectionName, fieldName st
 	return collectionName, fieldName, nil
 }
 
-// NEW: WriteCollectionIndexListCommand writes a LIST_COLLECTION_INDEXES command.
+// WriteCollectionIndexListCommand writes a LIST_COLLECTION_INDEXES command.
 func WriteCollectionIndexListCommand(w io.Writer, collectionName string) error {
 	if _, err := w.Write([]byte{byte(CmdCollectionIndexList)}); err != nil {
 		return fmt.Errorf("failed to write command type: %w", err)
@@ -814,7 +803,7 @@ func WriteCollectionIndexListCommand(w io.Writer, collectionName string) error {
 	return nil
 }
 
-// NEW: ReadCollectionIndexListCommand reads a LIST_COLLECTION_INDEXES command.
+// ReadCollectionIndexListCommand reads a LIST_COLLECTION_INDEXES command.
 func ReadCollectionIndexListCommand(r io.Reader) (collectionName string, err error) {
 	collectionName, err = ReadString(r)
 	if err != nil {
@@ -823,12 +812,9 @@ func ReadCollectionIndexListCommand(r io.Reader) (collectionName string, err err
 	return collectionName, nil
 }
 
+// ReadCommandPayload reads the payload for a given command type.
 func ReadCommandPayload(r io.Reader, cmdType CommandType) ([]byte, error) {
-	// Usamos un buffer para reconstruir el payload.
 	var buf bytes.Buffer
-
-	// Un mapa para saber cuántos strings y cuántos []byte leer para cada comando.
-	// Formato: {numStrings, numByteSlices, hasTTL, hasKeysArray}
 	structure := map[CommandType]struct {
 		numStr, numBytes int
 		hasTTL, hasKeys  bool

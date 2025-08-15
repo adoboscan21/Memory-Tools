@@ -9,9 +9,8 @@ import (
 	"net"
 )
 
-// handleBackup maneja el comando para un backup manual.
-// Esta operación no modifica el estado de los datos, por lo que no se registra en el WAL.
-// El lector 'r' no se utiliza, pero se mantiene en la firma por consistencia.
+// handleBackup handles the command for a manual backup.
+// This operation does not modify data state, so it is not logged to the WAL.
 func (h *ConnectionHandler) handleBackup(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -44,15 +43,15 @@ func (h *ConnectionHandler) handleBackup(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleRestore maneja el comando para restaurar desde un backup.
-// Esta es una operación de escritura masiva y se registra en el WAL.
+// HandleRestore handles the command to restore from a backup.
+// This is a bulk write operation and is logged to the WAL.
 func (h *ConnectionHandler) HandleRestore(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
 
-	// Durante la recuperación del WAL, conn es nil y la autorización se salta.
+	// During WAL recovery, conn is nil and authorization is skipped.
 	if conn != nil {
 		if !h.IsRoot {
 			slog.Warn("Unauthorized restore attempt",
@@ -96,7 +95,7 @@ func (h *ConnectionHandler) HandleRestore(r io.Reader, conn net.Conn) {
 
 	slog.Info("Restore complete. Enqueuing persistence tasks for all restored collections.")
 
-	// Después de una restauración, es vital guardar el nuevo estado en los snapshots.
+	// After a restore, it's vital to save the new state to the snapshots.
 	if err := persistence.SaveData(h.MainStore); err != nil {
 		slog.Error("Failed to persist main store after restore", "error", err)
 	}

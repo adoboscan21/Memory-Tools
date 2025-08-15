@@ -20,20 +20,17 @@ import (
 func tryUnmarshal(value []byte) map[string]any {
 	var data map[string]any
 
-	// Use a decoder that treats all numbers as json.Number first.
 	decoder := jsoniter.NewDecoder(bytes.NewReader(value))
 	decoder.UseNumber()
 	if err := decoder.Decode(&data); err != nil {
-		return nil // Not a JSON object, cannot be indexed.
+		return nil
 	}
 
-	// Post-process to convert json.Number to float64.
 	for k, v := range data {
 		if num, ok := v.(jsoniter.Number); ok {
 			if f, err := num.Float64(); err == nil {
 				data[k] = f
 			} else {
-				// If it fails to be a float, store it as a string.
 				data[k] = num.String()
 			}
 		}
@@ -62,7 +59,6 @@ func valueToFloat64(v any) (float64, bool) {
 		f, err := val.Float64()
 		return f, err == nil
 	case string:
-		// Also try to parse a string that might represent a number.
 		f, err := strconv.ParseFloat(val, 64)
 		return f, err == nil
 	default:
@@ -70,12 +66,11 @@ func valueToFloat64(v any) (float64, bool) {
 	}
 }
 
-// --- NEW: B-Tree Indexing Structures ---
+// --- B-Tree Indexing Structures ---
 
-const btreeDegree = 32 // Degree of the B-Tree, can be tuned for performance.
+const btreeDegree = 32
 
 // NumericKey implements the item for the numeric B-Tree.
-// It holds a float64 value and the set of associated document keys.
 type NumericKey struct {
 	Value float64
 	Keys  map[string]struct{}
@@ -86,8 +81,6 @@ type StringKey struct {
 	Value string
 	Keys  map[string]struct{}
 }
-
-// --- FIX: Create LessFunc functions instead of methods ---
 
 // numericLess provides the comparison logic for NumericKey items.
 func numericLess(a, b NumericKey) bool {
@@ -108,18 +101,17 @@ type Index struct {
 // NewIndex creates a new index structure with initialized B-Trees.
 func NewIndex() *Index {
 	return &Index{
-		// --- FIX: Pass the LessFunc as the second argument to NewG ---
 		numericTree: btree.NewG[NumericKey](btreeDegree, numericLess),
 		stringTree:  btree.NewG[StringKey](btreeDegree, stringLess),
 	}
 }
 
-// --- REWRITTEN: IndexManager for B-Trees ---
+// --- IndexManager for B-Trees ---
 
 // IndexManager manages all indexes for a single InMemStore.
 type IndexManager struct {
 	mu      sync.RWMutex
-	indexes map[string]*Index // map[fieldName] -> *Index
+	indexes map[string]*Index
 }
 
 // NewIndexManager creates a new index manager.
@@ -188,10 +180,8 @@ func (im *IndexManager) removeFromIndex(index *Index, docKey string, value any) 
 		if item, found := index.numericTree.Get(key); found {
 			delete(item.Keys, docKey)
 			if len(item.Keys) == 0 {
-				// If no more documents are associated with this value, remove it from the B-Tree.
 				index.numericTree.Delete(item)
 			} else {
-				// Otherwise, update the item in the tree.
 				index.numericTree.ReplaceOrInsert(item)
 			}
 		}
@@ -222,7 +212,7 @@ func (im *IndexManager) Update(docKey string, oldData, newData map[string]any) {
 		newVal, newOk := newData[field]
 
 		if oldOk && newOk && oldVal == newVal {
-			continue // No change in the indexed field.
+			continue
 		}
 
 		if oldOk {
@@ -270,7 +260,7 @@ func (im *IndexManager) Lookup(field string, value any) ([]string, bool) {
 	}
 
 	if foundKeys == nil {
-		return []string{}, true // Value not found in index.
+		return []string{}, true
 	}
 
 	keys := make([]string, 0, len(foundKeys))
@@ -291,8 +281,6 @@ func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, h
 	}
 
 	unionKeys := make(map[string]struct{})
-
-	// Determine if we should query the numeric or string tree.
 	var isNumericQuery bool
 	if low != nil {
 		if _, ok := valueToFloat64(low); ok {
@@ -315,16 +303,14 @@ func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, h
 		}
 
 		iterator := func(item NumericKey) bool {
-			// Check upper bound
 			if hasHighBound {
 				if item.Value > highKey.Value {
-					return false // Stop iteration
+					return false
 				}
 				if !highInclusive && item.Value == highKey.Value {
-					return false // Stop iteration
+					return false
 				}
 			}
-			// Add keys to the result set
 			for k := range item.Keys {
 				unionKeys[k] = struct{}{}
 			}
@@ -336,13 +322,12 @@ func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, h
 			if minItem, ok := index.numericTree.Min(); ok {
 				startKey = minItem
 			} else {
-				return []string{}, true // Tree is empty
+				return []string{}, true
 			}
 		}
 
 		index.numericTree.AscendGreaterOrEqual(startKey, iterator)
 
-		// Handle non-inclusive lower bound by removing keys from the startKey.
 		if hasLowBound && !lowInclusive {
 			if item, found := index.numericTree.Get(lowKey); found {
 				for k := range item.Keys {
@@ -352,7 +337,6 @@ func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, h
 		}
 
 	} else {
-		// Logic for string range scan
 		var lowKey, highKey StringKey
 		hasLowBound, hasHighBound := low != nil, high != nil
 		if hasLowBound {
@@ -382,7 +366,7 @@ func (im *IndexManager) LookupRange(field string, low, high any, lowInclusive, h
 			if minItem, ok := index.stringTree.Min(); ok {
 				startKey = minItem
 			} else {
-				return []string{}, true // Tree is empty
+				return []string{}, true
 			}
 		}
 
@@ -416,7 +400,7 @@ func (im *IndexManager) HasIndex(field string) bool {
 type Item struct {
 	Value     []byte
 	CreatedAt time.Time
-	TTL       time.Duration // 0 means no expiration.
+	TTL       time.Duration
 }
 
 // Shard represents a segment of the in-memory store.
@@ -427,7 +411,7 @@ type Shard struct {
 	pendingWrites map[string]map[string]Item
 }
 
-// --- UPDATED: DataStore Interface ---
+// DataStore defines the interface for data storage and retrieval.
 type DataStore interface {
 	Set(key string, value []byte, ttl time.Duration)
 	Get(key string) ([]byte, bool)
@@ -438,14 +422,11 @@ type DataStore interface {
 	LoadData(data map[string][]byte)
 	CleanExpiredItems() bool
 	Size() int
-
-	// Indexing interface methods
 	CreateIndex(field string)
 	DeleteIndex(field string)
 	ListIndexes() []string
 	HasIndex(field string) bool
 	Lookup(field string, value any) ([]string, bool)
-	// NEW METHOD IN THE INTERFACE!
 	LookupRange(field string, low, high any, lowInclusive, highInclusive bool) ([]string, bool)
 }
 
@@ -490,7 +471,6 @@ func (s *InMemStore) getShardIndex(key string) uint64 {
 }
 
 // Set saves a key-value pair and updates any relevant indexes.
-// Definitive and Corrected Version of InMemStore.Set
 func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 	shard := s.getShard(key)
 	shard.mu.Lock()
@@ -501,10 +481,8 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 		return
 	}
 
-	// 1. Obtener la versión ANTIGUA del ítem de forma clara.
 	oldItem, isUpdate := shard.data[key]
 
-	// 2. Preparar el NUEVO ítem. Se preserva la fecha de creación en las actualizaciones.
 	createdAt := time.Now()
 	if isUpdate {
 		createdAt = oldItem.CreatedAt
@@ -515,17 +493,14 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 		TTL:       ttl,
 	}
 
-	// 3. Escribir el nuevo ítem en el almacén. Este es el punto exacto de la modificación.
 	shard.data[key] = newItem
 
-	// 4. Preparar los datos para el índice a partir de los ítems "antes" y "después".
 	var oldDataForIndex map[string]any
 	if isUpdate {
 		oldDataForIndex = tryUnmarshal(oldItem.Value)
 	}
 	newDataForIndex := tryUnmarshal(newItem.Value)
 
-	// 5. Actualizar el índice solo si hay algo que indexar, pasando la información vieja y nueva.
 	if oldDataForIndex != nil || newDataForIndex != nil {
 		s.indexes.Update(key, oldDataForIndex, newDataForIndex)
 	}
@@ -535,29 +510,21 @@ func (s *InMemStore) Set(key string, value []byte, ttl time.Duration) {
 
 // Get retrieves a value from the store by its key.
 func (s *InMemStore) Get(key string) ([]byte, bool) {
-	// 1. Correctly identifies the shard for the key.
 	shard := s.getShard(key)
-	// 2. Uses a Read Lock, which is optimal for performance.
 	shard.mu.RLock()
-	// 3. Ensures the lock is always released.
 	defer shard.mu.RUnlock()
 
-	// 4. Performs an efficient and standard map lookup.
 	item, found := shard.data[key]
 	if !found {
-		// Correctly handles the "not found" case.
 		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "not_found")
 		return nil, false
 	}
 
-	// 5. Implements a robust TTL check.
 	if item.TTL > 0 && time.Since(item.CreatedAt) > item.TTL {
-		// Correctly treats an expired item as "not found".
 		slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "expired")
 		return nil, false
 	}
 
-	// 6. Returns the value if found and not expired.
 	slog.Debug("Item get", "shard_id", s.getShardIndex(key), "key", key, "status", "found")
 	return item.Value, true
 }
@@ -673,8 +640,8 @@ func (s *InMemStore) LoadData(data map[string][]byte) {
 		shard.mu.Lock()
 		shard.data[k] = Item{
 			Value:     v,
-			CreatedAt: time.Now(), // Assume loaded items are "created" at load time.
-			TTL:       0,          // Loaded items have no TTL by default.
+			CreatedAt: time.Now(),
+			TTL:       0,
 		}
 		shard.mu.Unlock()
 	}
@@ -692,7 +659,6 @@ func (s *InMemStore) CleanExpiredItems() bool {
 		deletedInShard := 0
 		for key, item := range shard.data {
 			if item.TTL > 0 && now.After(item.CreatedAt.Add(item.TTL)) {
-				// To avoid re-locking, we must remove from index here
 				data := tryUnmarshal(item.Value)
 				if data != nil {
 					s.indexes.Remove(key, data)
@@ -891,8 +857,6 @@ func (cm *CollectionManager) Wait() {
 
 // EnqueueSaveTask adds a collection save request to the asynchronous queue.
 func (cm *CollectionManager) EnqueueSaveTask(collectionName string, col DataStore) {
-	// Create a temporary snapshot of the collection data to be saved.
-	// This avoids holding a lock on the main collection while I/O happens.
 	tempStore := NewInMemStoreWithShards(cm.numShards)
 	tempStore.LoadData(col.GetAll())
 
@@ -941,7 +905,6 @@ func (cm *CollectionManager) GetCollection(name string) DataStore {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	// Double-check in case another goroutine created it while we waited for the lock.
 	col, found = cm.collections[name]
 	if found {
 		return col
@@ -1002,7 +965,6 @@ func (cm *CollectionManager) GetAllCollectionsDataForPersistence() map[string]ma
 // CleanExpiredItemsAndSave triggers TTL cleanup on all managed collections.
 func (cm *CollectionManager) CleanExpiredItemsAndSave() {
 	cm.mu.RLock()
-	// Create a copy of the collections map to avoid holding the lock during the long-running loop.
 	collectionsAndNames := make(map[string]DataStore, len(cm.collections))
 	maps.Copy(collectionsAndNames, cm.collections)
 	cm.mu.RUnlock()
@@ -1019,13 +981,11 @@ func (cm *CollectionManager) CleanExpiredItemsAndSave() {
 // EvictColdData iterates over all collections and removes "cold" data from RAM.
 func (cm *CollectionManager) EvictColdData(threshold time.Time) {
 	cm.mu.RLock()
-	// Copy the map to avoid holding the lock during the operation.
 	collectionsToClean := make(map[string]DataStore, len(cm.collections))
 	maps.Copy(collectionsToClean, cm.collections)
 	cm.mu.RUnlock()
 
 	for name, col := range collectionsToClean {
-		// Delegate the eviction logic to the collection itself (InMemStore).
 		if inMemStore, ok := col.(*InMemStore); ok {
 			inMemStore.EvictColdData(name, threshold)
 		}
@@ -1055,7 +1015,6 @@ func (s *InMemStore) EvictColdData(collectionName string, threshold time.Time) {
 			}
 
 			if createdAt.Before(threshold) {
-				// Data is cold, remove it from RAM and from the indexes.
 				s.indexes.Remove(key, doc)
 				delete(shard.data, key)
 				evictedInShard++
@@ -1083,7 +1042,6 @@ func (cm *CollectionManager) GetFileLock(collectionName string) *sync.Mutex {
 
 	cm.fileLocksMu.Lock()
 	defer cm.fileLocksMu.Unlock()
-	// Double-check in case another goroutine created it while we waited for the lock
 	lock, exists = cm.fileLocks[collectionName]
 	if exists {
 		return lock
@@ -1094,7 +1052,7 @@ func (cm *CollectionManager) GetFileLock(collectionName string) *sync.Mutex {
 	return newLock
 }
 
-// lockKeys intenta adquirir un bloqueo para un conjunto de claves dentro de este shard.
+// lockKeys attempts to acquire a lock for a set of keys within this shard.
 func (s *Shard) lockKeys(txID string, keys []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1112,7 +1070,7 @@ func (s *Shard) lockKeys(txID string, keys []string) error {
 	return nil
 }
 
-// prepareWrite almacena los cambios en el área de "pendingWrites".
+// prepareWrite stores changes in the "pendingWrites" area.
 func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1126,10 +1084,9 @@ func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
 	}
 
 	var pendingItem Item
-	// MODIFICACIÓN: Se comprueba el tipo de operación en lugar del booleano.
 	if op.OpType == OpTypeDelete {
-		pendingItem = Item{Value: nil} // nil marca una eliminación.
-	} else { // Esto cubre tanto OpTypeSet como OpTypeUpdate
+		pendingItem = Item{Value: nil}
+	} else {
 		createdAt := time.Now()
 		if existingItem, exists := s.data[op.Key]; exists {
 			createdAt = existingItem.CreatedAt
@@ -1145,7 +1102,7 @@ func (s *Shard) prepareWrite(txID string, op WriteOperation) error {
 	return nil
 }
 
-// commitAppliedChanges aplica los cambios de pendingWrites al data store principal.
+// commitAppliedChanges applies pendingWrites changes to the main data store.
 func (s *Shard) commitAppliedChanges(txID string, indexManager *IndexManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1162,17 +1119,16 @@ func (s *Shard) commitAppliedChanges(txID string, indexManager *IndexManager) {
 
 	for key, newItem := range pendingOps {
 		var oldDataForIndex map[string]any
-		// Versión corregida y más limpia:
 		if oldItem, exists := s.data[key]; exists && oldItem.Value != nil {
 			oldDataForIndex = tryUnmarshal(oldItem.Value)
 		}
 
-		if newItem.Value == nil { // DELETE
+		if newItem.Value == nil {
 			delete(s.data, key)
 			if oldDataForIndex != nil {
 				indexManager.Remove(key, oldDataForIndex)
 			}
-		} else { // SET/UPDATE
+		} else {
 			s.data[key] = newItem
 			newDataForIndex := tryUnmarshal(newItem.Value)
 			indexManager.Update(key, oldDataForIndex, newDataForIndex)
@@ -1184,14 +1140,12 @@ func (s *Shard) commitAppliedChanges(txID string, indexManager *IndexManager) {
 	delete(s.pendingWrites, txID)
 }
 
-// rollbackChanges descarta los cambios pendientes y libera los bloqueos.
+// rollbackChanges discards pending changes and releases locks.
 func (s *Shard) rollbackChanges(txID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// CORRECCIÓN: 'pendingOps' ahora es correctamente un 'map[string]Item'.
 	if pendingOps, ok := s.pendingWrites[txID]; ok {
-		// CORRECCIÓN: El 'range' ahora funciona.
 		for key := range pendingOps {
 			delete(s.keyLocks, key)
 		}
@@ -1205,6 +1159,7 @@ func (s *Shard) rollbackChanges(txID string) {
 	}
 }
 
+// StreamAll iterates through all non-expired items across all shards and executes a callback.
 func (s *InMemStore) StreamAll(callback func(key string, value []byte) bool) {
 	now := time.Now()
 
@@ -1215,13 +1170,13 @@ func (s *InMemStore) StreamAll(callback func(key string, value []byte) bool) {
 			if item.TTL == 0 || now.Before(item.CreatedAt.Add(item.TTL)) {
 				if !callback(k, item.Value) {
 					keepGoing = false
-					break // Break inner loop (items in shard)
+					break
 				}
 			}
 		}
 		shard.mu.RUnlock()
 		if !keepGoing {
-			break // Break outer loop (shards)
+			break
 		}
 	}
 }

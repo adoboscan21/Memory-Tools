@@ -8,10 +8,10 @@ import (
 	"net"
 )
 
-// handleMainStoreSet procesa el comando CmdSet.
-// Ahora lee el payload desde 'r' y escribe la respuesta en 'conn'.
+// HandleMainStoreSet processes the CmdSet command.
+// It reads the payload from 'r' and writes the response to 'conn'.
 func (h *ConnectionHandler) HandleMainStoreSet(r io.Reader, conn net.Conn) {
-	// Durante la recuperación del WAL, conn es nil y la autorización se salta.
+	// During WAL recovery, conn is nil and authorization is skipped.
 	if conn != nil {
 		if !h.IsRoot {
 			slog.Warn("Unauthorized main store SET attempt",
@@ -46,11 +46,11 @@ func (h *ConnectionHandler) HandleMainStoreSet(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleMainStoreGet procesa el comando CmdGet.
-// Ahora lee el payload desde 'r' y escribe la respuesta en 'conn'.
+// handleMainStoreGet processes the CmdGet command.
+// It reads the payload from 'r' and writes the response to 'conn'.
 func (h *ConnectionHandler) handleMainStoreGet(r io.Reader, conn net.Conn) {
-	// GET es un comando de solo lectura, por lo que no necesita un check para conn == nil
-	// ya que nunca se reproducirá desde el WAL. Aún así, es buena práctica mantener la firma consistente.
+	// GET is a read-only command, so it doesn't need a conn == nil check
+	// as it will never be replayed from the WAL. Still, it's good practice to keep the signature consistent.
 	if !h.IsRoot {
 		slog.Warn("Unauthorized main store GET attempt",
 			"user", h.AuthenticatedUser,

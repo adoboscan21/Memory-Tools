@@ -1,5 +1,3 @@
-// ./internal/store/transaction.go
-
 package store
 
 import (
@@ -25,7 +23,7 @@ const (
 	StateAborted
 )
 
-// NUEVO: Un enum para el tipo de operación
+// TransactionOpType is an enum for the type of operation in a transaction.
 type TransactionOpType int
 
 const (
@@ -34,13 +32,15 @@ const (
 	OpTypeDelete
 )
 
+// WriteOperation represents a single write action within a transaction.
 type WriteOperation struct {
 	Collection string
 	Key        string
 	Value      []byte
-	OpType     TransactionOpType // Campo actualizado
+	OpType     TransactionOpType
 }
 
+// Transaction holds the state and operations for a single transaction.
 type Transaction struct {
 	ID        string
 	State     TransactionState
@@ -49,7 +49,7 @@ type Transaction struct {
 	mu        sync.RWMutex
 }
 
-// TransactionManager es el coordinador central de todas las transacciones.
+// TransactionManager is the central coordinator for all transactions.
 type TransactionManager struct {
 	transactions map[string]*Transaction
 	mu           sync.RWMutex
@@ -58,7 +58,7 @@ type TransactionManager struct {
 	wg           sync.WaitGroup
 }
 
-// NewTransactionManager crea una nueva instancia del gestor de transacciones.
+// NewTransactionManager creates a new instance of the transaction manager.
 func NewTransactionManager(cm *CollectionManager) *TransactionManager {
 	return &TransactionManager{
 		transactions: make(map[string]*Transaction),
@@ -67,21 +67,21 @@ func NewTransactionManager(cm *CollectionManager) *TransactionManager {
 	}
 }
 
-// StartGC inicia el goroutine del recolector de basura.
+// StartGC starts the garbage collector goroutine.
 func (tm *TransactionManager) StartGC(timeout, interval time.Duration) {
 	tm.wg.Add(1)
 	go tm.runGC(timeout, interval)
 	slog.Info("Transaction garbage collector started", "timeout", timeout, "interval", interval)
 }
 
-// StopGC detiene el recolector de basura y espera a que termine.
+// StopGC stops the garbage collector and waits for it to finish.
 func (tm *TransactionManager) StopGC() {
 	close(tm.gcQuitChan)
 	tm.wg.Wait()
 	slog.Info("Transaction garbage collector stopped.")
 }
 
-// runGC es el bucle principal del recolector de basura.
+// runGC is the main loop for the garbage collector.
 func (tm *TransactionManager) runGC(timeout, interval time.Duration) {
 	defer tm.wg.Done()
 	ticker := time.NewTicker(interval)
@@ -116,7 +116,7 @@ func (tm *TransactionManager) runGC(timeout, interval time.Duration) {
 	}
 }
 
-// Begin inicia una nueva transacción y la registra, devolviendo su ID único.
+// Begin starts a new transaction and registers it, returning its unique ID.
 func (tm *TransactionManager) Begin() (string, error) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -134,7 +134,7 @@ func (tm *TransactionManager) Begin() (string, error) {
 	return txID, nil
 }
 
-// RecordWrite añade una operación de escritura al diario de una transacción activa.
+// RecordWrite adds a write operation to an active transaction's journal.
 func (tm *TransactionManager) RecordWrite(txID string, op WriteOperation) error {
 	tx, err := tm.getTransaction(txID)
 	if err != nil {
@@ -152,7 +152,7 @@ func (tm *TransactionManager) RecordWrite(txID string, op WriteOperation) error 
 	return nil
 }
 
-// getTransaction es un helper interno para obtener una transacción de forma segura.
+// getTransaction is an internal helper to safely get a transaction.
 func (tm *TransactionManager) getTransaction(txID string) (*Transaction, error) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -164,14 +164,14 @@ func (tm *TransactionManager) getTransaction(txID string) (*Transaction, error) 
 	return tx, nil
 }
 
-// removeTransaction es un helper interno para limpiar una transacción finalizada.
+// removeTransaction is an internal helper to clean up a finished transaction.
 func (tm *TransactionManager) removeTransaction(txID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	delete(tm.transactions, txID)
 }
 
-// Commit procesa el guardado final de la transacción.
+// Commit processes the final save of the transaction.
 func (tm *TransactionManager) Commit(txID string) error {
 	tx, err := tm.getTransaction(txID)
 	if err != nil {
@@ -187,28 +187,28 @@ func (tm *TransactionManager) Commit(txID string) error {
 	tx.State = StatePreparing
 	tx.mu.Unlock()
 
-	// --- INICIO DE LA MODIFICACIÓN CLAVE: BARRIDO DE PRE-VALIDACIÓN ---
+	// --- START OF KEY MODIFICATION: PRE-VALIDATION SWEEP ---
 	slog.Debug("TransactionManager: starting pre-commit validation", "txID", txID)
 	for _, op := range writeSetToProcess {
 		col := tm.cm.GetCollection(op.Collection)
 		_, keyExists := col.Get(op.Key)
 
-		// Regla 1: Si la operación es un SET, la clave NO debe existir.
+		// Rule 1: If the operation is a SET, the key must NOT exist.
 		if op.OpType == OpTypeSet && keyExists {
 			slog.Warn("Commit failed: attempt to SET a key that already exists", "txID", txID, "key", op.Key)
-			tm.Rollback(txID) // Deshacer la transacción
+			tm.Rollback(txID)
 			return fmt.Errorf("commit failed: key '%s' in collection '%s' already exists. Use update instead", op.Key, op.Collection)
 		}
 
-		// Regla 2: Si la operación es un UPDATE o DELETE, la clave SÍ debe existir.
+		// Rule 2: If the operation is an UPDATE or DELETE, the key MUST exist.
 		if (op.OpType == OpTypeUpdate || op.OpType == OpTypeDelete) && !keyExists {
 			slog.Warn("Commit failed: attempt to UPDATE/DELETE a key that does not exist", "txID", txID, "key", op.Key)
-			tm.Rollback(txID) // Deshacer la transacción
+			tm.Rollback(txID)
 			return fmt.Errorf("commit failed: key '%s' in collection '%s' does not exist to be updated or deleted", op.Key, op.Collection)
 		}
 	}
 	slog.Debug("TransactionManager: pre-commit validation successful", "txID", txID)
-	// --- FIN DE LA MODIFICACIÓN CLAVE ---
+	// --- END OF KEY MODIFICATION ---
 
 	tx.mu.Lock()
 	tx.WriteSet = nil
@@ -308,7 +308,7 @@ func (tm *TransactionManager) Commit(txID string) error {
 	return nil
 }
 
-// Rollback revierte una transacción, descartando todos sus cambios.
+// Rollback rolls back a transaction, discarding all its changes.
 func (tm *TransactionManager) Rollback(txID string) error {
 	tx, err := tm.getTransaction(txID)
 	if err != nil {

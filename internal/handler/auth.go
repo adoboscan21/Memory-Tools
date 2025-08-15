@@ -11,7 +11,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// hasPermission no requiere cambios ya que no interactúa con la conexión.
+// hasPermission checks if the user has the required permission level for a given collection.
+// It is read-only and does not require changes.
 func (h *ConnectionHandler) hasPermission(collectionName string, requiredLevel string) bool {
 	// Root user bypasses all permission checks.
 	if h.IsRoot {
@@ -40,9 +41,8 @@ func (h *ConnectionHandler) hasPermission(collectionName string, requiredLevel s
 	return level == requiredLevel
 }
 
-// handleAuthenticate procesa el comando CmdAuthenticate.
-// Es una operación de solo lectura, por lo que no se escribe en el WAL.
-// Su firma se actualiza por consistencia con el nuevo bucle de manejo de conexiones.
+// handleAuthenticate processes the CmdAuthenticate command.
+// It is a read-only operation and does not write to the WAL.
 func (h *ConnectionHandler) handleAuthenticate(r io.Reader, conn net.Conn) {
 	username, password, err := protocol.ReadAuthenticateCommand(r)
 	if err != nil {
@@ -61,26 +61,26 @@ func (h *ConnectionHandler) handleAuthenticate(r io.Reader, conn net.Conn) {
 
 	userDataBytes, found := sysCol.Get(userKey)
 	if !found {
-		slog.Warn("Authentication failed", "reason", "User not found", "username", username, "remote_addr", conn.RemoteAddr().String())
+		slog.Warn("Authentication failed: User not found", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Invalid username or password.", nil)
 		return
 	}
 
 	var storedUserInfo UserInfo
 	if err := json.Unmarshal(userDataBytes, &storedUserInfo); err != nil {
-		slog.Error("Failed to unmarshal user info during auth", "username", username, "remote_addr", conn.RemoteAddr().String(), "error", err)
+		slog.Error("Failed to unmarshal user info during authentication", "username", username, "remote_addr", conn.RemoteAddr().String(), "error", err)
 		protocol.WriteResponse(conn, protocol.StatusError, "Authentication failed: Internal server error.", nil)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(storedUserInfo.PasswordHash), []byte(password)); err != nil {
-		slog.Warn("Authentication failed", "reason", "Invalid password", "username", username, "remote_addr", conn.RemoteAddr().String())
+		slog.Warn("Authentication failed: Invalid password", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Invalid username or password.", nil)
 		return
 	}
 
 	if storedUserInfo.IsRoot && !h.IsLocalhostConn {
-		slog.Warn("Authentication failed", "reason", "Root login from non-localhost", "username", username, "remote_addr", conn.RemoteAddr().String())
+		slog.Warn("Root login attempt from non-localhost", "username", username, "remote_addr", conn.RemoteAddr().String())
 		protocol.WriteResponse(conn, protocol.StatusUnauthorized, "Authentication failed: Root access only from localhost.", nil)
 		return
 	}
@@ -95,8 +95,8 @@ func (h *ConnectionHandler) handleAuthenticate(r io.Reader, conn net.Conn) {
 	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Authenticated as '%s'.", username), nil)
 }
 
-// handleChangeUserPassword procesa el comando CmdChangeUserPassword.
-// Es una operación de escritura, por lo que se registra en el WAL.
+// HandleChangeUserPassword processes the CmdChangeUserPassword command.
+// It is a write operation and is logged to the WAL.
 func (h *ConnectionHandler) HandleChangeUserPassword(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -119,14 +119,10 @@ func (h *ConnectionHandler) HandleChangeUserPassword(r io.Reader, conn net.Conn)
 		return
 	}
 
-	// La autorización se salta durante la recuperación del WAL porque conn es nil.
+	// Authorization is skipped during WAL recovery because conn is nil.
 	if conn != nil {
 		if !h.IsRoot {
-			slog.Warn("Unauthorized password change attempt",
-				"user", h.AuthenticatedUser,
-				"target_user", targetUsername,
-				"remote_addr", remoteAddr,
-			)
+			slog.Warn("Unauthorized password change attempt", "user", h.AuthenticatedUser, "target_user", targetUsername, "remote_addr", remoteAddr)
 			protocol.WriteResponse(conn, protocol.StatusUnauthorized, "UNAUTHORIZED: Only root can change passwords.", nil)
 			return
 		}
@@ -137,7 +133,7 @@ func (h *ConnectionHandler) HandleChangeUserPassword(r io.Reader, conn net.Conn)
 
 	userDataBytes, found := sysCol.Get(targetUserKey)
 	if !found {
-		slog.Warn("Password change failed", "reason", "Target user not found", "admin_user", h.AuthenticatedUser, "target_user", targetUsername)
+		slog.Warn("Password change failed: Target user not found", "admin_user", h.AuthenticatedUser, "target_user", targetUsername)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: User '%s' does not exist.", targetUsername), nil)
 		}
@@ -181,13 +177,15 @@ func (h *ConnectionHandler) HandleChangeUserPassword(r io.Reader, conn net.Conn)
 	}
 }
 
-// HashPassword no requiere cambios.
+// HashPassword hashes a password using bcrypt.
+// No changes needed.
 func HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(bytes), err
 }
 
-// CheckPasswordHash no requiere cambios.
+// CheckPasswordHash compares a hashed password with a plaintext password.
+// No changes needed.
 func CheckPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil

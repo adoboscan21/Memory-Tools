@@ -9,7 +9,7 @@ import (
 	"net"
 )
 
-// handleCollectionCreate procesa el CmdCollectionCreate. Es una operación de escritura.
+// HandleCollectionCreate processes the CmdCollectionCreate command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionCreate(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -40,7 +40,6 @@ func (h *ConnectionHandler) HandleCollectionCreate(r io.Reader, conn net.Conn) {
 	}
 
 	if h.CollectionManager.CollectionExists(collectionName) {
-		slog.Info("Collection create command on existing collection", "user", h.AuthenticatedUser, "collection", collectionName)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Collection '%s' already exists.", collectionName), nil)
 		}
@@ -56,7 +55,7 @@ func (h *ConnectionHandler) HandleCollectionCreate(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleCollectionDelete procesa el CmdCollectionDelete. Es una operación de escritura.
+// HandleCollectionDelete processes the CmdCollectionDelete command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionDelete(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -87,7 +86,6 @@ func (h *ConnectionHandler) HandleCollectionDelete(r io.Reader, conn net.Conn) {
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Collection delete failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist for deletion", collectionName), nil)
 		}
@@ -103,7 +101,7 @@ func (h *ConnectionHandler) HandleCollectionDelete(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleCollectionList procesa el CmdCollectionList. Es una operación de solo lectura.
+// handleCollectionList processes the CmdCollectionList command. It is a read-only operation.
 func (h *ConnectionHandler) handleCollectionList(r io.Reader, conn net.Conn) {
 	allCollectionNames := h.CollectionManager.ListCollections()
 	accessibleCollections := []string{}
@@ -121,13 +119,12 @@ func (h *ConnectionHandler) handleCollectionList(r io.Reader, conn net.Conn) {
 		return
 	}
 
-	slog.Debug("User listed collections", "user", h.AuthenticatedUser, "count", len(accessibleCollections))
 	if err := protocol.WriteResponse(conn, protocol.StatusOk, "OK: Accessible collections listed", jsonNames); err != nil {
 		slog.Error("Failed to write collection list response", "error", err, "remote_addr", conn.RemoteAddr().String())
 	}
 }
 
-// handleCollectionIndexCreate procesa el CmdCollectionIndexCreate. Es una operación de escritura.
+// HandleCollectionIndexCreate processes the CmdCollectionIndexCreate command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionIndexCreate(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -158,7 +155,6 @@ func (h *ConnectionHandler) HandleCollectionIndexCreate(r io.Reader, conn net.Co
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Index create failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		}
@@ -167,7 +163,6 @@ func (h *ConnectionHandler) HandleCollectionIndexCreate(r io.Reader, conn net.Co
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.CreateIndex(fieldName)
-
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 
 	slog.Info("Index created on collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
@@ -176,7 +171,7 @@ func (h *ConnectionHandler) HandleCollectionIndexCreate(r io.Reader, conn net.Co
 	}
 }
 
-// handleCollectionIndexDelete procesa el CmdCollectionIndexDelete. Es una operación de escritura.
+// HandleCollectionIndexDelete processes the CmdCollectionIndexDelete command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionIndexDelete(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -207,7 +202,6 @@ func (h *ConnectionHandler) HandleCollectionIndexDelete(r io.Reader, conn net.Co
 	}
 
 	if !h.CollectionManager.CollectionExists(collectionName) {
-		slog.Warn("Index delete failed: collection not found", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Collection '%s' does not exist", collectionName), nil)
 		}
@@ -216,7 +210,6 @@ func (h *ConnectionHandler) HandleCollectionIndexDelete(r io.Reader, conn net.Co
 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	colStore.DeleteIndex(fieldName)
-
 	h.CollectionManager.EnqueueSaveTask(collectionName, colStore)
 
 	slog.Info("Index deleted from collection", "user", h.AuthenticatedUser, "collection", collectionName, "field", fieldName)
@@ -225,7 +218,7 @@ func (h *ConnectionHandler) HandleCollectionIndexDelete(r io.Reader, conn net.Co
 	}
 }
 
-// handleCollectionIndexList procesa el CmdCollectionIndexList. Es una operación de solo lectura.
+// handleCollectionIndexList processes the CmdCollectionIndexList command. It is a read-only operation.
 func (h *ConnectionHandler) handleCollectionIndexList(r io.Reader, conn net.Conn) {
 	collectionName, err := protocol.ReadCollectionIndexListCommand(r)
 	if err != nil {
@@ -259,6 +252,7 @@ func (h *ConnectionHandler) handleCollectionIndexList(r io.Reader, conn net.Conn
 		return
 	}
 
-	slog.Debug("User listed indexes for collection", "user", h.AuthenticatedUser, "collection", collectionName)
-	protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Indexes for collection '%s' retrieved.", collectionName), jsonResponse)
+	if err := protocol.WriteResponse(conn, protocol.StatusOk, fmt.Sprintf("OK: Indexes for collection '%s' retrieved.", collectionName), jsonResponse); err != nil {
+		slog.Error("Failed to write index list response", "error", err, "remote_addr", conn.RemoteAddr().String())
+	}
 }

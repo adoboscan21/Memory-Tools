@@ -1,5 +1,3 @@
-// cmd/client/cli.go
-
 package main
 
 import (
@@ -33,7 +31,7 @@ type cli struct {
 	inTransaction     bool
 }
 
-// newCLI (sin cambios)
+// newCLI creates a new command-line interface instance.
 func newCLI(conn net.Conn) *cli {
 	c := &cli{
 		conn: conn,
@@ -54,6 +52,7 @@ func newCLI(conn net.Conn) *cli {
 	return c
 }
 
+// run starts the main CLI loop and handles initial login.
 func (c *cli) run(user, pass *string) error {
 	c.rlConfig = &readline.Config{
 		Prompt:          "> ",
@@ -84,6 +83,7 @@ func (c *cli) run(user, pass *string) error {
 	return c.mainLoop()
 }
 
+// mainLoop is the core loop that reads user input and executes commands.
 func (c *cli) mainLoop() error {
 	for {
 		var prompt string

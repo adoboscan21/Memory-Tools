@@ -2,10 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"io"
-	"log"
 	"log/slog"
 	"memory-tools/internal/config"
 	"memory-tools/internal/globalconst"
@@ -41,27 +39,30 @@ func (f updateActivityFunc) UpdateActivity() {
 }
 
 func main() {
-	// --- Configuración e Inicialización ---
+	// --- Configuration and Initialization ---
 	if err := godotenv.Load(); err != nil {
-		log.Println("DEBUG: No .env file found, proceeding with existing environment")
+		slog.Info("No .env file found, proceeding with existing environment")
 	}
 
 	if err := os.MkdirAll("logs", 0755); err != nil {
-		log.Fatalf("failed to create log directory: %v", err)
+		slog.Error("Failed to create log directory", "error", err)
+		os.Exit(1)
 	}
 	if err := os.MkdirAll("json", 0755); err != nil {
-		log.Fatalf("failed to create json directory: %v", err)
+		slog.Error("Failed to create json directory", "error", err)
+		os.Exit(1)
 	}
 	logFile, err := os.OpenFile("logs/memory-tools.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("failed to open log file: %v", err)
+		slog.Error("Failed to open log file", "error", err)
+		os.Exit(1)
 	}
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	slog.SetDefault(slog.New(slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
 		AddSource: true,
-		Level:     slog.LevelDebug,
+		Level:     slog.LevelInfo,
 	})))
-	slog.Info("Logger successfully configured", "output", "console_and_file")
+	slog.Info("Logger configured successfully")
 
 	cfg := config.LoadConfig()
 
@@ -89,7 +90,7 @@ func main() {
 	transactionManager := store.NewTransactionManager(collectionManager)
 	transactionManager.StartGC(5*time.Minute, 10*time.Minute)
 
-	// --- Carga de Datos y Recuperación del WAL ---
+	// --- Data Loading and WAL Recovery ---
 	slog.Info("Loading data from snapshots...")
 	if err := persistence.LoadData(mainInMemStore); err != nil {
 		slog.Error("Fatal error loading main persistent data", "error", err)
@@ -159,7 +160,7 @@ func main() {
 		slog.Info("WAL replay complete.", "replayed_entries", replayedCount)
 	}
 
-	// --- Creación de Usuarios por Defecto ---
+	// --- Default User Creation ---
 	systemCollection := collectionManager.GetCollection(globalconst.SystemCollectionName)
 	if _, found := systemCollection.Get(globalconst.UserPrefix + "admin"); !found {
 		slog.Info("Default admin user not found, creating...", "user", "admin")
@@ -173,7 +174,6 @@ func main() {
 		adminUserInfoBytes, _ := json.Marshal(adminUserInfo)
 		systemCollection.Set(globalconst.UserPrefix+"admin", adminUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, systemCollection)
-		slog.Info("Default admin user created", "user", "admin")
 	}
 	if _, found := systemCollection.Get(globalconst.UserPrefix + "root"); !found {
 		slog.Info("Default root user not found, creating...", "user", "root")
@@ -187,10 +187,9 @@ func main() {
 		rootUserInfoBytes, _ := json.Marshal(rootUserInfo)
 		systemCollection.Set(globalconst.UserPrefix+"root", rootUserInfoBytes, 0)
 		collectionManager.EnqueueSaveTask(globalconst.SystemCollectionName, systemCollection)
-		slog.Info("Default root user created", "user", "root")
 	}
 
-	// --- Arranque del Servidor y Workers ---
+	// --- Server Startup and Workers ---
 	cert, err := tls.LoadX509KeyPair("certificates/server.crt", "certificates/server.key")
 	if err != nil {
 		slog.Error("Failed to load server certificate or key", "error", err)
@@ -212,7 +211,6 @@ func main() {
 	jobs := make(chan net.Conn, cfg.WorkerPoolSize)
 	for w := 1; w <= cfg.WorkerPoolSize; w++ {
 		go func(id int) {
-			slog.Info("Starting worker", "id", id)
 			for conn := range jobs {
 				h := handler.GetConnectionHandlerFromPool(
 					walInstance, mainInMemStore, collectionManager, backupManager,
@@ -221,7 +219,6 @@ func main() {
 				h.HandleConnection(conn)
 				handler.PutConnectionHandlerToPool(h)
 			}
-			slog.Info("Stopping worker", "id", id)
 		}(w)
 	}
 
@@ -241,10 +238,10 @@ func main() {
 		}
 	}()
 
-	// --- Tareas en Segundo Plano ---
+	// --- Background Tasks ---
 	shutdownChan := make(chan struct{})
 
-	// Worker de Checkpoint Global
+	// Global Checkpoint Worker
 	if cfg.EnableSnapshots {
 		go func() {
 			ticker := time.NewTicker(cfg.SnapshotInterval)
@@ -255,30 +252,24 @@ func main() {
 				case <-ticker.C:
 					slog.Info("Performing global checkpoint...")
 					err1 := persistence.SaveData(mainInMemStore)
-					if err1 != nil {
-						slog.Error("Error during main store snapshot for checkpoint", "error", err1)
-					}
 					err2 := persistence.SaveAllCollectionsFromManager(collectionManager)
-					if err2 != nil {
-						slog.Error("Error during collections snapshot for checkpoint", "error", err2)
+					if err1 != nil || err2 != nil {
+						slog.Error("Error during checkpoint snapshots", "main_store_error", err1, "collections_error", err2)
 					}
 					if err1 == nil && err2 == nil && walInstance != nil {
-						slog.Info("All snapshots successful, proceeding to WAL rotation.")
 						if err := walInstance.Rotate(); err != nil {
 							slog.Error("CRITICAL: Failed to rotate WAL file after checkpoint", "error", err)
 						}
-					} else if walInstance != nil {
-						slog.Warn("Skipping WAL rotation due to snapshot failure.")
 					}
 				case <-shutdownChan:
-					slog.Info("Global Checkpoint Worker received stop signal. Stopping.")
+					slog.Info("Global Checkpoint Worker stopped.")
 					return
 				}
 			}
 		}()
 	}
 
-	// Worker de Limpieza de TTL
+	// TTL Cleanup Worker
 	go func() {
 		ticker := time.NewTicker(cfg.TtlCleanInterval)
 		defer ticker.Stop()
@@ -289,14 +280,14 @@ func main() {
 				mainInMemStore.CleanExpiredItems()
 				collectionManager.CleanExpiredItemsAndSave()
 			case <-shutdownChan:
-				slog.Info("TTL cleaner received stop signal. Stopping.")
+				slog.Info("TTL cleaner stopped.")
 				return
 			}
 		}
 	}()
 
 	if cfg.ColdStorageMonths > 0 {
-		// Worker de Evicción de Datos Fríos
+		// Cold Data Eviction Worker
 		go func() {
 			interval := time.Duration(cfg.HotStorageCleanHours) * time.Hour
 			ticker := time.NewTicker(interval)
@@ -310,13 +301,13 @@ func main() {
 					collectionManager.EvictColdData(evictionThreshold)
 					slog.Info("Eviction Worker finished run.")
 				case <-shutdownChan:
-					slog.Info("Eviction Worker received stop signal. Stopping.")
+					slog.Info("Eviction Worker stopped.")
 					return
 				}
 			}
 		}()
 
-		// Worker de Compactación
+		// Compaction Worker
 		go func() {
 			ticker := time.NewTicker(24 * time.Hour)
 			defer ticker.Stop()
@@ -337,14 +328,14 @@ func main() {
 					}
 					slog.Info("Compaction Worker finished run.")
 				case <-shutdownChan:
-					slog.Info("Compaction Worker received stop signal. Stopping.")
+					slog.Info("Compaction Worker stopped.")
 					return
 				}
 			}
 		}()
 	}
 
-	// Worker de Limpieza de Memoria Inactiva
+	// Idle Memory Cleanup Worker
 	go func() {
 		checkInterval := 2 * time.Minute
 		idleThreshold := 5 * time.Minute
@@ -360,18 +351,18 @@ func main() {
 					debug.FreeOSMemory()
 				}
 			case <-shutdownChan:
-				slog.Info("Idle memory cleaner received stop signal. Stopping.")
+				slog.Info("Idle memory cleaner stopped.")
 				return
 			}
 		}
 	}()
 
-	// --- Apagado Ordenado (Graceful Shutdown) ---
+	// --- Graceful Shutdown ---
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	slog.Info("Termination signal received. Attempting graceful shutdown...")
+	slog.Info("Termination signal received. Starting graceful shutdown...")
 
 	if err := listener.Close(); err != nil {
 		slog.Error("Error closing TCP listener", "error", err)
@@ -382,30 +373,13 @@ func main() {
 	close(shutdownChan)
 	transactionManager.StopGC()
 
-	slog.Info("Waiting for all pending collection persistence tasks to complete...")
-	collectionManager.Wait()
-	slog.Info("All pending collection persistence tasks completed.")
-
-	_, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancelShutdown()
-
-	slog.Info("Saving final data for main store before application exit...")
+	slog.Info("Saving final data before application exit...")
 	if err := persistence.SaveData(mainInMemStore); err != nil {
-		slog.Error("Error saving final data for main store during shutdown", "error", err)
-	} else {
-		slog.Info("Final main store data saved.")
-		if walInstance != nil {
-			slog.Info("Rotating WAL after final successful shutdown save.")
-			if err := walInstance.Rotate(); err != nil {
-				slog.Error("CRITICAL: Failed to rotate WAL during shutdown", "error", err)
-			}
-		}
+		slog.Error("Error saving final main store data during shutdown", "error", err)
+	}
+	if err := persistence.SaveAllCollectionsFromManager(collectionManager); err != nil {
+		slog.Error("Error saving final collections data during shutdown", "error", err)
 	}
 
-	slog.Info("Saving final data for all collections before application exit...")
-	if err := persistence.SaveAllCollectionsFromManager(collectionManager); err != nil {
-		slog.Error("Error saving final data for collections during shutdown", "error", err)
-	} else {
-		slog.Info("Final collection data saved. Application exiting.")
-	}
+	slog.Info("Final data saved. Application exiting.")
 }

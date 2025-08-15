@@ -8,8 +8,8 @@ import (
 	"net"
 )
 
-// handleBegin inicia una nueva transacción para la conexión actual.
-// No es una operación de escritura en el WAL, ya que solo modifica el estado de la conexión.
+// handleBegin starts a new transaction for the current connection.
+// It is not a write operation to the WAL, as it only modifies the connection's state.
 func (h *ConnectionHandler) handleBegin(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID != "" {
 		if conn != nil {
@@ -38,7 +38,7 @@ func (h *ConnectionHandler) handleBegin(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleCommit intenta confirmar la transacción actual. Es una operación de escritura en el WAL.
+// HandleCommit attempts to commit the current transaction. It is a write operation to the WAL.
 func (h *ConnectionHandler) HandleCommit(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID == "" {
 		if conn != nil {
@@ -48,7 +48,7 @@ func (h *ConnectionHandler) HandleCommit(r io.Reader, conn net.Conn) {
 	}
 
 	txID := h.CurrentTransactionID
-	// Limpiar el ID de la transacción de la conexión inmediatamente.
+	// Clear the transaction ID from the connection immediately.
 	h.CurrentTransactionID = ""
 
 	err := h.TransactionManager.Commit(txID)
@@ -67,8 +67,8 @@ func (h *ConnectionHandler) HandleCommit(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleRollback cancela explícitamente la transacción actual.
-// No es una operación de escritura en el WAL.
+// handleRollback explicitly cancels the current transaction.
+// It is not a write operation to the WAL.
 func (h *ConnectionHandler) handleRollback(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID == "" {
 		if conn != nil {
@@ -78,7 +78,7 @@ func (h *ConnectionHandler) handleRollback(r io.Reader, conn net.Conn) {
 	}
 
 	txID := h.CurrentTransactionID
-	h.CurrentTransactionID = "" // Limpiar estado de la conexión
+	h.CurrentTransactionID = "" // Clear connection state
 
 	err := h.TransactionManager.Rollback(txID)
 	if err != nil {

@@ -50,9 +50,8 @@ func NewDefaultConfig() Config {
 // LoadConfig loads configuration with a clear precedence: Environment > Defaults.
 func LoadConfig() Config {
 	cfg := NewDefaultConfig()
-	slog.Info("Loading configuration with default values...")
+	slog.Info("Loading configuration...")
 	applyEnvConfig(&cfg)
-	slog.Info("Configuration check for environment variables complete.")
 	return cfg
 }
 
@@ -92,12 +91,10 @@ func applyEnvConfig(cfg *Config) {
 
 	if rootPassEnv := os.Getenv("MEMORYTOOLS_ROOT_PASSWORD"); rootPassEnv != "" {
 		cfg.DefaultRootPassword = rootPassEnv
-		slog.Info("Overriding DefaultRootPassword from environment")
 	}
 
 	if adminPassEnv := os.Getenv("MEMORYTOOLS_ADMIN_PASSWORD"); adminPassEnv != "" {
 		cfg.DefaultAdminPassword = adminPassEnv
-		slog.Info("Overriding DefaultAdminPassword from environment")
 	}
 
 	if hotHoursEnv := os.Getenv("MEMORYTOOLS_HOT_STORAGE_CLEAN_HOURS"); hotHoursEnv != "" {
@@ -139,7 +136,7 @@ func overrideDuration(envKey string, target *time.Duration) {
 	if envVal != "" {
 		if d, err := time.ParseDuration(envVal); err == nil {
 			*target = d
-			slog.Info("Overriding config from environment", "key", envKey, "value", envVal)
+			slog.Info("Overriding duration from environment", "key", envKey, "value", envVal)
 		} else {
 			slog.Warn("Invalid duration format in env var, using default", "key", envKey, "value", envVal)
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// HandleCollectionItemSet processes the CmdCollectionItemSet command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -33,7 +34,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	wasKeyGenerated := false
 
-	// --- INICIO: LÓGICA DE GENERACIÓN DE ID MODIFICADA ---
+	// --- START: MODIFIED ID GENERATION LOGIC ---
 	if key == "" {
 		if conn == nil {
 			slog.Error("CRITICAL: SET command with empty key received during WAL replay.", "collection", collectionName)
@@ -45,25 +46,24 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		for range maxGenerateRetries {
 			newKey := uuid.New().String()
 
-			// 1. Verificar en memoria (RAM)
+			// 1. Check in-memory (RAM)
 			_, foundInMem := colStore.Get(newKey)
 			if foundInMem {
-				continue // La clave ya existe en memoria, intentar de nuevo.
+				continue // Key already exists in memory, try again.
 			}
 
-			// 2. Verificar en disco (Almacenamiento Frío)
+			// 2. Check on disk (Cold Storage)
 			foundInCold, err := persistence.CheckColdKeyExists(collectionName, newKey)
 			if err != nil {
 				slog.Error("Failed to check key existence in cold storage", "collection", collectionName, "key", newKey, "error", err)
-				// ADVERTENCIA CORREGIDA: Se eliminó el `if conn != nil` redundante.
 				protocol.WriteResponse(conn, protocol.StatusError, "Internal server error during key uniqueness check.", nil)
 				return
 			}
 			if foundInCold {
-				continue // La clave ya existe en disco, intentar de nuevo.
+				continue // Key already exists on disk, try again.
 			}
 
-			// Si no se encontró ni en memoria ni en disco, la clave es única.
+			// If not found in memory or on disk, the key is unique.
 			key = newKey
 			break
 		}
@@ -71,15 +71,14 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		if key == "" {
 			errMessage := "Failed to generate a unique ID after several attempts. This indicates a highly unusual system state or high key collision rate."
 			slog.Error(errMessage, "collection", collectionName)
-			// ADVERTENCIA CORREGIDA: Se eliminó el `if conn != nil` redundante.
 			protocol.WriteResponse(conn, protocol.StatusError, errMessage, nil)
 			return
 		}
 	}
-	// --- FIN: LÓGICA DE GENERACIÓN DE ID MODIFICADA ---
+	// --- END: MODIFIED ID GENERATION LOGIC ---
 
-	// --- INICIO: LÓGICA DE VALIDACIÓN DE ID MODIFICADA ---
-	// Validación de existencia para claves PROPORCIONADAS POR EL CLIENTE en operaciones NO transaccionales.
+	// --- START: MODIFIED ID VALIDATION LOGIC ---
+	// Validation for client-provided keys in non-transactional operations.
 	if conn != nil && !wasKeyGenerated && h.CurrentTransactionID == "" {
 		_, foundInMem := colStore.Get(key)
 		foundInCold, err := persistence.CheckColdKeyExists(collectionName, key)
@@ -90,12 +89,12 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		}
 
 		if foundInMem || foundInCold {
-			slog.Warn("Set item failed because key already exists in RAM or on Disk", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+			slog.Warn("Set item failed because key already exists", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 			protocol.WriteResponse(conn, protocol.StatusError, fmt.Sprintf("ERROR: Key '%s' already exists in collection '%s'. Use 'collection item update' to modify.", key, collectionName), nil)
 			return
 		}
 	}
-	// --- FIN: LÓGICA DE VALIDACIÓN DE ID MODIFICADA ---
+	// --- END: MODIFIED ID VALIDATION LOGIC ---
 
 	if conn != nil {
 		if collectionName == "" || len(value) == 0 {
@@ -124,7 +123,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 	}
 	data[globalconst.ID] = key
 
-	// Lógica transaccional (sin cambios)
+	// Transactional logic
 	if h.CurrentTransactionID != "" {
 		finalValueForTx, err := json.Marshal(data)
 		if err != nil {
@@ -154,7 +153,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 		return
 	}
 
-	// Lógica no transaccional (sin cambios)
+	// Non-transactional logic
 	now := time.Now().UTC().Format(time.RFC3339)
 	data[globalconst.UPDATED_AT] = now
 	data[globalconst.CREATED_AT] = now
@@ -177,7 +176,7 @@ func (h *ConnectionHandler) HandleCollectionItemSet(r io.Reader, conn net.Conn) 
 	}
 }
 
-// handleCollectionItemUpdate procesa el CmdCollectionItemUpdate. Es una operación de escritura.
+// HandleCollectionItemUpdate processes the CmdCollectionItemUpdate command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -210,7 +209,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Con
 		}
 	}
 
-	// Lógica transaccional
+	// Transactional logic
 	if h.CurrentTransactionID != "" {
 		colStore := h.CollectionManager.GetCollection(collectionName)
 		existingValue, found := colStore.Get(key)
@@ -240,14 +239,12 @@ func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Con
 		}
 		finalValue, _ := json.Marshal(existingData)
 
-		// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
 		op := store.WriteOperation{
 			Collection: collectionName,
 			Key:        key,
 			Value:      finalValue,
 			OpType:     store.OpTypeUpdate,
 		}
-		// --- FIN DE LA MODIFICACIÓN ---
 
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 			if conn != nil {
@@ -261,7 +258,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Con
 		return
 	}
 
-	// Lógica no transaccional (hot/cold)
+	// Non-transactional logic (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	if existingValue, found := colStore.Get(key); found {
 		var existingData, patchData map[string]any
@@ -306,7 +303,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdate(r io.Reader, conn net.Con
 		return
 	}
 	if !updated {
-		slog.Warn("Item update failed: key not found in hot or cold storage", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
+		slog.Warn("Item update failed: key not found", "user", h.AuthenticatedUser, "collection", collectionName, "key", key)
 		if conn != nil {
 			protocol.WriteResponse(conn, protocol.StatusNotFound, fmt.Sprintf("NOT FOUND: Key '%s' not found in collection '%s'", key, collectionName), nil)
 		}
@@ -323,7 +320,7 @@ type updateManyPayload struct {
 	Patch map[string]any `json:"patch"`
 }
 
-// handleCollectionItemUpdateMany procesa el CmdCollectionItemUpdateMany. Es una operación de escritura.
+// HandleCollectionItemUpdateMany processes the CmdCollectionItemUpdateMany command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -365,7 +362,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net
 		}
 	}
 
-	// Lógica transaccional
+	// Transactional logic
 	if h.CurrentTransactionID != "" {
 		colStore := h.CollectionManager.GetCollection(collectionName)
 		for _, p := range payloads {
@@ -385,14 +382,12 @@ func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net
 			}
 			finalValue, _ := json.Marshal(existingData)
 
-			// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
 			op := store.WriteOperation{
 				Collection: collectionName,
 				Key:        p.ID,
 				Value:      finalValue,
 				OpType:     store.OpTypeUpdate,
 			}
-			// --- FIN DE LA MODIFICACIÓN ---
 
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				if conn != nil {
@@ -407,7 +402,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net
 		return
 	}
 
-	// Lógica no transaccional (hot/cold)
+	// Non-transactional logic (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var hotPayloads []updateManyPayload
 	var coldPayloads []persistence.ColdUpdatePayload
@@ -474,7 +469,7 @@ func (h *ConnectionHandler) HandleCollectionItemUpdateMany(r io.Reader, conn net
 	}
 }
 
-// handleCollectionItemGet procesa el CmdCollectionItemGet. Es una operación de solo lectura.
+// handleCollectionItemGet processes the CmdCollectionItemGet command. It is a read-only operation.
 func (h *ConnectionHandler) handleCollectionItemGet(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID != "" {
 		protocol.WriteResponse(conn, protocol.StatusError, "ERROR: Read operations like GET are not supported inside a transaction in this version.", nil)
@@ -518,7 +513,7 @@ func (h *ConnectionHandler) handleCollectionItemGet(r io.Reader, conn net.Conn) 
 	}
 }
 
-// handleCollectionItemDelete procesa el CmdCollectionItemDelete. Es una operación de escritura.
+// HandleCollectionItemDelete processes the CmdCollectionItemDelete command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -551,15 +546,13 @@ func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Con
 		}
 	}
 
-	// Lógica transaccional
+	// Transactional logic
 	if h.CurrentTransactionID != "" {
-		// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
 		op := store.WriteOperation{
 			Collection: collectionName,
 			Key:        key,
 			OpType:     store.OpTypeDelete,
 		}
-		// --- FIN DE LA MODIFICACIÓN ---
 
 		if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 			if conn != nil {
@@ -573,7 +566,7 @@ func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Con
 		return
 	}
 
-	// Lógica no transaccional (hot/cold)
+	// Non-transactional logic (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	if _, foundInRam := colStore.Get(key); foundInRam {
 		colStore.Delete(key)
@@ -609,7 +602,7 @@ func (h *ConnectionHandler) HandleCollectionItemDelete(r io.Reader, conn net.Con
 	}
 }
 
-// handleCollectionItemList procesa el CmdCollectionItemList. Es una operación de solo lectura.
+// handleCollectionItemList processes the CmdCollectionItemList command. It is a read-only operation.
 func (h *ConnectionHandler) handleCollectionItemList(r io.Reader, conn net.Conn) {
 	if h.CurrentTransactionID != "" {
 		protocol.WriteResponse(conn, protocol.StatusError, "ERROR: LIST command is not allowed inside a transaction in this version.", nil)
@@ -671,7 +664,7 @@ func (h *ConnectionHandler) handleCollectionItemList(r io.Reader, conn net.Conn)
 	slog.Info("All items listed from collection", "user", h.AuthenticatedUser, "collection", collectionName, "item_count", len(allData))
 }
 
-// handleCollectionItemSetMany procesa el CmdCollectionItemSetMany. Es una operación de escritura.
+// HandleCollectionItemSetMany processes the CmdCollectionItemSetMany command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -696,7 +689,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		return
 	}
 
-	// Comprobaciones de permisos y existencia de la colección (sin cambios)
+	// Permission and collection existence checks (no changes)
 	if conn != nil {
 		if collectionName == "" || len(value) == 0 {
 			protocol.WriteResponse(conn, protocol.StatusBadRequest, "Collection name or value cannot be empty", nil)
@@ -714,13 +707,13 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		}
 	}
 
-	// --- INICIO: LÓGICA DE VALIDACIÓN DE IDs MODIFICADA Y EFICIENTE ---
+	// --- START: MODIFIED AND EFFICIENT ID VALIDATION LOGIC ---
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	recordsToProcess := make([]map[string]any, 0, len(records))
 	duplicateKeys := make([]string, 0)
 	invalidRecordsCount := 0
 
-	// 1. Recolectar todas las claves proporcionadas por el cliente para verificarlas en lote.
+	// 1. Collect all client-provided keys for batch verification.
 	clientProvidedKeys := make([]string, 0, len(records))
 	for _, record := range records {
 		if key, ok := record[globalconst.ID].(string); ok && key != "" {
@@ -728,7 +721,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		}
 	}
 
-	// 2. Verificar todas las claves en disco en una sola pasada.
+	// 2. Check all keys on disk in a single pass.
 	var foundInCold map[string]bool
 	if h.CurrentTransactionID == "" && len(clientProvidedKeys) > 0 {
 		var checkErr error
@@ -742,11 +735,11 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		}
 	}
 
-	// 3. Procesar cada registro con la información de la validación en lote.
+	// 3. Process each record with the batch validation info.
 	for _, record := range records {
 		key, clientProvidedKey := record[globalconst.ID].(string)
 
-		// Caso 1: El cliente no proporciona ID, el servidor lo genera.
+		// Case 1: Client does not provide an ID, server generates one.
 		if !clientProvidedKey || key == "" {
 			if conn == nil {
 				slog.Error("CRITICAL: SET_MANY record with empty key received during WAL replay.", "collection", collectionName)
@@ -754,14 +747,13 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 				continue
 			}
 
-			// La generación de ID individual sigue siendo necesaria aquí, ya que no podemos predecir los UUIDs.
-			// La validación en disco se hace dentro del bucle.
+			// Individual ID generation is still necessary here as we can't pre-generate UUIDs.
 			generatedKey := ""
 			const maxGenerateRetries = 5
 			for i := 0; i < maxGenerateRetries; i++ {
 				newKey := uuid.New().String()
 				_, foundInMem := colStore.Get(newKey)
-				foundInColdGen, _ := persistence.CheckColdKeyExists(collectionName, newKey) // Error se ignora por simplicidad en bucle.
+				foundInColdGen, _ := persistence.CheckColdKeyExists(collectionName, newKey) // Error is ignored for loop simplicity.
 				if !foundInMem && !foundInColdGen {
 					generatedKey = newKey
 					break
@@ -778,7 +770,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 			continue
 		}
 
-		// Caso 2: El cliente proporciona ID. Validamos si ya existe (solo para no-transaccional).
+		// Case 2: Client provides an ID. Validate if it already exists (non-transactional only).
 		if h.CurrentTransactionID == "" {
 			_, existsInMem := colStore.Get(key)
 			_, existsInCold := foundInCold[key]
@@ -789,7 +781,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 				recordsToProcess = append(recordsToProcess, record)
 			}
 		} else {
-			// En una transacción, todos los registros con ID pasan al commit para su validación final.
+			// In a transaction, all records with an ID are passed to the commit for final validation.
 			recordsToProcess = append(recordsToProcess, record)
 		}
 	}
@@ -799,11 +791,10 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		protocol.WriteResponse(conn, protocol.StatusOk, msg, nil)
 		return
 	}
-	// --- FIN DE LA LÓGICA DE GENERACIÓN Y VALIDACIÓN ---
+	// --- END: ID GENERATION AND VALIDATION LOGIC ---
 
-	// Lógica transaccional (sin cambios)
+	// Transactional logic (no changes)
 	if h.CurrentTransactionID != "" {
-		// ... (código existente de la lógica transaccional)
 		for _, record := range recordsToProcess {
 			key := record[globalconst.ID].(string)
 			valBytes, err := json.Marshal(record)
@@ -828,10 +819,10 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 		return
 	}
 
-	// Lógica no transaccional (sin cambios)
+	// Non-transactional logic (no changes)
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, record := range recordsToProcess {
-		// El ID ya está garantizado en el record
+		// ID is already guaranteed in the record
 		record[globalconst.CREATED_AT] = now
 		record[globalconst.UPDATED_AT] = now
 		updatedValue, err := json.Marshal(record)
@@ -853,7 +844,7 @@ func (h *ConnectionHandler) HandleCollectionItemSetMany(r io.Reader, conn net.Co
 	}
 }
 
-// handleCollectionItemDeleteMany procesa el CmdCollectionItemDeleteMany. Es una operación de escritura.
+// HandleCollectionItemDeleteMany processes the CmdCollectionItemDeleteMany command. It is a write operation.
 func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
@@ -886,16 +877,14 @@ func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net
 		}
 	}
 
-	// Lógica transaccional
+	// Transactional logic
 	if h.CurrentTransactionID != "" {
 		for _, key := range keys {
-			// --- MODIFICACIÓN: Usar OpType en lugar de IsDelete ---
 			op := store.WriteOperation{
 				Collection: collectionName,
 				Key:        key,
 				OpType:     store.OpTypeDelete,
 			}
-			// --- FIN DE LA MODIFICACIÓN ---
 
 			if err := h.TransactionManager.RecordWrite(h.CurrentTransactionID, op); err != nil {
 				if conn != nil {
@@ -910,7 +899,7 @@ func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net
 		return
 	}
 
-	// Lógica no transaccional (hot/cold)
+	// Non-transactional logic (hot/cold)
 	colStore := h.CollectionManager.GetCollection(collectionName)
 	var hotKeysToDelete, coldKeysToTombstone []string
 	for _, key := range keys {
@@ -947,7 +936,7 @@ func (h *ConnectionHandler) HandleCollectionItemDeleteMany(r io.Reader, conn net
 	}
 }
 
-// boolToString es un pequeño helper para logs más claros.
+// boolToString is a small helper for clearer logs.
 func boolToString(b bool, trueStr, falseStr string) string {
 	if b {
 		return trueStr

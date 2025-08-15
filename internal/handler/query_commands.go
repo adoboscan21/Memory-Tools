@@ -23,7 +23,6 @@ import (
 // ./internal/handler/query_commands.go
 
 func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
-	// La lectura del comando ahora usa el io.Reader genérico.
 	collectionName, queryJSONBytes, err := protocol.ReadCollectionQueryCommand(r)
 	if err != nil {
 		slog.Error("Failed to read COLLECTION_QUERY command payload", "error", err, "remote_addr", conn.RemoteAddr().String())
@@ -35,7 +34,6 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 		return
 	}
 
-	// La lógica de autorización y comprobación no cambia.
 	if !h.hasPermission(collectionName, globalconst.PermissionRead) {
 		slog.Warn("Unauthorized query attempt",
 			"user", h.AuthenticatedUser,
@@ -51,7 +49,6 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 		return
 	}
 
-	// La lógica del pool de objetos Query no cambia.
 	query := queryPool.Get().(*Query)
 	defer func() {
 		query.Reset()
@@ -70,7 +67,6 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 
 	slog.Debug("Processing collection query", "user", h.AuthenticatedUser, "collection", collectionName, "query", string(queryJSONBytes))
 
-	// La llamada a la lógica de procesamiento y el manejo de la respuesta no cambian.
 	results, err := h.processCollectionQuery(collectionName, query)
 	if err != nil {
 		slog.Error("Error processing collection query",
@@ -102,7 +98,6 @@ func (h *ConnectionHandler) handleCollectionQuery(r io.Reader, conn net.Conn) {
 func (h *ConnectionHandler) processCollectionQuery(collectionName string, query *Query) (any, error) {
 	colStore := h.CollectionManager.GetCollection(collectionName)
 
-	// A "simple query" has no complex operations; it just retrieves data.
 	isSimpleQuery := len(query.Filter) == 0 && len(query.OrderBy) == 0 &&
 		len(query.Aggregations) == 0 && len(query.GroupBy) == 0 &&
 		query.Distinct == "" && len(query.Lookups) == 0 && len(query.Projection) == 0 && !query.Count
@@ -110,7 +105,6 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 	if isSimpleQuery {
 		slog.Debug("Executing simple query fast path with streaming", "collection", collectionName)
 
-		// Pre-allocate slice with a reasonable capacity. It will grow if needed.
 		capacity := 1024
 		if query.Limit != nil && *query.Limit > 0 {
 			capacity = *query.Limit
@@ -118,28 +112,24 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		rawResults := make([]stdjson.RawMessage, 0, capacity)
 
 		var processedCount int = 0
-		limit := -1 // -1 signifies no limit
+		limit := -1
 		if query.Limit != nil {
 			limit = *query.Limit
 		}
 
-		// Use the new, efficient StreamAll method to avoid deep copies and GC pressure.
 		colStore.StreamAll(func(key string, value []byte) bool {
-			// Handle OFFSET: Skip items until the offset is reached
 			if processedCount < query.Offset {
 				processedCount++
-				return true // Continue to the next item
+				return true
 			}
 
-			// Add the item's raw JSON to our results
 			rawResults = append(rawResults, value)
 
-			// Handle LIMIT: Stop streaming once we have enough items
 			if limit != -1 && len(rawResults) >= limit {
-				return false // Stop streaming
+				return false
 			}
 
-			return true // Continue streaming
+			return true
 		})
 
 		slog.Info("Simple query fast path finished", "collection", collectionName, "results_count", len(rawResults))
@@ -158,7 +148,7 @@ func (h *ConnectionHandler) processCollectionQuery(collectionName string, query 
 		itemsData = colStore.GetMany(candidateKeys)
 	} else {
 		slog.Debug("Query optimizer NOT using index for hot data, falling back to full scan", "collection", collectionName)
-		itemsData = colStore.GetAll() // The slow path still uses GetAll
+		itemsData = colStore.GetAll()
 		remainingFilter = query.Filter
 	}
 
@@ -352,39 +342,30 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		for _, cond := range orConditions {
 			condMap, isMap := cond.(map[string]any)
 			if !isMap {
-				// Invalid condition format, this forces a full scan.
 				allConditionsAreIndexable = false
 				break
 			}
 
-			// We recursively call this function on the sub-filter.
-			// This allows nesting of AND inside OR, etc.
 			subKeys, subIndexUsed, _ := h.findCandidateKeysFromFilter(colStore, condMap)
 
 			if !subIndexUsed {
-				// If any part of the OR cannot use an index, the entire OR must be a full scan.
 				allConditionsAreIndexable = false
 				break
 			}
 
-			// Add the keys from the successful index lookup to our union set.
 			for _, key := range subKeys {
 				unionKeys[key] = struct{}{}
 			}
 		}
 
 		if allConditionsAreIndexable && len(orConditions) > 0 {
-			// Success! All conditions in the OR clause were resolved using indexes.
 			finalKeys := make([]string, 0, len(unionKeys))
 			for k := range unionKeys {
 				finalKeys = append(finalKeys, k)
 			}
 			slog.Debug("Query optimizer: using indexes for 'OR' clause", "found_keys", len(finalKeys))
-			// The entire OR filter was resolved, so the remaining filter is empty.
 			return finalKeys, true, make(map[string]any)
 		}
-		// If we fall through, it means at least one part of the OR couldn't use an index.
-		// The function will proceed to the fallback and return `nil, false, filter`.
 	}
 
 	// --- LOGIC FOR COMPOUND FILTERS WITH "AND" ---
@@ -399,12 +380,10 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 				continue
 			}
 
-			// Recursively call to handle nested conditions and use existing logic.
 			subKeys, subIndexUsed, subRemainingFilter := h.findCandidateKeysFromFilter(colStore, condMap)
 
 			if subIndexUsed {
 				keySets = append(keySets, subKeys)
-				// If the sub-filter was not fully resolved, add the remainder to the non-indexed list.
 				if len(subRemainingFilter) > 0 {
 					nonIndexedConditions = append(nonIndexedConditions, subRemainingFilter)
 				}
@@ -414,14 +393,11 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 		}
 
 		if len(keySets) == 0 {
-			// No index was used for any of the 'and' conditions.
 			return nil, false, filter
 		}
 
-		// Intersect the results of all conditions that used an index.
 		candidateKeys := intersectKeys(keySets)
 
-		// Return a new filter containing only the conditions that did not use an index.
 		newFilter := make(map[string]any)
 		if len(nonIndexedConditions) > 0 {
 			newFilter[globalconst.OpAnd] = nonIndexedConditions
@@ -474,12 +450,10 @@ func (h *ConnectionHandler) findCandidateKeysFromFilter(colStore store.DataStore
 
 		if used {
 			slog.Debug("Query optimizer: using index for simple filter", "field", field, "op", op, "found_keys", len(keys))
-			// Since this was the only condition, the remaining filter is empty.
 			return keys, true, make(map[string]any)
 		}
 	}
 
-	// If no index could be used, return the original filter for a full scan.
 	return nil, false, filter
 }
 
@@ -530,7 +504,7 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		return false
 	}
 
-	itemValue, itemValueExists := item[field]
+	itemValue, itemValueExists := getNestedValue(item, field)
 
 	switch op {
 	case globalconst.OpEqual:
@@ -551,10 +525,8 @@ func (h *ConnectionHandler) matchFilter(item map[string]any, filter map[string]a
 		}
 		if sVal, isStr := itemValue.(string); isStr {
 			if pattern, isStrPattern := value.(string); isStrPattern {
-				// Basic LIKE to regex conversion: % -> .*
-				// We also quote meta characters to prevent regex injection.
 				pattern = strings.ReplaceAll(regexp.QuoteMeta(pattern), "%", ".*")
-				matched, err := regexp.MatchString("(?i)^"+pattern+"$", sVal) // (?i) for case-insensitivity
+				matched, err := regexp.MatchString("(?i)^"+pattern+"$", sVal)
 				if err != nil {
 					slog.Warn("Error in LIKE regex pattern", "pattern", pattern, "error", err)
 					return false
@@ -780,27 +752,21 @@ func intersectKeys(keySets [][]string) []string {
 		return []string{}
 	}
 
-	// Use a map for the first key set for O(1) lookups.
-	// To optimize, you could find the smallest key set and start with that.
 	intersectionMap := make(map[string]struct{})
 	for _, key := range keySets[0] {
 		intersectionMap[key] = struct{}{}
 	}
 
-	// Iterate over the other key sets, keeping only the keys present in the map.
 	for i := 1; i < len(keySets); i++ {
 		currentSetMap := make(map[string]struct{})
 		for _, key := range keySets[i] {
-			// If the key exists in our current intersection, we keep it.
 			if _, found := intersectionMap[key]; found {
 				currentSetMap[key] = struct{}{}
 			}
 		}
-		// The new intersection is the result of this step.
 		intersectionMap = currentSetMap
 	}
 
-	// Convert the final map back to a slice.
 	finalKeys := make([]string, 0, len(intersectionMap))
 	for key := range intersectionMap {
 		finalKeys = append(finalKeys, key)
@@ -809,12 +775,12 @@ func intersectKeys(keySets [][]string) []string {
 	return finalKeys
 }
 
+// getNestedValue retrieves a value from a nested map using a dot-separated path.
 func getNestedValue(data map[string]any, path string) (any, bool) {
 	parts := strings.Split(path, ".")
 	var current any = data
 
 	for _, part := range parts {
-		// If the current level is a slice with one element, unwrap it automatically.
 		if currentSlice, ok := current.([]any); ok && len(currentSlice) == 1 {
 			current = currentSlice[0]
 		} else if currentMapSlice, ok := current.([]map[string]any); ok && len(currentMapSlice) == 1 {
@@ -836,7 +802,7 @@ func getNestedValue(data map[string]any, path string) (any, bool) {
 	return current, true
 }
 
-// VERSIÓN CORREGIDA Y SIMPLIFICADA
+// setNestedValue sets a value in a nested map using a dot-separated path.
 func setNestedValue(data map[string]any, path string, value any) {
 	parts := strings.Split(path, ".")
 	currentMap := data
@@ -847,15 +813,12 @@ func setNestedValue(data map[string]any, path string, value any) {
 			return
 		}
 
-		// Si el siguiente nivel no existe, créalo.
 		if _, ok := currentMap[key]; !ok {
 			currentMap[key] = make(map[string]any)
 		}
 
-		// Avanza al siguiente nivel.
 		nextMap, ok := currentMap[key].(map[string]any)
 		if !ok {
-			// Hay un conflicto: ya existe un valor que no es un mapa. No se puede continuar.
 			return
 		}
 		currentMap = nextMap

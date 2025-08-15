@@ -1,5 +1,3 @@
-// cmd/client/handlers.go
-
 package main
 
 import (
@@ -68,6 +66,7 @@ func (c *cli) getCommands() map[string]command {
 	}
 }
 
+// handleBegin handles the "begin" command to start a new transaction.
 func (c *cli) handleBegin(args string) error {
 	if c.inTransaction {
 		return errors.New("a transaction is already in progress")
@@ -95,6 +94,7 @@ func (c *cli) handleBegin(args string) error {
 	return nil
 }
 
+// handleCommit handles the "commit" command to commit a transaction.
 func (c *cli) handleCommit(args string) error {
 	if !c.inTransaction {
 		return errors.New("no transaction is in progress to commit")
@@ -125,6 +125,7 @@ func (c *cli) handleCommit(args string) error {
 	return nil
 }
 
+// handleRollback handles the "rollback" command to abort a transaction.
 func (c *cli) handleRollback(args string) error {
 	if !c.inTransaction {
 		return errors.New("no transaction is in progress to roll back")
@@ -152,6 +153,7 @@ func (c *cli) handleRollback(args string) error {
 	return nil
 }
 
+// handleLogin handles the "login" command to authenticate the user.
 func (c *cli) handleLogin(args string) error {
 	if c.isAuthenticated {
 		return errors.New("you are already logged in")
@@ -186,6 +188,7 @@ func (c *cli) handleLogin(args string) error {
 	return errors.New("authentication failed")
 }
 
+// handleHelp handles the "help" command.
 func (c *cli) handleHelp(args string) error {
 	fmt.Println(colorInfo("\nMemory Tools CLI Help"))
 	fmt.Println("---------------------")
@@ -224,15 +227,18 @@ func (c *cli) handleHelp(args string) error {
 	return nil
 }
 
+// handleExit handles the "exit" command.
 func (c *cli) handleExit(args string) error {
 	return io.EOF
 }
 
+// handleClear handles the "clear" command.
 func (c *cli) handleClear(args string) error {
 	clearScreen()
 	return nil
 }
 
+// handleUserCreate handles the "user create" command.
 func (c *cli) handleUserCreate(args string) error {
 	parts := strings.SplitN(args, " ", 3)
 	if len(parts) < 3 {
@@ -252,6 +258,7 @@ func (c *cli) handleUserCreate(args string) error {
 	return c.readResponse("user create")
 }
 
+// handleUserUpdate handles the "user update" command.
 func (c *cli) handleUserUpdate(args string) error {
 	parts := strings.SplitN(args, " ", 2)
 	if len(parts) < 2 {
@@ -271,6 +278,7 @@ func (c *cli) handleUserUpdate(args string) error {
 	return c.readResponse("user update")
 }
 
+// handleUserDelete handles the "user delete" command.
 func (c *cli) handleUserDelete(args string) error {
 	parts := strings.Fields(args)
 	if len(parts) != 1 {
@@ -282,6 +290,7 @@ func (c *cli) handleUserDelete(args string) error {
 	return c.readResponse("user delete")
 }
 
+// handleChangePassword handles the "update password" command.
 func (c *cli) handleChangePassword(args string) error {
 	parts := strings.Fields(args)
 	if len(parts) != 2 {
@@ -293,6 +302,7 @@ func (c *cli) handleChangePassword(args string) error {
 	return c.readResponse("update password")
 }
 
+// handleBackup handles the "backup" command.
 func (c *cli) handleBackup(args string) error {
 	var cmdBuf bytes.Buffer
 	protocol.WriteBackupCommand(&cmdBuf)
@@ -300,6 +310,7 @@ func (c *cli) handleBackup(args string) error {
 	return c.readResponse("backup")
 }
 
+// handleRestore handles the "restore" command.
 func (c *cli) handleRestore(args string) error {
 	parts := strings.Fields(args)
 	if len(parts) != 1 {
@@ -311,6 +322,7 @@ func (c *cli) handleRestore(args string) error {
 	return c.readResponse("restore")
 }
 
+// handleMainSet handles the "set" command for the main store.
 func (c *cli) handleMainSet(args string) error {
 	parts := strings.SplitN(args, " ", 2)
 	if len(parts) < 2 {
@@ -338,6 +350,7 @@ func (c *cli) handleMainSet(args string) error {
 	return c.readResponse("set")
 }
 
+// handleMainGet handles the "get" command for the main store.
 func (c *cli) handleMainGet(args string) error {
 	parts := strings.Fields(args)
 	if len(parts) != 1 {
@@ -349,6 +362,7 @@ func (c *cli) handleMainGet(args string) error {
 	return c.readResponse("get")
 }
 
+// handleCollectionCreate handles the "collection create" command.
 func (c *cli) handleCollectionCreate(args string) error {
 	parts := strings.Fields(args)
 	if len(parts) != 1 {
@@ -360,6 +374,7 @@ func (c *cli) handleCollectionCreate(args string) error {
 	return c.readResponse("collection create")
 }
 
+// handleCollectionDelete handles the "collection delete" command.
 func (c *cli) handleCollectionDelete(args string) error {
 	collName, _, err := c.resolveCollectionName(args, "collection delete")
 	if err != nil {
@@ -380,6 +395,7 @@ func (c *cli) handleCollectionDelete(args string) error {
 	return c.readResponse("collection delete")
 }
 
+// handleCollectionList handles the "collection list" command.
 func (c *cli) handleCollectionList(args string) error {
 	var cmdBuf bytes.Buffer
 	protocol.WriteCollectionListCommand(&cmdBuf)
@@ -387,6 +403,7 @@ func (c *cli) handleCollectionList(args string) error {
 	return c.readResponse("collection list")
 }
 
+// handleIndexCreate handles the "collection index create" command.
 func (c *cli) handleIndexCreate(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection index create")
 	if err != nil {
@@ -402,6 +419,7 @@ func (c *cli) handleIndexCreate(args string) error {
 	return c.readResponse("collection index create")
 }
 
+// handleIndexDelete handles the "collection index delete" command.
 func (c *cli) handleIndexDelete(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection index delete")
 	if err != nil {
@@ -417,6 +435,7 @@ func (c *cli) handleIndexDelete(args string) error {
 	return c.readResponse("collection index delete")
 }
 
+// handleIndexList handles the "collection index list" command.
 func (c *cli) handleIndexList(args string) error {
 	collName, _, err := c.resolveCollectionName(args, "collection index list")
 	if err != nil {
@@ -428,6 +447,7 @@ func (c *cli) handleIndexList(args string) error {
 	return c.readResponse("collection index list")
 }
 
+// handleItemSet handles the "collection item set" command.
 func (c *cli) handleItemSet(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item set")
 	if err != nil {
@@ -439,15 +459,13 @@ func (c *cli) handleItemSet(args string) error {
 		return errors.New("usage: collection item set <coll> [<key>] <value_json|path> [ttl_seconds]")
 	}
 
-	// --- INICIO DE LA LÓGICA MODIFICADA PARA DELEGAR LA CREACIÓN DE ID ---
 	var key, jsonArg string
 	var ttl time.Duration = 0
 
-	// Intenta parsear el último argumento como un entero para el TTL.
 	if len(parts) > 1 {
 		if ttlSeconds, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
 			ttl = time.Duration(ttlSeconds) * time.Second
-			parts = parts[:len(parts)-1] // Elimina el TTL para seguir procesando.
+			parts = parts[:len(parts)-1]
 		}
 	}
 
@@ -490,6 +508,7 @@ func (c *cli) handleItemSet(args string) error {
 	return c.readResponse("collection item set")
 }
 
+// handleItemGet handles the "collection item get" command.
 func (c *cli) handleItemGet(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item get")
 	if err != nil {
@@ -505,6 +524,7 @@ func (c *cli) handleItemGet(args string) error {
 	return c.readResponse("collection item get")
 }
 
+// handleItemDelete handles the "collection item delete" command.
 func (c *cli) handleItemDelete(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item delete")
 	if err != nil {
@@ -520,6 +540,7 @@ func (c *cli) handleItemDelete(args string) error {
 	return c.readResponse("collection item delete")
 }
 
+// handleItemList handles the "collection item list" command.
 func (c *cli) handleItemList(args string) error {
 	collName, _, err := c.resolveCollectionName(args, "collection item list")
 	if err != nil {
@@ -531,6 +552,7 @@ func (c *cli) handleItemList(args string) error {
 	return c.readResponse("collection item list")
 }
 
+// handleItemUpdate handles the "collection item update" command.
 func (c *cli) handleItemUpdate(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item update")
 	if err != nil {
@@ -553,6 +575,7 @@ func (c *cli) handleItemUpdate(args string) error {
 	return c.readResponse("collection item update")
 }
 
+// handleQuery handles the "collection query" command.
 func (c *cli) handleQuery(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection query")
 	if err != nil {
@@ -573,6 +596,7 @@ func (c *cli) handleQuery(args string) error {
 	return c.readResponse("collection query")
 }
 
+// handleItemSetMany handles the "collection item set many" command.
 func (c *cli) handleItemSetMany(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item set many")
 	if err != nil {
@@ -593,6 +617,7 @@ func (c *cli) handleItemSetMany(args string) error {
 	return c.readResponse("collection item set many")
 }
 
+// handleItemUpdateMany handles the "collection item update many" command.
 func (c *cli) handleItemUpdateMany(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item update many")
 	if err != nil {
@@ -613,6 +638,7 @@ func (c *cli) handleItemUpdateMany(args string) error {
 	return c.readResponse("collection item update many")
 }
 
+// handleItemDeleteMany handles the "collection item delete many" command.
 func (c *cli) handleItemDeleteMany(args string) error {
 	collName, remainingArgs, err := c.resolveCollectionName(args, "collection item delete many")
 	if err != nil {

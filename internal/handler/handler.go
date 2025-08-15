@@ -21,6 +21,7 @@ type ActivityUpdater interface {
 	UpdateActivity()
 }
 
+// ConnectionHandler manages a single client connection, including state like authentication and transactions.
 type ConnectionHandler struct {
 	Wal                  *wal.WAL
 	MainStore            store.DataStore
@@ -44,6 +45,7 @@ var connectionHandlerPool = sync.Pool{
 	},
 }
 
+// Reset clears the handler's state for reuse from the pool.
 func (h *ConnectionHandler) Reset() {
 	h.Wal = nil
 	h.MainStore = nil
@@ -59,6 +61,7 @@ func (h *ConnectionHandler) Reset() {
 	h.CurrentTransactionID = ""
 }
 
+// GetConnectionHandlerFromPool retrieves a handler from the pool and initializes it.
 func GetConnectionHandlerFromPool(
 	wal *wal.WAL,
 	mainStore store.DataStore,
@@ -90,6 +93,7 @@ func GetConnectionHandlerFromPool(
 	return h
 }
 
+// PutConnectionHandlerToPool returns a handler to the pool after use.
 func PutConnectionHandlerToPool(h *ConnectionHandler) {
 	if h.CurrentTransactionID != "" {
 		slog.Warn("Connection closed mid-transaction, rolling back.", "txID", h.CurrentTransactionID)
@@ -99,6 +103,7 @@ func PutConnectionHandlerToPool(h *ConnectionHandler) {
 	connectionHandlerPool.Put(h)
 }
 
+// isWriteCommand checks if a command type modifies data.
 func isWriteCommand(cmdType protocol.CommandType) bool {
 	switch cmdType {
 	case
@@ -125,6 +130,7 @@ func isWriteCommand(cmdType protocol.CommandType) bool {
 	}
 }
 
+// HandleConnection is the main loop for processing commands from a single connection.
 func (h *ConnectionHandler) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	slog.Info("New client connected", "remote_addr", conn.RemoteAddr().String(), "is_localhost", h.IsLocalhostConn)

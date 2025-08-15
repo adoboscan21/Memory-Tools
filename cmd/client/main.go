@@ -23,7 +23,7 @@ func main() {
 	}
 
 	if !strings.Contains(addr, ":") {
-		log.Fatal(colorErr("Error: La dirección del servidor debe tener el formato 'host:puerto'. Proporcionado: ", addr))
+		log.Fatal(colorErr("Error: The server address must be in the format 'host:port'. Provided: ", addr))
 	}
 
 	// TLS Connection Configuration

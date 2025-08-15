@@ -412,18 +412,17 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 	activeMap := make(map[string]bool)
 	var finalErr error
 
-	// 1. Guardar todas las colecciones que están actualmente activas en memoria.
+	// 1. Save all collections that are currently active in memory.
 	for _, colName := range activeCollections {
 		activeMap[colName] = true
 		colStore := cm.GetCollection(colName)
 		if err := persister.SaveCollectionData(colName, colStore); err != nil {
 			slog.Error("Error saving collection during shutdown/checkpoint", "collection", colName, "error", err)
-			// Guardamos el error pero continuamos para intentar guardar/limpiar el resto.
 			finalErr = err
 		}
 	}
 
-	// 2. Limpiar archivos de colecciones que ya no están activas (huérfanos).
+	// 2. Clean up files of collections that are no longer active (orphaned).
 	slog.Debug("Checking for orphaned collection files to clean up...")
 	existingFiles, err := ListCollectionFiles()
 	if err != nil {
@@ -434,7 +433,6 @@ func SaveAllCollectionsFromManager(cm *store.CollectionManager) error {
 	deletedCount := 0
 	for _, fileName := range existingFiles {
 		if _, isActive := activeMap[fileName]; !isActive {
-			// Este archivo existe en disco pero no en la memoria del manager, debe ser eliminado.
 			if err := persister.DeleteCollectionFile(fileName); err != nil {
 				slog.Warn("Failed to remove orphaned collection file", "collection", fileName, "error", err)
 				finalErr = err

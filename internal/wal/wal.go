@@ -1,4 +1,3 @@
-// internal/wal/wal.go
 package wal
 
 import (
@@ -12,13 +11,13 @@ import (
 	"sync"
 )
 
-// WalEntry representa una única operación registrada en el log.
+// WalEntry represents a single operation recorded in the log.
 type WalEntry struct {
 	CommandType protocol.CommandType
 	Payload     []byte
 }
 
-// WAL (Write-Ahead Log) gestiona la escritura y lectura del log de durabilidad.
+// WAL (Write-Ahead Log) manages the writing and reading of the durability log.
 type WAL struct {
 	file   *os.File
 	writer *bufio.Writer
@@ -26,7 +25,7 @@ type WAL struct {
 	path   string
 }
 
-// New crea e inicializa una nueva instancia del WAL en la ruta especificada.
+// New creates and initializes a new WAL instance at the specified path.
 func New(path string) (*WAL, error) {
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -40,59 +39,52 @@ func New(path string) (*WAL, error) {
 	}, nil
 }
 
-// Write escribe una entrada de log al archivo de forma síncrona.
-// Esta es la operación crítica que garantiza la durabilidad.
+// Write writes a log entry to the file synchronously.
+// This is the critical operation that ensures durability.
 func (w *WAL) Write(entry WalEntry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	payloadLen := len(entry.Payload)
-	// Formato: [Longitud Total (4 bytes)] [Tipo de Comando (1 byte)] [Payload]
+	// Format: [Total Length (4 bytes)] [Command Type (1 byte)] [Payload]
 	totalLen := 1 + payloadLen
 
-	// Escribimos la longitud total de la entrada (sin incluir estos 4 bytes).
 	if err := binary.Write(w.writer, binary.LittleEndian, uint32(totalLen)); err != nil {
 		return fmt.Errorf("failed to write WAL entry length: %w", err)
 	}
 
-	// Escribimos el tipo de comando.
 	if err := w.writer.WriteByte(byte(entry.CommandType)); err != nil {
 		return fmt.Errorf("failed to write WAL command type: %w", err)
 	}
 
-	// Escribimos el payload.
 	if _, err := w.writer.Write(entry.Payload); err != nil {
 		return fmt.Errorf("failed to write WAL payload: %w", err)
 	}
 
-	// Flush fuerza la escritura desde el buffer al sistema operativo.
 	if err := w.writer.Flush(); err != nil {
 		return fmt.Errorf("failed to flush WAL writer: %w", err)
 	}
 
-	// Sync garantiza que los datos se escriban físicamente en el disco.
-	// ¡Este es el paso que nos da la durabilidad!
 	return w.file.Sync()
 }
 
-// Close cierra el archivo del WAL de forma segura.
+// Close closes the WAL file safely.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if err := w.writer.Flush(); err != nil {
-		w.file.Close() // Intentamos cerrar incluso si el flush falla.
+		w.file.Close()
 		return fmt.Errorf("failed to flush WAL on close: %w", err)
 	}
 	return w.file.Close()
 }
 
-// Replay lee todas las entradas del archivo WAL y las envía a un canal.
-// Esta función se usa durante el arranque para recuperar el estado.
+// Replay reads all entries from the WAL file and sends them to a channel.
+// This function is used during startup to recover state.
 func Replay(path string) (<-chan WalEntry, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		// Si el archivo no existe, no hay nada que reproducir, lo cual es normal.
 		if os.IsNotExist(err) {
 			slog.Info("WAL file not found, skipping replay.", "path", path)
 			closeChan := make(chan WalEntry)
@@ -102,7 +94,7 @@ func Replay(path string) (<-chan WalEntry, error) {
 		return nil, fmt.Errorf("failed to open WAL file for replay: %w", err)
 	}
 
-	entriesChan := make(chan WalEntry, 100) // Un buffer para no bloquear.
+	entriesChan := make(chan WalEntry, 100)
 
 	go func() {
 		defer file.Close()
@@ -115,10 +107,9 @@ func Replay(path string) (<-chan WalEntry, error) {
 				if err != io.EOF {
 					slog.Error("Failed to read WAL entry length during replay", "error", err)
 				}
-				break // Fin del archivo o error.
+				break
 			}
 
-			// Leemos la entrada completa en un buffer.
 			entryData := make([]byte, totalLen)
 			if _, err := io.ReadFull(reader, entryData); err != nil {
 				slog.Error("Failed to read full WAL entry during replay", "error", err)
@@ -137,36 +128,35 @@ func Replay(path string) (<-chan WalEntry, error) {
 	return entriesChan, nil
 }
 
+// Path returns the file path of the WAL.
 func (w *WAL) Path() string {
 	return w.path
 }
 
+// Rotate closes the current WAL file, deletes it, and opens a new one in its place.
 func (w *WAL) Rotate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Asegurarse de que todo lo que está en el buffer se escriba antes de cerrar.
 	if err := w.writer.Flush(); err != nil {
-		w.file.Close() // Intentar cerrar de todos modos
+		w.file.Close()
 		return fmt.Errorf("failed to flush WAL before rotation: %w", err)
 	}
 	if err := w.file.Close(); err != nil {
 		return fmt.Errorf("failed to close current WAL file for rotation: %w", err)
 	}
 
-	// Eliminar el archivo de log antiguo.
 	if err := os.Remove(w.path); err != nil {
 		return fmt.Errorf("failed to remove old WAL file: %w", err)
 	}
 
-	// Abrir un nuevo archivo de log en la misma ruta.
 	file, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open new WAL file after rotation: %w", err)
 	}
 
 	w.file = file
-	w.writer.Reset(file) // Apuntar el writer al nuevo archivo.
+	w.writer.Reset(file)
 
 	slog.Info("WAL file rotated successfully.")
 	return nil

@@ -1,5 +1,3 @@
-// cmd/client/utils.go
-
 package main
 
 import (
@@ -33,9 +31,7 @@ var (
 )
 
 // getCommandAndRawArgs parses user input into a command and its arguments.
-// It is now a method of *cli to access the dynamic command list.
 func (c *cli) getCommandAndRawArgs(input string) (string, string) {
-	// Use the dynamically generated list of multi-word commands
 	for _, mwCmd := range c.multiWordCommands {
 		if strings.HasPrefix(input, mwCmd+" ") || input == mwCmd {
 			return mwCmd, strings.TrimSpace(input[len(mwCmd):])
@@ -82,7 +78,7 @@ func getStatusString(s protocol.ResponseStatus) string {
 	}
 }
 
-// getJSONPayload is the method the compiler was missing.
+// getJSONPayload reads JSON data either directly from the input string or from a file.
 func (c *cli) getJSONPayload(payload string) ([]byte, error) {
 	if strings.HasSuffix(payload, ".json") {
 		filePath := filepath.Join("json", payload)
@@ -91,7 +87,7 @@ func (c *cli) getJSONPayload(payload string) ([]byte, error) {
 	return []byte(payload), nil
 }
 
-// resolveCollectionName is the new simplified version that requires an explicit collection name.
+// resolveCollectionName parses the command arguments to extract the collection name.
 func (c *cli) resolveCollectionName(args string, commandName string) (string, string, error) {
 	args = strings.TrimSpace(args)
 	if args == "" {
@@ -110,6 +106,7 @@ func (c *cli) resolveCollectionName(args string, commandName string) (string, st
 	return collectionName, remainingArgs, nil
 }
 
+// readResponse reads a full response from the server and prints it in a formatted way.
 func (c *cli) readResponse(lastCmd string) error {
 	status, msg, dataBytes, err := c.readRawResponse()
 	if err != nil {
@@ -142,7 +139,6 @@ func (c *cli) readResponse(lastCmd string) error {
 		if err := stdjson.Indent(&prettyJSON, dataBytes, "  ", "  "); err == nil {
 			fmt.Printf("  %s\n%s\n", colorInfo("Data:"), prettyJSON.String())
 		} else {
-			// Check for Base64 encoded data, common in 'get' commands for binary/JSON values
 			if s, ok := tryDecodeBase64(dataBytes); ok {
 				fmt.Printf("  %s %s\n", colorInfo("Data (Decoded):"), s)
 			} else {
@@ -160,12 +156,10 @@ func tryDecodeBase64(data []byte) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	// Attempt to pretty print if it's JSON
 	var prettyJSON bytes.Buffer
 	if stdjson.Indent(&prettyJSON, decoded, "  ", "  ") == nil {
 		return prettyJSON.String(), true
 	}
-	// Otherwise return the decoded string
 	return string(decoded), true
 }
 

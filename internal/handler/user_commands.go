@@ -9,14 +9,14 @@ import (
 	"net"
 )
 
-// handleUserCreate procesa el comando CmdUserCreate. Es una operación de escritura.
+// HandleUserCreate processes the CmdUserCreate command. It is a write operation.
 func (h *ConnectionHandler) HandleUserCreate(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
 
-	// La autorización se salta durante la recuperación del WAL (conn == nil)
+	// Authorization is skipped during WAL recovery (conn is nil)
 	if conn != nil {
 		if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 			slog.Warn("Unauthorized user creation attempt",
@@ -96,14 +96,14 @@ func (h *ConnectionHandler) HandleUserCreate(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleUserUpdate procesa el comando CmdUserUpdate. Es una operación de escritura.
+// HandleUserUpdate processes the CmdUserUpdate command. It is a write operation.
 func (h *ConnectionHandler) HandleUserUpdate(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
 
-	// La autorización se salta durante la recuperación del WAL (conn == nil)
+	// Authorization is skipped during WAL recovery (conn is nil)
 	if conn != nil {
 		if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 			slog.Warn("Unauthorized user update attempt",
@@ -167,14 +167,14 @@ func (h *ConnectionHandler) HandleUserUpdate(r io.Reader, conn net.Conn) {
 	}
 }
 
-// handleUserDelete procesa el comando CmdUserDelete. Es una operación de escritura.
+// HandleUserDelete processes the CmdUserDelete command. It is a write operation.
 func (h *ConnectionHandler) HandleUserDelete(r io.Reader, conn net.Conn) {
 	remoteAddr := "recovery"
 	if conn != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
 
-	// La autorización se salta durante la recuperación del WAL (conn == nil)
+	// Authorization is skipped during WAL recovery (conn is nil)
 	if conn != nil {
 		if !h.hasPermission(globalconst.SystemCollectionName, globalconst.PermissionWrite) {
 			slog.Warn("Unauthorized user delete attempt",

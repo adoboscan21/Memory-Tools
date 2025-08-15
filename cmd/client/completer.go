@@ -1,5 +1,3 @@
-// cmd/client/completer.go
-
 package main
 
 import (
@@ -12,6 +10,7 @@ import (
 	"github.com/chzyer/readline"
 )
 
+// getCompleter returns the readline.AutoCompleter based on the user's authentication status.
 func (c *cli) getCompleter() readline.AutoCompleter {
 	if !c.isAuthenticated {
 		return readline.NewPrefixCompleter(
@@ -63,7 +62,7 @@ func (c *cli) getCompleter() readline.AutoCompleter {
 	)
 }
 
-// The fetchCollectionNames function needs no changes to its internal logic.
+// fetchCollectionNames dynamically fetches a list of collection names from the server for autocompletion.
 func (c *cli) fetchCollectionNames(line string) []string {
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
@@ -99,7 +98,6 @@ func (c *cli) fetchCollectionNames(line string) []string {
 		}
 
 		var prefix string
-
 		if strings.HasSuffix(line, " ") {
 			prefix = ""
 		} else {
@@ -121,12 +119,12 @@ func (c *cli) fetchCollectionNames(line string) []string {
 	return nil
 }
 
+// fetchJSONFileNames dynamically fetches a list of JSON file names from the 'json' directory.
 func (c *cli) fetchJSONFileNames(line string) []string {
 	const jsonDir = "json"
 	files, err := os.ReadDir(jsonDir)
 
 	if err != nil {
-
 		return nil
 	}
 

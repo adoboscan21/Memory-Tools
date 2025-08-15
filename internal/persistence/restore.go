@@ -21,12 +21,10 @@ func PerformRestore(backupName string, mainStore store.DataStore, colManager *st
 
 	slog.Warn("--- STARTING RESTORE ---", "backup_name", backupName)
 
-	// Restore the Main Store
 	if err := restoreMainStore(backupPath, mainStore); err != nil {
 		return fmt.Errorf("failed to restore main store: %w", err)
 	}
 
-	// Restore the Collections
 	if err := restoreCollections(backupPath, colManager); err != nil {
 		return fmt.Errorf("failed to restore collections: %w", err)
 	}
@@ -44,7 +42,7 @@ func restoreMainStore(backupPath string, s store.DataStore) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			slog.Warn("Main store backup file not found, skipping.", "path", filePath)
-			s.LoadData(make(map[string][]byte)) // Load empty data
+			s.LoadData(make(map[string][]byte))
 			return nil
 		}
 		return fmt.Errorf("failed to open main backup file '%s': %w", filePath, err)
@@ -100,7 +98,7 @@ func restoreCollections(backupPath string, cm *store.CollectionManager) error {
 
 		if err := loadCollectionDataFromBackup(filePath, colStore); err != nil {
 			slog.Warn("Failed to restore collection, skipping.", "collection", colName, "error", err)
-			cm.DeleteCollection(colName) // Delete the partially created collection
+			cm.DeleteCollection(colName)
 			continue
 		}
 	}

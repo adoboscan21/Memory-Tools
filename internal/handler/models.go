@@ -2,6 +2,7 @@ package handler
 
 import "sync"
 
+// LookupClause defines the structure for a collection join operation.
 type LookupClause struct {
 	FromCollection string `json:"from"`         // The collection to join with
 	LocalField     string `json:"localField"`   // Field from the input documents
@@ -9,7 +10,7 @@ type LookupClause struct {
 	As             string `json:"as"`           // The new array field to add to the input documents
 }
 
-// UserInfo structure
+// UserInfo structure holds user details and permissions.
 type UserInfo struct {
 	Username     string            `json:"username"`
 	PasswordHash string            `json:"password_hash"`
@@ -45,7 +46,7 @@ type Aggregation struct {
 	Field string `json:"field"` // Field to aggregate on, "*" for count
 }
 
-//Reset limpia la estructura Query para su reutilización.
+// Reset clears the Query structure for reuse.
 func (q *Query) Reset() {
 	q.Filter = nil
 	q.OrderBy = nil
@@ -60,7 +61,7 @@ func (q *Query) Reset() {
 	q.Lookups = nil
 }
 
-// NUEVO POOL: Pool para objetos Query.
+// A pool for Query objects to reduce memory allocation overhead.
 var queryPool = sync.Pool{
 	New: func() any {
 		return new(Query)
